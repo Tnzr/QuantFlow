@@ -28,9 +28,31 @@ def load_chain(ticker: str) -> pd.DataFrame:
         calls = t.option_chain(ex).calls
         puts = t.option_chain(ex).puts
         for _, r in calls.iterrows():
-            rows.append(Contract(ticker, ex, float(r["strike"]), "C", _safe(r, "lastPrice"), _safe(r, "bid"), _safe(r, "ask"), int(_safe(r, "volume", 0)), int(_safe(r, "openInterest", 0)), float(_safe(r, "impliedVolatility"))))
+            try:
+                rows.append(Contract(
+                    ticker, ex, float(r["strike"]), "C",
+                    _safe(r, "lastPrice"),
+                    _safe(r, "bid"),
+                    _safe(r, "ask"),
+                    int(_safe(r, "volume", 0) or 0),
+                    int(_safe(r, "openInterest", 0) or 0),
+                    float(_safe(r, "impliedVolatility") or 0.0)
+                ))
+            except Exception:
+                continue
         for _, r in puts.iterrows():
-            rows.append(Contract(ticker, ex, float(r["strike"]), "P", _safe(r, "lastPrice"), _safe(r, "bid"), _safe(r, "ask"), int(_safe(r, "volume", 0)), int(_safe(r, "openInterest", 0)), float(_safe(r, "impliedVolatility"))))
+            try:
+                rows.append(Contract(
+                    ticker, ex, float(r["strike"]), "P",
+                    _safe(r, "lastPrice"),
+                    _safe(r, "bid"),
+                    _safe(r, "ask"),
+                    int(_safe(r, "volume", 0) or 0),
+                    int(_safe(r, "openInterest", 0) or 0),
+                    float(_safe(r, "impliedVolatility") or 0.0)
+                ))
+            except Exception:
+                continue
     df = pd.DataFrame([c.__dict__ for c in rows])
     return df
 

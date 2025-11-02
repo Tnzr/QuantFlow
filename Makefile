@@ -3,7 +3,7 @@ ENV_NAME := quantflow
 PY := conda run -n $(ENV_NAME) --no-capture-output python
 PIP := conda run -n $(ENV_NAME) --no-capture-output pip
 
-.PHONY: help env-create env-update env-remove kernel db-init scan rec options daily backtest portfolio lab app clean docker-build docker-run docker-cli
+.PHONY: help env-create env-update env-remove kernel db-init scan rec options daily backtest portfolio lab app clean docker-build docker-run docker-cli setup
 
 help:
 	@echo "Targets:"
@@ -23,15 +23,20 @@ help:
 	@echo "  docker-build Build Docker image"
 	@echo "  docker-run   Run JupyterLab in Docker"
 	@echo "  docker-cli   Run a one-off CLI command in Docker (ex: make docker-cli CMD='python -m quantflow.cli rec')"
+	@echo "  setup        Run env-create, db-init, and docker-build for one-stop setup"
 
 env-create:
 	conda env create -f environment.yml || mamba env create -f environment.yml
+	conda run -n $(ENV_NAME) --no-capture-output pip install -e .
 
 env-update:
 	conda env update -f environment.yml --prune || mamba env update -f environment.yml --prune
 
 env-remove:
 	conda env remove -n $(ENV_NAME) || true
+
+env-activate:
+	@echo "conda activate $(ENV_NAME)"
 
 kernel:
 	$(PY) -m ipykernel install --user --name $(ENV_NAME) --display-name "Python ($(ENV_NAME))"
@@ -71,7 +76,7 @@ lab:
 	conda run -n $(ENV_NAME) --no-capture-output jupyter lab --NotebookApp.token='' --NotebookApp.password='' --ip=0.0.0.0 --port=8888 --no-browser
 
 app:
-	conda run -n $(ENV_NAME) --no-capture-output streamlit run app/streamlit_app.py
+	conda run -n $(ENV_NAME) streamlit run app/streamlit_app.py
 
 clean:
 	rm -f quantflow.db
@@ -88,3 +93,6 @@ docker-run:
 
 docker-cli:
 	docker run --rm -it -v "$$PWD":/app $(IMAGE) bash -lc "$(CMD)"
+
+setup: env-create db-init docker-build
+	@echo "Environment, DB schema, and Docker image ready."

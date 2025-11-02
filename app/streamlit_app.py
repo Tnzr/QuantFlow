@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import os
+import concurrent.futures
 
 from quantflow.data.queries import latest_universe, latest_recommendations_per_ticker
 from quantflow.data.universe import HIGH_INTEREST
@@ -23,7 +24,10 @@ with st.sidebar.expander("Help"):
     st.write("Run 'make daily' or use Run Pipeline page to populate the DB, then use this dashboard.")
     st.write("Options Ideas uses budget, horizon, and delta-aware heuristics.")
 
-DB = st.sidebar.text_input("DB URL", value="sqlite:///quantflow.db")
+os.makedirs(os.path.join(os.path.dirname(__file__), '../data/database'), exist_ok=True)
+def_db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../data/database/quantflow.db'))
+DB = st.sidebar.text_input("DB URL", value=f"sqlite:///{def_db_path}")
+
 page = st.sidebar.radio(
     "View",
     [
@@ -105,13 +109,24 @@ elif page == "Options Ideas":
 elif page == "Run Pipeline":
     st.subheader("Run screener and recommender")
     st.write("This runs Finviz presets and saves snapshots, then generates recommendations for a default universe.")
+    # User option: parallel or sequential
+    parallel = st.checkbox("Run screeners in parallel (faster)", value=True)
+    max_workers = st.slider("Parallel workers", min_value=1, max_value=8, value=4)
     if st.button("Run Scan Presets"):
         with st.spinner("Running Finviz screeners and saving snapshots..."):
             try:
                 create_schema(DB)
-                for name in PRESETS.keys():
-                    df = run_screener(name)
-                    save_finviz_snapshot(df, name, db_path=DB)
+                preset_names = list(PRESETS.keys())
+                if parallel:
+                    from quantflow.data.finviz_client import run_screeners_parallel
+                    results = run_screeners_parallel(preset_names, max_workers=max_workers)
+                    for name, df in results.items():
+                        if df is not None:
+                            save_finviz_snapshot(df, name, db_path=DB)
+                else:
+                    for name in preset_names:
+                        df = run_screener(name)
+                        save_finviz_snapshot(df, name, db_path=DB)
                 st.success("Scans saved.")
             except Exception as e:
                 st.error(f"Scan failed: {e}")
@@ -184,7 +199,7 @@ elif page == "Charts":
     if st.button("Load charts"):
         with st.spinner("Loading OHLCV and computing indicators..."):
             try:
-                df = fetch_ohlcv(t, period="2y")
+                df = fetch_ohlcv(t, period="6m")
                 df = compute_indicators(df)
                 fig = px.line(df.reset_index(), x="date", y=["adj close","sma20","sma50","sma200"], title=f"{t} Price & SMAs")
                 st.plotly_chart(fig, use_container_width=True)

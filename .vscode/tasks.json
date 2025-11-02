@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "Create DB schema for ticker_snapshots",
+			"command": "python -c 'from quantflow.data.persistence import create_schema; create_schema()'",
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

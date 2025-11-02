@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: quantflow
+Version: 0.1.0
+Summary: QuantFlow: Options screening, rule-based recommendations, and portfolio analytics platform.
+Author: Bryan Garcia Rodriguez
+Author-email: bryan.garcia.b9r@gmail.com
+Requires-Python: >=3.11
+Dynamic: author
+Dynamic: author-email
+Dynamic: requires-python
+Dynamic: summary
