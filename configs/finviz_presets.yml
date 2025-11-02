@@ -1,0 +1,73 @@
+# Finviz screener presets configuration
+# Keys map to preset names; values are arrays of Finviz filter codes used by finvizfinance
+
+weekly_momo:
+  - sh_avgvol_o300
+  - sh_opt_option
+  - ta_perf_1w10o
+  - ta_sma50_pa
+  - ta_sma200_pa
+  - sh_price_o5
+
+weekly_bear:
+  - sh_avgvol_o300
+  - sh_opt_option
+  - ta_perf_1w-10u
+  - ta_sma50_pb
+  - sh_price_o5
+
+monthly_swing:
+  - sh_avgvol_o500
+  - sh_opt_option
+  - ta_perf_4w20o
+  - ta_sma50_pa
+  - ta_sma200_pa
+  - ta_beta_1to2
+  - sh_price_o5
+
+monthly_bear:
+  - sh_avgvol_o500
+  - sh_opt_option
+  - ta_perf_4w-10u
+  - ta_sma50_pb
+  - ta_beta_1to2
+  - sh_price_o5
+
+midterm_trenders:
+  - sh_avgvol_o500
+  - sh_opt_option
+  - ta_perf_half_20o
+  - ta_sma200_pa
+  - ta_beta_1to2
+  - sh_price_o5
+
+midterm_bear:
+  - sh_avgvol_o500
+  - sh_opt_option
+  - ta_perf_half-10u
+  - ta_sma200_pb
+  - ta_beta_1to2
+  - sh_price_o5
+
+reversal_bull:
+  - sh_avgvol_o300
+  - sh_opt_option
+  - ta_rsi_os40
+  - ta_sma50_pb
+  - sh_price_o5
+
+reversal_bear:
+  - sh_avgvol_o300
+  - sh_opt_option
+  - ta_rsi_ob60
+  - ta_sma50_pa
+  - sh_price_o5
+
+leaps_quality:
+  - sh_avgvol_o1000
+  - sh_opt_option
+  - sh_curvol_o1000
+  - sh_price_o10
+  - fa_epsqoq_pos
+  - fa_salesqoq_pos
+  - ta_sma200_pa
