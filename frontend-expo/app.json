@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "QuantFlow",
+    "slug": "quantflow-expo",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["ios", "android", "web"],
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
