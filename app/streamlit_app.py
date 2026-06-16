@@ -109,6 +109,11 @@ elif page == "Options Ideas":
 elif page == "Run Pipeline":
     st.subheader("Run screener and recommender")
     st.write("This runs Finviz presets and saves snapshots, then generates recommendations for a default universe.")
+    preset_names = list(PRESETS.keys())
+    if preset_names:
+        st.caption(f"Loaded presets ({len(preset_names)}): " + ", ".join(preset_names))
+    else:
+        st.warning("No Finviz presets loaded. Check configs/finviz_presets.yml and finviz client setup.")
     # User option: parallel or sequential
     parallel = st.checkbox("Run screeners in parallel (faster)", value=True)
     max_workers = st.slider("Parallel workers", min_value=1, max_value=8, value=4)
@@ -116,7 +121,6 @@ elif page == "Run Pipeline":
         with st.spinner("Running Finviz screeners and saving snapshots..."):
             try:
                 create_schema(DB)
-                preset_names = list(PRESETS.keys())
                 if parallel:
                     from quantflow.data.finviz_client import run_screeners_parallel
                     results = run_screeners_parallel(preset_names, max_workers=max_workers)

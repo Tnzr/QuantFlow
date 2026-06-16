@@ -33,6 +33,11 @@
   - Better SMS/app MFA prompts and error feedback; session token save/restore; logout in UI and CLI.
 - **Broker Abstraction**
   - Extend Broker base with logout/session methods; prep for additional brokers.
+- **Robinhood MCP Migration (Priority)**
+  - Add broker mode switch: legacy_robin_stocks vs robinhood_mcp.
+  - Implement MCP adapter scaffold and read-only account/position retrieval first.
+  - Add execution intent log + policy gate before any live order placement.
+  - Build reconciliation job between local intents and broker order history.
 
 ## LLM/Sentiment (Scaffold)
 - **News Ingestion + Sentiment**
@@ -47,3 +52,4 @@
 ## Data Model
 - **New Tables**
   - iv_metrics, option_ideas (cached), news_items, signals, backtest_runs; simple migrations helper.
+  - Add execution_intents, execution_events, broker_reconciliations, policy_decisions for MCP workflow.

@@ -133,19 +133,13 @@ if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
             data = yaml.safe_load(f) or {}
             if isinstance(data, dict) and data:
-                # Validate YAML presets: only allow filters present in CUSTOM_SCREENER_COLUMNS.values()
-                from .constants import CUSTOM_SCREENER_COLUMNS
-                valid_filters = set(CUSTOM_SCREENER_COLUMNS.values())
                 for k, v in data.items():
                     if isinstance(v, dict):
-                        filtered = {kk: vv for kk, vv in v.items() if kk in valid_filters}
-                        if filtered:
-                            PRESETS[k] = filtered
+                        # Accept dictionaries directly (human-readable names or code->value mappings).
+                        PRESETS[k] = {str(kk): str(vv) for kk, vv in v.items()}
                     elif isinstance(v, list):
-                        # If list, try to convert to dict with valid filters
-                        filtered = {str(kk): "" for kk in v if str(kk) in valid_filters}
-                        if filtered:
-                            PRESETS[k] = filtered
+                        # Accept URL code lists directly (e.g., sh_avgvol_o300, ta_sma50_pa).
+                        PRESETS[k] = [str(kk) for kk in v if str(kk).strip()]
     except Exception as e:
         print(f"[FinvizClient] Error loading YAML presets: {e}", file=sys.stderr)
         import traceback

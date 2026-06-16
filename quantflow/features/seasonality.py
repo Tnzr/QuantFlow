@@ -3,12 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import yfinance as yf
 from datetime import timedelta
+from .indicators import fetch_ohlcv
 
 
 def seasonality_by_doy(ticker: str, years: int = 10) -> pd.DataFrame:
-    df = yf.download(ticker, period=f"{years}y", interval="1d", progress=False)
-    df = df.rename(columns=str.lower)
-    df.index.name = "date"
+    df = fetch_ohlcv(ticker, period=f"{years}y", interval="1d")
     df["ret"] = df["adj close"].pct_change()
     df["doy"] = df.index.dayofyear
     agg = df.groupby("doy")["ret"].agg(["mean", "std", "count"]).reset_index()

@@ -8,9 +8,44 @@ import concurrent.futures
 
 def fetch_ohlcv(ticker: str, period: str = "6m", interval: str = "1wk") -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, progress=False)
-    df = df.rename(columns=str.lower)
-    df.index.name = "date"
-    return df
+    return normalize_ohlcv(df)
+
+
+def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # yfinance may return MultiIndex columns, e.g. ("Adj Close", "AAPL").
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = [str(c[0]).strip().lower() for c in out.columns.to_list()]
+    else:
+        out.columns = [str(c).strip().lower() for c in out.columns]
+
+    # Common column aliases.
+    out = out.rename(
+        columns={
+            "adjclose": "adj close",
+            "adj_close": "adj close",
+            "adj. close": "adj close",
+        }
+    )
+
+    # Ensure required OHLCV compatibility.
+    if "close" not in out.columns and "adj close" in out.columns:
+        out["close"] = out["adj close"]
+    if "adj close" not in out.columns and "close" in out.columns:
+        out["adj close"] = out["close"]
+    if "open" not in out.columns and "close" in out.columns:
+        out["open"] = out["close"]
+    if "high" not in out.columns and "close" in out.columns:
+        out["high"] = out["close"]
+    if "low" not in out.columns and "close" in out.columns:
+        out["low"] = out["close"]
+    if "volume" not in out.columns:
+        out["volume"] = 0.0
+
+    out.index = pd.to_datetime(out.index)
+    out.index.name = "date"
+    return out
 
 
 def fetch_ohlcv_parallel(tickers: list[str], period: str = "6m", interval: str = "1wk", max_workers: int = 8) -> dict[str, pd.DataFrame]:
