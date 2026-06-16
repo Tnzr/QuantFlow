@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, desc
-from .persistence import get_engine, TickerSnapshot, Recommendation
+from .persistence import get_engine, TickerSnapshot, Recommendation, ExecutionIntent, ExecutionEvent, PolicyDecision
 import pandas as pd
 
 
@@ -114,6 +114,64 @@ def latest_recommendations_per_ticker(db_path: str = "sqlite:///quantflow.db") -
                 Recommendation.confidence,
                 Recommendation.notes,
             ).join(sub, (Recommendation.ticker == sub.c.ticker) & (Recommendation.created_at == sub.c.mx))
+        )
+        rows = s.execute(q).all()
+        return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+
+
+def recent_execution_intents(limit: int = 100, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        q = (
+            select(
+                ExecutionIntent.id,
+                ExecutionIntent.created_at,
+                ExecutionIntent.ticker,
+                ExecutionIntent.action,
+                ExecutionIntent.qty,
+                ExecutionIntent.notional,
+                ExecutionIntent.broker_mode,
+                ExecutionIntent.source,
+                ExecutionIntent.status,
+            )
+            .order_by(desc(ExecutionIntent.created_at))
+            .limit(limit)
+        )
+        rows = s.execute(q).all()
+        return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+
+
+def events_for_intent(intent_id: int, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        q = (
+            select(
+                ExecutionEvent.id,
+                ExecutionEvent.created_at,
+                ExecutionEvent.intent_id,
+                ExecutionEvent.event_type,
+                ExecutionEvent.message,
+            )
+            .where(ExecutionEvent.intent_id == intent_id)
+            .order_by(ExecutionEvent.created_at)
+        )
+        rows = s.execute(q).all()
+        return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+
+
+def policy_for_intent(intent_id: int, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        q = (
+            select(
+                PolicyDecision.id,
+                PolicyDecision.created_at,
+                PolicyDecision.intent_id,
+                PolicyDecision.allow,
+                PolicyDecision.reason,
+            )
+            .where(PolicyDecision.intent_id == intent_id)
+            .order_by(desc(PolicyDecision.created_at))
         )
         rows = s.execute(q).all()
         return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])

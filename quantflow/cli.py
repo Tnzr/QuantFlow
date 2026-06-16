@@ -10,9 +10,11 @@ from .recommend.engine import RuleEngine
 from .data.universe import HIGH_INTEREST
 from .recommend.options_picker import pick_affordable_contracts
 from .backtest.signal_backtest import backtest_short_term
-from .broker.robinhood import RobinhoodBroker
+from .broker.factory import make_broker, BROKER_MODE_LEGACY, BROKER_MODE_MCP
 from .portfolio.evaluator import evaluate_positions
 from .broker.credentials import save_to_keyring, delete_from_keyring, prompt_for_creds
+from .execution.policy import ExecutionPolicy, evaluate_order_intent
+from .execution.audit import audit_intent, audit_event, audit_policy
 
 
 def cmd_init_db(args):
@@ -122,7 +124,7 @@ def cmd_robinhood_logout(args):
 
 
 def cmd_portfolio(args):
-    broker = RobinhoodBroker()
+    broker = make_broker(args.broker_mode)
     try:
         sigs = evaluate_positions(broker)
         print("[cyan]Position signals:")
@@ -130,6 +132,41 @@ def cmd_portfolio(args):
             print(f"  - {s.ticker} [{s.side}] -> {s.action} ({s.horizon}) conf={s.confidence:.2f} | {s.notes}")
     except Exception as e:
         print(f"[red]Portfolio evaluation failed: {e}")
+
+
+def cmd_propose_order(args):
+    """Create a policy-evaluated order intent and save audit records.
+
+    This does not place a broker order.
+    """
+    create_schema(args.db)
+    policy = ExecutionPolicy(
+        require_approval=(not args.auto),
+        max_daily_notional=args.max_daily_notional,
+        max_orders_per_day=args.max_orders_per_day,
+        max_position_notional=args.max_position_notional,
+    )
+    decision = evaluate_order_intent(
+        notional=args.notional,
+        orders_today=args.orders_today,
+        position_notional_after=args.position_notional_after,
+        policy=policy,
+    )
+
+    intent_id = audit_intent(
+        ticker=args.ticker.upper(),
+        action=args.action,
+        qty=args.qty,
+        notional=args.notional,
+        broker_mode=args.broker_mode,
+        status="approved" if decision.allow else "blocked",
+        db_path=args.db,
+    )
+    audit_policy(intent_id=intent_id, allow=decision.allow, reason=decision.reason, db_path=args.db)
+    audit_event(intent_id=intent_id, event_type="policy_check", message=decision.reason, db_path=args.db)
+
+    verdict = "APPROVED" if decision.allow else "BLOCKED"
+    print(f"[yellow]Intent {intent_id}: {verdict} | {decision.reason}")
 
 
 def main():
@@ -168,6 +205,7 @@ def main():
     p6.set_defaults(func=cmd_backtest)
 
     p7 = sub.add_parser("portfolio")
+    p7.add_argument("--broker-mode", default=BROKER_MODE_LEGACY, choices=[BROKER_MODE_LEGACY, BROKER_MODE_MCP])
     p7.set_defaults(func=cmd_portfolio)
 
     p8 = sub.add_parser("robinhood-login")
@@ -175,6 +213,21 @@ def main():
 
     p9 = sub.add_parser("robinhood-logout")
     p9.set_defaults(func=cmd_robinhood_logout)
+
+    p10 = sub.add_parser("propose-order")
+    p10.add_argument("--ticker", required=True)
+    p10.add_argument("--action", default="buy", choices=["buy", "sell", "close", "rebalance"])
+    p10.add_argument("--qty", type=float, default=1.0)
+    p10.add_argument("--notional", type=float, required=True)
+    p10.add_argument("--orders-today", type=int, default=0)
+    p10.add_argument("--position-notional-after", type=float, default=0.0)
+    p10.add_argument("--auto", action="store_true", help="Allow pass-through if policy checks pass.")
+    p10.add_argument("--max-daily-notional", type=float, default=5000.0)
+    p10.add_argument("--max-orders-per-day", type=int, default=20)
+    p10.add_argument("--max-position-notional", type=float, default=2000.0)
+    p10.add_argument("--broker-mode", default=BROKER_MODE_LEGACY, choices=[BROKER_MODE_LEGACY, BROKER_MODE_MCP])
+    p10.add_argument("--db", default="sqlite:///quantflow.db")
+    p10.set_defaults(func=cmd_propose_order)
 
     args = p.parse_args()
     args.func(args)

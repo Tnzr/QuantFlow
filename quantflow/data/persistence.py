@@ -48,6 +48,43 @@ class Recommendation(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class ExecutionIntent(Base):
+    __tablename__ = "execution_intents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    action: Mapped[str] = mapped_column(String(16))
+    qty: Mapped[float] = mapped_column(Float)
+    notional: Mapped[float] = mapped_column(Float)
+    broker_mode: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="quantflow")
+    status: Mapped[str] = mapped_column(String(32), default="proposed", index=True)
+
+
+class ExecutionEvent(Base):
+    __tablename__ = "execution_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    intent_id: Mapped[int] = mapped_column(Integer, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    message: Mapped[str] = mapped_column(Text)
+
+
+class PolicyDecision(Base):
+    __tablename__ = "policy_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    intent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    allow: Mapped[int] = mapped_column(Integer)  # 1 true, 0 false
+    reason: Mapped[str] = mapped_column(Text)
+
+
 def get_engine(db_path: str = "sqlite:///quantflow.db"):
     return create_engine(db_path, future=True)
 
@@ -96,6 +133,69 @@ def save_recommendations(recs: Iterable, db_path: str = "sqlite:///quantflow.db"
                     notes=r.notes,
                 )
             )
+        s.commit()
+
+
+def save_execution_intent(
+    ticker: str,
+    action: str,
+    qty: float,
+    notional: float,
+    broker_mode: str,
+    source: str = "quantflow",
+    status: str = "proposed",
+    db_path: str = "sqlite:///quantflow.db",
+) -> int:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        rec = ExecutionIntent(
+            ticker=ticker,
+            action=action,
+            qty=qty,
+            notional=notional,
+            broker_mode=broker_mode,
+            source=source,
+            status=status,
+        )
+        s.add(rec)
+        s.commit()
+        s.refresh(rec)
+        return int(rec.id)
+
+
+def save_execution_event(
+    intent_id: int,
+    event_type: str,
+    message: str,
+    db_path: str = "sqlite:///quantflow.db",
+) -> None:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        s.add(
+            ExecutionEvent(
+                intent_id=intent_id,
+                event_type=event_type,
+                message=message,
+            )
+        )
+        s.commit()
+
+
+def save_policy_decision(
+    intent_id: Optional[int],
+    allow: bool,
+    reason: str,
+    db_path: str = "sqlite:///quantflow.db",
+) -> None:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        s.add(
+            PolicyDecision(
+                intent_id=intent_id,
+                allow=1 if allow else 0,
+                reason=reason,
+            )
+        )
         s.commit()
 
 
