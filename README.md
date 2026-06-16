@@ -91,6 +91,44 @@ Before running, ensure env and DB:
 - make app (or: streamlit run app/streamlit_app.py)
 - Dashboard pages: Scanner & Recs, Options Ideas (CSV export included)
 
+## FastAPI Backend (Recommended for React/Expo)
+- Start API: `make api`
+- Stop API port: `make api-stop`
+- Change API port: `make api API_PORT=8100`
+
+Core endpoints:
+- `GET /health`
+- `GET /scanner/presets`
+- `GET /scanner/latest-universe`
+- `GET /recommend/latest`
+- `POST /pipeline/scan`
+- `POST /pipeline/recommend`
+- `GET /options/ideas`
+- `GET /charts/indicators`
+- `GET /charts/seasonality`
+- `GET /backtest/short-term`
+- `POST /execution/propose`
+- `GET /execution/intents`
+
+Optional write auth:
+- Enable: `QF_API_AUTH_ENABLED=true`
+- Token mode: set `QF_API_TOKEN` and pass `x-api-key` or `Authorization: Bearer <token>`
+- Firebase mode:
+  - `QF_FIREBASE_AUTH_ENABLED=true`
+  - Provide Firebase credentials via `GOOGLE_APPLICATION_CREDENTIALS` (service account json path)
+  - Write access requires custom claim `quantflow_write=true` by default
+  - Override claim key with `QF_FIREBASE_WRITE_CLAIM` and allowed roles with `QF_FIREBASE_WRITE_ROLES` (default: `writer,admin`)
+- Auth diagnostics endpoint: `GET /auth/me`
+
+## Expo Frontend Starter
+- Path: `frontend-expo/`
+- Start backend first: `make api`
+- Then run frontend:
+  - `cd frontend-expo && npm install`
+  - `EXPO_PUBLIC_API_BASE_URL=http://<LAN_IP>:8000 npm start`
+
+Use LAN IP (not localhost) for phone testing on the same Wi-Fi.
+
 ## Docker
 - docker build -t quantflow .
 - docker run -p 8888:8888 -v "$PWD":/app quantflow
@@ -110,10 +148,20 @@ Before running, ensure env and DB:
 - Backtest: `quantflow/backtest` (signal tests, metrics)
 - App: `app/streamlit_app.py` (dashboard)
 
-## Robinhood (read-only provider)
-- Set env vars: ROBINHOOD_USERNAME, ROBINHOOD_PASSWORD, optionally ROBINHOOD_MFA
-- Run: make portfolio (or: python -m quantflow.cli portfolio)
-- Output: per-position actions (hold/add/exit) derived from the 1w/1m rules and confidence
+## Robinhood Integration Status
+- Current implementation: legacy read-only provider via `robin-stocks` credentials.
+- Run (legacy): make portfolio (or: python -m quantflow.cli portfolio)
+- Output: per-position actions (hold/add/exit) derived from the 1w/1m rules and confidence.
+
+### MCP-first path (recommended)
+- Robinhood support now documents Agentic Trading via MCP endpoint:
+  - https://agent.robinhood.com/mcp/trading
+- Desktop onboarding/auth is required to open/authenticate the Agentic account.
+- During migration, keep legacy mode as fallback and introduce an MCP broker adapter for official connectivity.
+- Local MCP fixture testing supported:
+  - `QF_MCP_ACCOUNT_JSON='{"equity":1000,"cash":200,"buying_power":1200}'`
+  - `QF_MCP_POSITIONS_JSON='{"positions":[{"ticker":"AAPL","qty":2,"avg_price":150}]}'`
+- See docs/Robinhood_MCP_Integration_Blueprint.md for rollout stages and safeguards.
 
 ## Theory and Design
 See `docs/THEORY.md` for deeper notes on risk-first design, entry/exit logic, weekly timing, and low-premium tactics.
