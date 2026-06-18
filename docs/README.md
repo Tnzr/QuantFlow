@@ -15,6 +15,7 @@ This index organizes documentation by audience and function.
 - [Pitch Deck Generator Input (Strict)](business/PITCH_DECK_GENERATOR_INPUT_STRICT.md)
 - [Webapp Product White Paper and Engineering Requirements](business/WEBAPP_PRODUCT_WHITE_PAPER_AND_ENGINEERING_REQUIREMENTS.md)
 - [Funding Sources and Capital Strategy](business/FUNDING_SOURCES_AND_CAPITAL_STRATEGY.md)
+- [Funding Partner Due Diligence and Time-to-Revenue Matrix](business/FUNDING_PARTNER_DUE_DILIGENCE_AND_TIME_TO_REVENUE_MATRIX.md)
 
 ## Architecture and Engineering
 - [API and Expo MVP](architecture/API_AND_EXPO_MVP.md)
