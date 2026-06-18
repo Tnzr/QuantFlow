@@ -221,10 +221,25 @@ elif page == "Backtest":
     st.subheader("Short-term backtest")
     t = st.selectbox("Ticker", options=HIGH_INTEREST, index=0, key="bt_t")
     start = st.text_input("Start date (YYYY-MM-DD)", value="2018-01-01")
+    entry_rsi_threshold = st.number_input("Entry RSI threshold", value=50.0, step=1.0)
+    max_hold_days = st.number_input("Max hold days", min_value=1, value=7, step=1)
+    stop_loss_pct = st.number_input("Stop loss % (0 disables)", min_value=0.0, value=0.0, step=0.5)
+    take_profit_pct = st.number_input("Take profit % (0 disables)", min_value=0.0, value=0.0, step=0.5)
+    ma_filter = st.selectbox("MA filter", options=["sma20", "sma50", "sma200"], index=0)
+    ma_trend_filter = st.selectbox("Entry trend filter", options=["none", "above_sma50", "above_sma200"], index=0)
     if st.button("Run backtest"):
         with st.spinner("Running backtest..."):
             try:
-                rpt = backtest_short_term(ticker=t, start=start)
+                rpt = backtest_short_term(
+                    ticker=t,
+                    start=start,
+                    entry_rsi_threshold=float(entry_rsi_threshold),
+                    max_hold_days=int(max_hold_days),
+                    stop_loss_pct=float(stop_loss_pct),
+                    ma_filter=ma_filter,
+                    take_profit_pct=float(take_profit_pct),
+                    ma_trend_filter=ma_trend_filter,
+                )
                 st.write(f"Trades: {rpt.n_trades}")
                 st.write(f"Win rate: {rpt.win_rate:.2%}")
                 st.write(f"Avg ret: {rpt.avg_ret:.2%} | Median ret: {rpt.median_ret:.2%}")
