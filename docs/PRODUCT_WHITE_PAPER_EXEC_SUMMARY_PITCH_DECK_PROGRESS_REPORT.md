@@ -23,7 +23,7 @@ Commercial thesis:
 - Subscription revenues from investor intelligence services can scale with low marginal delivery cost once service reliability and trust controls are in place.
 
 Social thesis:
-- A solidarity fund can be integrated from first paid launch, allocating a defined portion of subscription revenue to investor education access, financial literacy programs, and micro-grants for underrepresented founders.
+- A solidarity fund is planned as a future-phase, user opt-in program where users can direct a configurable percent of their net growth profits into vetted philanthropic pipelines.
 
 ## 2. Problem Statement and Market Opportunity
 
@@ -76,14 +76,16 @@ Differentiators that strengthen defensibility:
 Create a recurring, transparent social impact mechanism tied directly to platform growth.
 
 ## 5.2 Funding Mechanism
-- Allocate a fixed share of gross subscription revenue (example: 2% to 5%) into a ring-fenced solidarity fund ledger.
-- Track allocations monthly and publish quarterly transparency updates.
+- Offer user opt-in contribution settings, allowing users to route a configurable percent of net growth profits into a ring-fenced solidarity fund ledger.
+- Keep this mechanism disabled by default and activate only after legal, accounting, and governance controls are complete.
+- Track allocations monthly and publish quarterly transparency updates once launched.
 
 ## 5.3 Use of Funds
 - Investor education scholarships and training access
 - Financial literacy grants for underserved communities
-- Micro-grants for early-stage founders building ethical finance tooling
+- Grants for early-stage founders building ethical finance tooling
 - Crisis-response assistance for eligible members during documented hardship windows
+- Approved impact pipelines, including vetted NGOs, local education programs, and eligible impact/private vehicles with governance review
 
 ## 5.4 Governance Design
 - Establish solidarity fund charter and eligibility criteria
@@ -91,8 +93,9 @@ Create a recurring, transparent social impact mechanism tied directly to platfor
 - Publish annual impact report with allocation categories, counts, and outcomes
 
 ## 5.5 Product Integration
-- Display solidarity contribution meter in account billing area
-- Offer optional customer top-up donations at checkout
+- Display solidarity contribution controls in account settings (future phase)
+- Allow users to set or pause a contribution percent tied to net growth profits (future phase)
+- Offer optional customer top-up donations at checkout (optional extension)
 - Surface periodic impact updates in-app and on public reporting page
 
 ## 5.6 Why This Matters Strategically
@@ -181,9 +184,9 @@ Upsell path via advanced analytics, portfolio overlays, API access.
 Auditability, strategy versioning, transparent methodology, and legal disclosure controls.
 
 ### Slide 8: Solidarity Fund
-2% to 5% gross subscription allocation.
+User opt-in model for configurable percent-of-net-growth contributions.
 Supports investor education, inclusion grants, and hardship support.
-Transparent quarterly reporting.
+Future phase requiring legal/accounting controls and transparent reporting.
 
 ### Slide 9: Progress to Date
 MVP technical foundation established.
@@ -228,4 +231,4 @@ QuantFlow has a viable path from MVP functionality to a trustworthy investor-fac
 
 The defining execution priority is building service reliability, monetization controls, and compliance-ready transparency around the existing signal core.
 
-By integrating a measurable solidarity fund directly into the revenue model, the company can align growth with social value while strengthening long-term brand trust and customer loyalty.
+By introducing a future-phase, user opt-in solidarity fund model tied to net growth profits, the company can align platform success with social impact while strengthening long-term trust and brand differentiation.
