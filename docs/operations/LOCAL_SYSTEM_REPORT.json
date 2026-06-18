@@ -1,0 +1,104 @@
+{
+  "db_path": "sqlite:///quantflow.db",
+  "generated_at": "2026-06-17T00:52:08.323956+00:00",
+  "overall_db_status": "FRESH",
+  "runtime": {
+    "api_base": "http://127.0.0.1:8100",
+    "health": {
+      "auth_enabled": false,
+      "firebase_auth_enabled": false,
+      "status": "ok"
+    },
+    "mcp_readiness": {
+      "checks": [
+        {
+          "details": "QuantFlow can reach Robinhood MCP transport endpoint.",
+          "id": "transport",
+          "label": "MCP transport reachable",
+          "state": "pass"
+        },
+        {
+          "details": "Authentication not complete yet (typically 401 until the agent account auth flow is completed).",
+          "id": "auth",
+          "label": "Agent account authentication",
+          "state": "fail"
+        },
+        {
+          "details": "Optional local fixture env vars are not fully set (QF_MCP_ACCOUNT_JSON and QF_MCP_POSITIONS_JSON).",
+          "id": "fixtures",
+          "label": "Local fixture fallback",
+          "state": "warn"
+        },
+        {
+          "details": "Positions are not readable yet. This is expected when auth is incomplete.",
+          "id": "positions",
+          "label": "Positions visibility",
+          "state": "warn"
+        }
+      ],
+      "next_steps": [
+        "Authenticate the Robinhood Agentic account in your MCP-capable client session.",
+        "Re-check MCP status from Overview to confirm authenticated=yes.",
+        "Optional: set QF_MCP_ACCOUNT_JSON and QF_MCP_POSITIONS_JSON for local fixture-based testing.",
+        "Once authenticated, validate account and positions read before enabling execution pathways."
+      ],
+      "overall_ready": false,
+      "status": {
+        "account_available": false,
+        "account_error": "Robinhood MCP account read failed: MCP HTTP error 401: Unauthorized",
+        "authenticated": false,
+        "broker_mode": "robinhood_mcp",
+        "connected": true,
+        "endpoint": "https://agent.robinhood.com/mcp/trading",
+        "fixture_account_loaded": false,
+        "fixture_positions_loaded": false,
+        "positions_available": false,
+        "positions_count": 0,
+        "positions_error": "Robinhood MCP positions read failed: MCP HTTP error 401: Unauthorized"
+      }
+    },
+    "mcp_status": {
+      "account_available": false,
+      "account_error": "Robinhood MCP account read failed: MCP HTTP error 401: Unauthorized",
+      "authenticated": false,
+      "broker_mode": "robinhood_mcp",
+      "connected": true,
+      "endpoint": "https://agent.robinhood.com/mcp/trading",
+      "fixture_account_loaded": false,
+      "fixture_positions_loaded": false,
+      "positions_available": false,
+      "positions_count": 0,
+      "positions_error": "Robinhood MCP positions read failed: MCP HTTP error 401: Unauthorized"
+    },
+    "scraping_status": {
+      "api_endpoint": null,
+      "mode": "direct",
+      "notes": [],
+      "provider": "direct",
+      "proxy_configured": false,
+      "proxy_env_source": null,
+      "scraping_api_key_set": false,
+      "scrapingbee_api_key_set": false
+    }
+  },
+  "stale_days": 7,
+  "tables": {
+    "execution_intents": {
+      "age_days": 0.16007037099537036,
+      "count": 6,
+      "latest": "2026-06-16T21:01:38.243902+00:00"
+    },
+    "recommendations": {
+      "age_days": 0.048114299525462964,
+      "count": 390,
+      "latest": "2026-06-16T23:42:51.248477+00:00",
+      "refresh_needed": false
+    },
+    "ticker_snapshots": {
+      "age_days": 0.020148514224537038,
+      "count": 33520,
+      "latest": "2026-06-17T00:23:07.492327+00:00",
+      "refresh_needed": false
+    }
+  }
+}
