@@ -488,6 +488,22 @@ async function apiPut(path, payload, auth, options = {}) {
   });
 }
 
+async function apiDelete(path, auth, options = {}) {
+  return withRetry(async () => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "DELETE",
+      headers: { ...authHeaders(auth) },
+      signal: options.signal,
+    });
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  });
+}
+
 export default function App() {
   const [surface, setSurface] = useState("Public");
   const [workspaceUnlocked, setWorkspaceUnlocked] = useState(false);
@@ -509,6 +525,10 @@ export default function App() {
   const [mcpStatus, setMcpStatus] = useState(null);
   const [mcpReadiness, setMcpReadiness] = useState(null);
   const [mcpLoginResult, setMcpLoginResult] = useState(null);
+  const [mcpRuntimeConfig, setMcpRuntimeConfig] = useState(null);
+  const [mcpBearerInput, setMcpBearerInput] = useState("");
+  const [mcpHeaderInput, setMcpHeaderInput] = useState("Authorization");
+  const [mcpConfigStatus, setMcpConfigStatus] = useState("idle");
   const [mcpSignals, setMcpSignals] = useState(null);
   const [mcpSignalsError, setMcpSignalsError] = useState("");
   const [mcpRunbookReport, setMcpRunbookReport] = useState(null);
@@ -936,6 +956,60 @@ export default function App() {
       } catch (e) {
         setMcpLoginResult({ ok: false, error: e.message });
         setStatus(`error: ${e.message}`);
+      }
+    });
+  };
+
+  const loadMcpRuntimeConfig = async () => {
+    setMcpConfigStatus("loading");
+    await withProgress("Loading MCP runtime config", async () => {
+      try {
+        const data = await apiGet("/broker/mcp/config", authState);
+        setMcpRuntimeConfig(data || null);
+        const hdr = String(data?.runtime?.auth_header || "Authorization");
+        setMcpHeaderInput(hdr);
+        setMcpConfigStatus("ready");
+      } catch (e) {
+        setMcpConfigStatus(`error: ${e.message}`);
+      }
+    });
+  };
+
+  const saveMcpRuntimeConfig = async () => {
+    setMcpConfigStatus("saving");
+    await withProgress("Saving MCP runtime config", async () => {
+      try {
+        const tokenRaw = mcpBearerInput.trim();
+        if (!tokenRaw) {
+          throw new Error("MCP bearer token is required");
+        }
+        const bearer = tokenRaw.toLowerCase().startsWith("bearer ") ? tokenRaw : `Bearer ${tokenRaw}`;
+        const payload = {
+          auth_header: (mcpHeaderInput || "Authorization").trim() || "Authorization",
+          bearer_token: bearer,
+        };
+        const data = await apiPut("/broker/mcp/config", payload, authState);
+        setMcpRuntimeConfig(data || null);
+        setMcpConfigStatus("saved");
+        setMcpBearerInput("");
+        await loadMcpStatus();
+      } catch (e) {
+        setMcpConfigStatus(`error: ${e.message}`);
+      }
+    });
+  };
+
+  const clearMcpRuntimeConfig = async () => {
+    setMcpConfigStatus("clearing");
+    await withProgress("Clearing MCP runtime config", async () => {
+      try {
+        const data = await apiDelete("/broker/mcp/config", authState);
+        setMcpRuntimeConfig(data || null);
+        setMcpConfigStatus("cleared");
+        setMcpBearerInput("");
+        await loadMcpStatus();
+      } catch (e) {
+        setMcpConfigStatus(`error: ${e.message}`);
       }
     });
   };
@@ -2897,6 +2971,46 @@ export default function App() {
         </View>
         <Text style={styles.item}>Google login status: {googleSignInStatus}</Text>
         <Text style={styles.item}>Identity: {firebaseAuthCheck ? compactJson(firebaseAuthCheck, 900) : "not checked"}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Robinhood MCP Runtime Auth</Text>
+        <Text style={styles.item}>Use this to let the backend access your authenticated Robinhood MCP account without relying on editor session state.</Text>
+        <Text style={styles.warnText}>Never store real broker tokens in client storage. This input is sent directly to backend runtime config and then cleared locally.</Text>
+
+        <Text style={styles.fieldLabel}>Auth Header</Text>
+        <TextInput
+          value={mcpHeaderInput}
+          onChangeText={setMcpHeaderInput}
+          style={styles.input}
+          placeholder="Authorization"
+          autoCapitalize="none"
+        />
+
+        <Text style={styles.fieldLabel}>MCP Bearer Token</Text>
+        <TextInput
+          value={mcpBearerInput}
+          onChangeText={setMcpBearerInput}
+          style={[styles.input, styles.tokenInput]}
+          placeholder="Bearer eyJ..."
+          autoCapitalize="none"
+          multiline
+        />
+
+        <View style={styles.inlineRowWrap}>
+          <Pressable style={styles.button} onPress={saveMcpRuntimeConfig}>
+            <Text style={styles.buttonText}>Save MCP Config</Text>
+          </Pressable>
+          <Pressable style={styles.secondaryButton} onPress={loadMcpRuntimeConfig}>
+            <Text style={styles.secondaryButtonText}>Load MCP Config</Text>
+          </Pressable>
+          <Pressable style={styles.cancelButton} onPress={clearMcpRuntimeConfig}>
+            <Text style={styles.buttonText}>Clear MCP Config</Text>
+          </Pressable>
+        </View>
+
+        <Text style={styles.item}>MCP config status: {mcpConfigStatus}</Text>
+        <Text style={styles.item}>Runtime summary: {mcpRuntimeConfig ? compactJson(mcpRuntimeConfig, 1200) : "not loaded"}</Text>
       </View>
 
       <View style={styles.card}>
