@@ -1840,11 +1840,17 @@ def backtest_short_term_api(
     max_hold_days: int = 7,
     stop_loss_pct: float = 0.0,
     ma_filter: str = "sma20",
+    take_profit_pct: float = 0.0,
+    ma_trend_filter: str = "none",
 ):
     try:
         ma_selected = str(ma_filter or "sma20").lower()
         if ma_selected not in {"sma20", "sma50", "sma200"}:
             raise ValueError("ma_filter must be one of: sma20, sma50, sma200")
+
+        ma_trend = str(ma_trend_filter or "none").lower()
+        if ma_trend not in {"none", "above_sma50", "above_sma200"}:
+            raise ValueError("ma_trend_filter must be one of: none, above_sma50, above_sma200")
 
         rpt = backtest_short_term(
             ticker=ticker.upper(),
@@ -1853,6 +1859,8 @@ def backtest_short_term_api(
             entry_rsi_threshold=entry_rsi_threshold,
             max_hold_days=max_hold_days,
             stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            ma_trend_filter=ma_trend,
             ma_filter=ma_selected,
         )
         eq = rpt.equity_curve.reset_index()
@@ -1875,6 +1883,8 @@ def backtest_short_term_api(
                     "max_hold_days": int(max_hold_days),
                     "stop_loss_pct": float(stop_loss_pct),
                     "ma_filter": ma_selected,
+                    "take_profit_pct": float(take_profit_pct),
+                    "ma_trend_filter": ma_trend,
                 },
             },
             "equity": _safe_records(eq),
