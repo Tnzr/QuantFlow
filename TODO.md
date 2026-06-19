@@ -2,8 +2,8 @@
 
 ## Quick Wins (Low-Risk, High-Impact)
 - **Streamlit Portfolio UX**
-  - Add “Save to keyring” checkbox in login form, plus Logout button.
-  - Optional session token path preference in sidebar; persist across session.
+  - Add MCP readiness widget with direct guidance to /broker/mcp/login instructions.
+  - Show last MCP account/positions error with retry hint and fixture fallback note.
 - **Preset Management UI**
   - Streamlit page to load/edit finviz_presets.yml with YAML validation and safe write; apply without app restart.
 - **Robust Retries and Dedupe**
@@ -30,11 +30,11 @@
 
 ## Portfolio Integration
 - **Robinhood MFA Flows**
-  - Better SMS/app MFA prompts and error feedback; session token save/restore; logout in UI and CLI.
+  - Keep disabled for app runtime; authentication is handled by MCP-capable clients.
 - **Broker Abstraction**
   - Extend Broker base with logout/session methods; prep for additional brokers.
 - **Robinhood MCP Migration (Priority)**
-  - Add broker mode switch: legacy_robin_stocks vs robinhood_mcp.
+  - Enforce robinhood_mcp as the only supported broker mode.
   - Implement MCP adapter scaffold and read-only account/position retrieval first.
   - Add execution intent log + policy gate before any live order placement.
   - Build reconciliation job between local intents and broker order history.
@@ -48,6 +48,24 @@
   - Unit tests for indicators, RuleEngine, persistence; notebook smoke tests with papermill; pre-commit (ruff/black).
 - **CI**
   - Run tests and lint on PR; cache deps; optional Docker build.
+
+## Frontend-Backend Integration (Priority)
+- **Assistant Side Panel Workflow**
+  - Keep assistant visible while navigating all workspace tabs.
+  - Support multi-step plans and chained API actions from one conversation.
+  - Add action execution timeline and rollback guidance for failed steps.
+- **Backtest UX Completion**
+  - Expand controls: start/end date, entry RSI threshold, max hold days, and scenario presets.
+  - Plot equity curve and trade-level diagnostics (entry/exit markers, drawdown panel).
+  - Export backtest run metrics and equity series as CSV.
+- **Market Data Cache + Plot Baseline**
+  - Persist yfinance OHLCV+indicator series in local cache for re-use across tabs.
+  - Add dataset builder actions to emit model-ready files from cached series.
+  - Show cache metadata (symbol, rows, freshness timestamp, source period/interval).
+- **Charts Reliability**
+  - Add explicit fetch diagnostics for RSI/indicator charts (API base, endpoint, last error).
+  - Add fallback chart placeholders when endpoints return empty series.
+  - Add quick smoke check button to validate all chart endpoints from UI.
 
 ## Data Model
 - **New Tables**
