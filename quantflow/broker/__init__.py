@@ -1,10 +1,10 @@
 from .base import Broker
 from .types import Position, Account
-from .robinhood import RobinhoodBroker
+from .robinhood_mcp import RobinhoodMCPBroker
 
 __all__ = [
     "Broker",
     "Position",
     "Account",
-    "RobinhoodBroker",
+    "RobinhoodMCPBroker",
 ]

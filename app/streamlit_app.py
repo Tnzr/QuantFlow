@@ -12,7 +12,7 @@ from quantflow.data.finviz_client import PRESETS, run_screener
 from quantflow.data.persistence import create_schema, save_finviz_snapshot, save_recommendations
 from quantflow.features.indicators import fetch_ohlcv, compute_indicators
 from quantflow.features.seasonality import seasonality_by_doy, proximity_to_earnings
-from quantflow.broker.robinhood import RobinhoodBroker
+from quantflow.broker.factory import make_broker, BROKER_MODE_MCP
 from quantflow.portfolio.evaluator import evaluate_positions
 from quantflow.backtest.signal_backtest import backtest_short_term
 
@@ -154,31 +154,10 @@ elif page == "Run Pipeline":
                 st.error(f"Recommend failed: {e}")
 
 elif page == "Portfolio":
-    st.subheader("Robinhood portfolio (read-only)")
-    st.caption("Credentials are used for this session only (not stored).")
-    with st.expander("Login", expanded=not st.session_state.get("rh_logged_in", False)):
-        with st.form("rh_login"):
-            u = st.text_input("Username (email)")
-            p = st.text_input("Password", type="password")
-            mfa = st.text_input("MFA Code (optional)")
-            submitted = st.form_submit_button("Login")
-            if submitted:
-                if not u or not p:
-                    st.error("Enter username and password.")
-                else:
-                    os.environ["ROBINHOOD_USERNAME"] = u
-                    os.environ["ROBINHOOD_PASSWORD"] = p
-                    if mfa:
-                        os.environ["ROBINHOOD_MFA"] = mfa
-                    try:
-                        broker = RobinhoodBroker()
-                        broker.login()
-                        st.session_state["rh_logged_in"] = True
-                        st.success("Logged in.")
-                    except Exception as e:
-                        st.error(f"Login failed: {e}")
-    if st.session_state.get("rh_logged_in"):
-        broker = RobinhoodBroker()
+    st.subheader("Robinhood MCP portfolio (read-only)")
+    st.caption("Authenticate Robinhood Agentic in your MCP-capable client, then load portfolio signals.")
+    if st.button("Load MCP portfolio signals"):
+        broker = make_broker(BROKER_MODE_MCP)
         try:
             sigs = evaluate_positions(broker)
             if not sigs:
@@ -186,10 +165,11 @@ elif page == "Portfolio":
             else:
                 rows = [s.__dict__ for s in sigs]
                 df = pd.DataFrame(rows)
-                # Add color-coded action tags
+
                 def tag(a: str) -> str:
                     color = {"exit": "red", "add": "green", "hold": "gray"}.get(a, "blue")
                     return f"<span style='color:{color};font-weight:600'>{a.upper()}</span>"
+
                 df_display = df.copy()
                 df_display["action"] = df_display["action"].apply(tag)
                 st.write(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)

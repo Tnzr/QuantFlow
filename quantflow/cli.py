@@ -13,9 +13,8 @@ from .recommend.engine import RuleEngine
 from .data.universe import HIGH_INTEREST
 from .recommend.options_picker import pick_affordable_contracts
 from .backtest.signal_backtest import backtest_short_term
-from .broker.factory import make_broker, BROKER_MODE_LEGACY, BROKER_MODE_MCP
+from .broker.factory import make_broker, BROKER_MODE_MCP
 from .portfolio.evaluator import evaluate_positions
-from .broker.credentials import save_to_keyring, delete_from_keyring, prompt_for_creds
 from .execution.policy import ExecutionPolicy, evaluate_order_intent
 from .execution.audit import audit_intent, audit_event, audit_policy
 from .ops.reporting import (
@@ -143,20 +142,6 @@ def cmd_backtest(args):
             print(f"  hold={rpt.avg_hold_days:.1f}d maxDD={rpt.max_dd:.2%} Sharpe={rpt.sharpe:.2f} Sortino={rpt.sortino:.2f} CAGR={rpt.cagr:.2%} PF={rpt.profit_factor:.2f}")
         except Exception as e:
             print(f"[red]Backtest failed {t}: {e}")
-
-
-def cmd_robinhood_login(args):
-    creds = prompt_for_creds()
-    try:
-        save_to_keyring(creds.username, creds.password)
-        print("[green]Saved Robinhood credentials to OS keyring")
-    except Exception as e:
-        print(f"[red]Failed to save to keyring: {e}")
-
-
-def cmd_robinhood_logout(args):
-    delete_from_keyring()
-    print("[green]Deleted Robinhood credentials from OS keyring")
 
 
 def cmd_portfolio(args):
@@ -441,70 +426,64 @@ def main():
     p6.set_defaults(func=cmd_backtest)
 
     p7 = sub.add_parser("portfolio")
-    p7.add_argument("--broker-mode", default=BROKER_MODE_LEGACY, choices=[BROKER_MODE_LEGACY, BROKER_MODE_MCP])
+    p7.add_argument("--broker-mode", default=BROKER_MODE_MCP, choices=[BROKER_MODE_MCP])
     p7.set_defaults(func=cmd_portfolio)
 
-    p8 = sub.add_parser("robinhood-login")
-    p8.set_defaults(func=cmd_robinhood_login)
+    p8 = sub.add_parser("propose-order")
+    p8.add_argument("--ticker", required=True)
+    p8.add_argument("--action", default="buy", choices=["buy", "sell", "close", "rebalance"])
+    p8.add_argument("--qty", type=float, default=1.0)
+    p8.add_argument("--notional", type=float, required=True)
+    p8.add_argument("--orders-today", type=int, default=0)
+    p8.add_argument("--position-notional-after", type=float, default=0.0)
+    p8.add_argument("--auto", action="store_true", help="Allow pass-through if policy checks pass.")
+    p8.add_argument("--max-daily-notional", type=float, default=5000.0)
+    p8.add_argument("--max-orders-per-day", type=int, default=20)
+    p8.add_argument("--max-position-notional", type=float, default=2000.0)
+    p8.add_argument("--broker-mode", default=BROKER_MODE_MCP, choices=[BROKER_MODE_MCP])
+    p8.add_argument("--db", default="sqlite:///quantflow.db")
+    p8.set_defaults(func=cmd_propose_order)
 
-    p9 = sub.add_parser("robinhood-logout")
-    p9.set_defaults(func=cmd_robinhood_logout)
+    p9 = sub.add_parser("ops-refresh")
+    p9.add_argument("--db", default="sqlite:///quantflow.db")
+    p9.add_argument("--stale-days", type=int, default=7)
+    p9.add_argument("--force", action="store_true")
+    p9.add_argument("--with-report", action="store_true")
+    p9.add_argument("--include-api", action="store_true")
+    p9.add_argument("--api-base", default="http://127.0.0.1:8100")
+    p9.add_argument("--report-out", default="docs/LOCAL_SYSTEM_REPORT.md")
+    p9.set_defaults(func=cmd_ops_refresh)
 
-    p10 = sub.add_parser("propose-order")
-    p10.add_argument("--ticker", required=True)
-    p10.add_argument("--action", default="buy", choices=["buy", "sell", "close", "rebalance"])
-    p10.add_argument("--qty", type=float, default=1.0)
-    p10.add_argument("--notional", type=float, required=True)
-    p10.add_argument("--orders-today", type=int, default=0)
-    p10.add_argument("--position-notional-after", type=float, default=0.0)
-    p10.add_argument("--auto", action="store_true", help="Allow pass-through if policy checks pass.")
-    p10.add_argument("--max-daily-notional", type=float, default=5000.0)
-    p10.add_argument("--max-orders-per-day", type=int, default=20)
-    p10.add_argument("--max-position-notional", type=float, default=2000.0)
-    p10.add_argument("--broker-mode", default=BROKER_MODE_LEGACY, choices=[BROKER_MODE_LEGACY, BROKER_MODE_MCP])
+    p10 = sub.add_parser("ops-report")
     p10.add_argument("--db", default="sqlite:///quantflow.db")
-    p10.set_defaults(func=cmd_propose_order)
+    p10.add_argument("--stale-days", type=int, default=7)
+    p10.add_argument("--include-api", action="store_true")
+    p10.add_argument("--api-base", default="http://127.0.0.1:8100")
+    p10.add_argument("--report-out", default="docs/LOCAL_SYSTEM_REPORT.md")
+    p10.set_defaults(func=cmd_ops_report)
 
-    p11 = sub.add_parser("ops-refresh")
+    p11 = sub.add_parser("train-features")
+    p11.add_argument("--tickers", default="")
     p11.add_argument("--db", default="sqlite:///quantflow.db")
-    p11.add_argument("--stale-days", type=int, default=7)
-    p11.add_argument("--force", action="store_true")
-    p11.add_argument("--with-report", action="store_true")
-    p11.add_argument("--include-api", action="store_true")
-    p11.add_argument("--api-base", default="http://127.0.0.1:8100")
-    p11.add_argument("--report-out", default="docs/LOCAL_SYSTEM_REPORT.md")
-    p11.set_defaults(func=cmd_ops_refresh)
+    p11.add_argument("--period", default="2y")
+    p11.add_argument("--interval", default="1d")
+    p11.add_argument("--lookback-days", type=int, default=30)
+    p11.add_argument("--forecast-horizon", type=int, default=20)
+    p11.add_argument("--save", action="store_true")
+    p11.add_argument("--out", default="")
+    p11.set_defaults(func=cmd_train_features)
 
-    p12 = sub.add_parser("ops-report")
+    p12 = sub.add_parser("news-ingest")
+    p12.add_argument("--input", required=True)
     p12.add_argument("--db", default="sqlite:///quantflow.db")
-    p12.add_argument("--stale-days", type=int, default=7)
-    p12.add_argument("--include-api", action="store_true")
-    p12.add_argument("--api-base", default="http://127.0.0.1:8100")
-    p12.add_argument("--report-out", default="docs/LOCAL_SYSTEM_REPORT.md")
-    p12.set_defaults(func=cmd_ops_report)
+    p12.add_argument("--out", default="")
+    p12.set_defaults(func=cmd_news_ingest)
 
-    p13 = sub.add_parser("train-features")
-    p13.add_argument("--tickers", default="")
+    p13 = sub.add_parser("export-table")
+    p13.add_argument("--table", required=True)
     p13.add_argument("--db", default="sqlite:///quantflow.db")
-    p13.add_argument("--period", default="2y")
-    p13.add_argument("--interval", default="1d")
-    p13.add_argument("--lookback-days", type=int, default=30)
-    p13.add_argument("--forecast-horizon", type=int, default=20)
-    p13.add_argument("--save", action="store_true")
-    p13.add_argument("--out", default="")
-    p13.set_defaults(func=cmd_train_features)
-
-    p14 = sub.add_parser("news-ingest")
-    p14.add_argument("--input", required=True)
-    p14.add_argument("--db", default="sqlite:///quantflow.db")
-    p14.add_argument("--out", default="")
-    p14.set_defaults(func=cmd_news_ingest)
-
-    p15 = sub.add_parser("export-table")
-    p15.add_argument("--table", required=True)
-    p15.add_argument("--db", default="sqlite:///quantflow.db")
-    p15.add_argument("--out", required=True)
-    p15.set_defaults(func=cmd_export_table)
+    p13.add_argument("--out", required=True)
+    p13.set_defaults(func=cmd_export_table)
 
     args = p.parse_args()
     args.func(args)

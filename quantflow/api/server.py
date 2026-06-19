@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..data.persistence import create_schema
 from ..data.queries import recent_execution_intents, latest_universe, latest_recommendations_per_ticker
-from ..broker.factory import make_broker, BROKER_MODE_LEGACY, BROKER_MODE_MCP
+from ..broker.factory import make_broker, BROKER_MODE_MCP
 from ..broker.mcp_client import (
     clear_runtime_mcp_auth_config,
     get_runtime_mcp_auth_config_summary,
@@ -316,7 +316,7 @@ class ProposeOrderRequest(BaseModel):
     notional: float = Field(gt=0)
     orders_today: int = Field(default=0, ge=0)
     position_notional_after: float = Field(default=0.0, ge=0)
-    broker_mode: str = Field(default=BROKER_MODE_LEGACY)
+    broker_mode: str = Field(default=BROKER_MODE_MCP)
     auto: bool = Field(default=False)
     max_daily_notional: float = Field(default=5000.0, gt=0)
     max_orders_per_day: int = Field(default=20, gt=0)
@@ -890,7 +890,7 @@ def training_features_get(
 
 @app.get("/portfolio/signals")
 def portfolio_signals(
-    broker_mode: str = BROKER_MODE_LEGACY,
+    broker_mode: str = BROKER_MODE_MCP,
 ):
     try:
         broker = make_broker(broker_mode)
@@ -956,6 +956,17 @@ def broker_mcp_status():
     return status
 
 
+def _mcp_client_login_steps() -> list[dict]:
+    endpoint = "https://agent.robinhood.com/mcp/trading"
+    return [
+        {"client": "Claude Code", "steps": [f"Run: claude mcp add robinhood-trading --transport http {endpoint}", "Run /mcp, select robinhood-trading, then complete Robinhood auth."]},
+        {"client": "Claude Desktop", "steps": ["Open Settings -> Connectors -> Add custom connector.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
+        {"client": "ChatGPT", "steps": ["Enable Developer Mode.", "Open Settings -> Apps -> Create app.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
+        {"client": "Codex", "steps": ["Open Settings -> MCP servers -> Streamable HTTP.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
+        {"client": "Codex CLI", "steps": [f"Run: codex mcp add robinhood-trading --url {endpoint}", "Run /mcp, select robinhood-trading, then complete Robinhood auth."]},
+        {"client": "Cursor", "steps": [f"Provide MCP URL to the agent: {endpoint}", "Open Settings -> Cursor Settings -> Tools & MCPs -> Connect and complete auth."]},
+    ]
+
 @app.post("/broker/mcp/login")
 def broker_mcp_login():
     status = broker_mcp_status()
@@ -974,6 +985,7 @@ def broker_mcp_login():
     return {
         "ok": ok,
         "message": message,
+        "auth_instructions": _mcp_client_login_steps(),
         "status": status,
         "readiness": readiness,
     }
@@ -1095,7 +1107,7 @@ def broker_mcp_readiness():
     next_steps = [
         "Configure MCP auth via PUT /broker/mcp/config (preferred for runtime) or env vars as fallback.",
         "For production, point secret_refs to Vault/AWS/GCP/Azure and avoid raw token payloads.",
-        "Authenticate the Robinhood Agentic account in your MCP-capable client session.",
+        "Authenticate the Robinhood Agentic account in your MCP-capable client session (see /broker/mcp/login auth_instructions).",
         "Re-check MCP status from Overview to confirm authenticated=yes.",
         "Optional: set QF_MCP_ACCOUNT_JSON and QF_MCP_POSITIONS_JSON for local fixture-based testing.",
         "Once authenticated, validate account and positions read before enabling execution pathways.",
@@ -1424,7 +1436,7 @@ def assistant_query(req: AssistantQueryRequest):
 
 @app.post("/execution/propose")
 def execution_propose(req: ProposeOrderRequest, _auth: dict = Depends(require_write_auth)):
-    if req.broker_mode not in (BROKER_MODE_LEGACY, BROKER_MODE_MCP):
+    if req.broker_mode != BROKER_MODE_MCP:
         raise HTTPException(status_code=400, detail="Invalid broker_mode")
 
     create_schema(req.db)
