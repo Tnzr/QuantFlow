@@ -529,6 +529,8 @@ export default function App() {
   const [mcpBearerInput, setMcpBearerInput] = useState("");
   const [mcpHeaderInput, setMcpHeaderInput] = useState("Authorization");
   const [mcpConfigStatus, setMcpConfigStatus] = useState("idle");
+  const [mcpOAuthStatus, setMcpOAuthStatus] = useState("idle");
+  const [mcpOAuthStartResult, setMcpOAuthStartResult] = useState(null);
   const [mcpSignals, setMcpSignals] = useState(null);
   const [mcpSignalsError, setMcpSignalsError] = useState("");
   const [mcpRunbookReport, setMcpRunbookReport] = useState(null);
@@ -850,6 +852,7 @@ export default function App() {
       const params = new URLSearchParams(window.location.search || "");
       const view = params.get("view");
       const tab = params.get("tab");
+      const oauthResult = params.get("mcp_oauth");
 
       if (view === "public") {
         setSurface("Public");
@@ -859,6 +862,16 @@ export default function App() {
 
       if (tab && SCREENS.includes(tab)) {
         setScreen(tab);
+      }
+
+      if (oauthResult === "success") {
+        setMcpOAuthStatus("completed");
+        setStatus("mcp oauth completed");
+        loadMcpStatus();
+        params.delete("mcp_oauth");
+        const qs = params.toString();
+        const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
+        window.history.replaceState({}, "", nextUrl);
       }
     } catch (e) {
       // Ignore malformed URL state and continue with defaults.
@@ -1010,6 +1023,39 @@ export default function App() {
         await loadMcpStatus();
       } catch (e) {
         setMcpConfigStatus(`error: ${e.message}`);
+      }
+    });
+  };
+
+  const startMcpBackendOAuth = async () => {
+    setMcpOAuthStatus("starting");
+    await withProgress("Starting backend MCP OAuth", async () => {
+      try {
+        const continueUrl = isWeb
+          ? `${window.location.origin}${window.location.pathname}?view=workspace&tab=Auth`
+          : "";
+
+        const data = await apiPost(
+          "/broker/mcp/oauth/start",
+          {
+            continue_url: continueUrl,
+          },
+          authState
+        );
+
+        setMcpOAuthStartResult(data || null);
+        setMcpOAuthStatus("ready");
+
+        const authUrl = String(data?.authorization_url || "").trim();
+        if (authUrl && isWeb) {
+          window.open(authUrl, "_blank", "noopener,noreferrer");
+          setStatus("mcp oauth window opened");
+        } else if (authUrl) {
+          setStatus("open authorization_url from response to continue oauth");
+        }
+      } catch (e) {
+        setMcpOAuthStatus(`error: ${e.message}`);
+        setMcpOAuthStartResult(null);
       }
     });
   };
@@ -2977,6 +3023,22 @@ export default function App() {
         <Text style={styles.cardTitle}>Robinhood MCP Runtime Auth</Text>
         <Text style={styles.item}>Use this to let the backend access your authenticated Robinhood MCP account without relying on editor session state.</Text>
         <Text style={styles.warnText}>Never store real broker tokens in client storage. This input is sent directly to backend runtime config and then cleared locally.</Text>
+
+        <View style={styles.inlineRowWrap}>
+          <Pressable style={styles.button} onPress={startMcpBackendOAuth}>
+            <Text style={styles.buttonText}>Robinhood Auth (Backend OAuth)</Text>
+          </Pressable>
+          <Pressable style={styles.secondaryButton} onPress={loadMcpStatus}>
+            <Text style={styles.secondaryButtonText}>Refresh MCP Status</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.item}>Backend OAuth status: {mcpOAuthStatus}</Text>
+        {!!mcpOAuthStartResult?.authorization_url && (
+          <Text style={styles.item}>Authorization URL prepared. A new tab should open for consent.</Text>
+        )}
+        {!!mcpOAuthStartResult?.redirect_uri && (
+          <Text style={styles.item}>Redirect URI: {mcpOAuthStartResult.redirect_uri}</Text>
+        )}
 
         <Text style={styles.fieldLabel}>Auth Header</Text>
         <TextInput

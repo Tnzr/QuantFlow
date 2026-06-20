@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Optional
 import re
 import uuid
+import time
+import secrets
+import hashlib
+import base64
+import json
+import html
 from threading import Lock, Thread
 from datetime import datetime, timezone
 import multiprocessing as mp
@@ -17,6 +23,8 @@ import os
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from urllib import request as urlrequest, error as urlerror, parse as urlparse
 
 from ..data.persistence import create_schema
 from ..data.queries import recent_execution_intents, latest_universe, latest_recommendations_per_ticker
@@ -60,6 +68,9 @@ def _safe_records(df: "pd.DataFrame") -> list[dict]:
 
 _SCAN_JOBS: dict[str, dict] = {}
 _SCAN_JOBS_LOCK = Lock()
+
+_MCP_OAUTH_FLOWS: dict[str, dict] = {}
+_MCP_OAUTH_LOCK = Lock()
 
 _SECTOR_TO_ETF = {
     "technology": "XLK",
@@ -378,6 +389,12 @@ class MCPAuthConfigRequest(BaseModel):
     secret_provider: Optional[str] = None
     secret_refs: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, str] = Field(default_factory=dict)
+
+
+class MCPOAuthStartRequest(BaseModel):
+    redirect_uri: Optional[str] = None
+    continue_url: Optional[str] = None
+    scope: Optional[str] = None
 
 
 @app.get("/health")
@@ -967,6 +984,240 @@ def _mcp_client_login_steps() -> list[dict]:
         {"client": "Cursor", "steps": [f"Provide MCP URL to the agent: {endpoint}", "Open Settings -> Cursor Settings -> Tools & MCPs -> Connect and complete auth."]},
     ]
 
+
+def _mcp_fetch_json(url: str, timeout_seconds: int = 10) -> dict:
+    req = urlrequest.Request(url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw) if raw else {}
+            if isinstance(data, dict):
+                return data
+            raise ValueError("non-object JSON response")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch OAuth metadata from {url}: {e}")
+
+
+def _mcp_oauth_resource_metadata_url() -> str:
+    return os.getenv(
+        "QF_MCP_OAUTH_RESOURCE_METADATA_URL",
+        "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading",
+    ).strip()
+
+
+def _mcp_oauth_auth_metadata_url() -> str:
+    return os.getenv(
+        "QF_MCP_OAUTH_AUTH_SERVER_METADATA_URL",
+        "https://agent.robinhood.com/.well-known/oauth-authorization-server/mcp/trading",
+    ).strip()
+
+
+def _mcp_oauth_client_id() -> str:
+    return os.getenv("QF_MCP_OAUTH_CLIENT_ID", "").strip()
+
+
+def _mcp_oauth_scope_default() -> str:
+    return os.getenv("QF_MCP_OAUTH_SCOPE", "openid profile offline_access").strip()
+
+
+def _mcp_oauth_client_secret() -> str:
+    return os.getenv("QF_MCP_OAUTH_CLIENT_SECRET", "").strip()
+
+
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _mcp_oauth_cleanup_flows() -> None:
+    now = time.time()
+    with _MCP_OAUTH_LOCK:
+        expired = [k for k, v in _MCP_OAUTH_FLOWS.items() if float(v.get("expires_at", 0)) <= now]
+        for key in expired:
+            _MCP_OAUTH_FLOWS.pop(key, None)
+
+
+def _mcp_oauth_metadata_summary() -> dict:
+    resource_url = _mcp_oauth_resource_metadata_url()
+    auth_meta_url = _mcp_oauth_auth_metadata_url()
+    resource = _mcp_fetch_json(resource_url)
+    auth_server = _mcp_fetch_json(auth_meta_url)
+    return {
+        "resource_metadata_url": resource_url,
+        "auth_server_metadata_url": auth_meta_url,
+        "resource": {
+            "resource": resource.get("resource") or resource.get("resource_identifier"),
+            "authorization_servers": resource.get("authorization_servers") or [],
+        },
+        "authorization": {
+            "issuer": auth_server.get("issuer"),
+            "authorization_endpoint": auth_server.get("authorization_endpoint"),
+            "token_endpoint": auth_server.get("token_endpoint"),
+            "scopes_supported": auth_server.get("scopes_supported") or [],
+            "code_challenge_methods_supported": auth_server.get("code_challenge_methods_supported") or [],
+        },
+        "oauth_client": {
+            "client_id_configured": bool(_mcp_oauth_client_id()),
+            "client_secret_configured": bool(_mcp_oauth_client_secret()),
+            "default_scope": _mcp_oauth_scope_default(),
+        },
+    }
+
+
+@app.get("/broker/mcp/oauth/metadata")
+def broker_mcp_oauth_metadata(_auth: dict = Depends(require_write_auth)):
+    meta = _mcp_oauth_metadata_summary()
+    return {
+        "ok": True,
+        "metadata": meta,
+        "message": "Backend OAuth metadata for Robinhood MCP auth flow.",
+    }
+
+
+@app.post("/broker/mcp/oauth/start")
+def broker_mcp_oauth_start(req: MCPOAuthStartRequest, _auth: dict = Depends(require_write_auth)):
+    client_id = _mcp_oauth_client_id()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="QF_MCP_OAUTH_CLIENT_ID is required for backend OAuth flow.")
+
+    meta = _mcp_oauth_metadata_summary()
+    auth_endpoint = str((meta.get("authorization") or {}).get("authorization_endpoint") or "").strip()
+    token_endpoint = str((meta.get("authorization") or {}).get("token_endpoint") or "").strip()
+    if not auth_endpoint or not token_endpoint:
+        raise HTTPException(status_code=400, detail="OAuth server metadata is missing authorization/token endpoints.")
+
+    redirect_uri = (req.redirect_uri or os.getenv("QF_MCP_OAUTH_REDIRECT_URI", "")).strip()
+    if not redirect_uri:
+        redirect_uri = "http://localhost:8100/broker/mcp/oauth/callback"
+
+    state = secrets.token_urlsafe(24)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = _pkce_challenge(code_verifier)
+    scope = (req.scope or _mcp_oauth_scope_default()).strip()
+    continue_url = (req.continue_url or "").strip()
+
+    expires_at = time.time() + 600
+    _mcp_oauth_cleanup_flows()
+    with _MCP_OAUTH_LOCK:
+        _MCP_OAUTH_FLOWS[state] = {
+            "state": state,
+            "created_at": time.time(),
+            "expires_at": expires_at,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+            "token_endpoint": token_endpoint,
+            "client_id": client_id,
+            "continue_url": continue_url,
+            "scope": scope,
+        }
+
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "scope": scope,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    auth_url = f"{auth_endpoint}?{urlparse.urlencode(params)}"
+    return {
+        "ok": True,
+        "authorization_url": auth_url,
+        "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "message": "Open authorization_url to authenticate Robinhood MCP for this backend runtime.",
+    }
+
+
+@app.get("/broker/mcp/oauth/callback", response_class=HTMLResponse)
+def broker_mcp_oauth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None, error_description: Optional[str] = None):
+    if error:
+        detail = html.escape(f"{error}: {error_description or 'OAuth authorization failed'}")
+        return HTMLResponse(f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{detail}</p></body></html>", status_code=400)
+
+    if not code or not state:
+        return HTMLResponse("<html><body><h2>Robinhood MCP OAuth failed</h2><p>Missing code/state.</p></body></html>", status_code=400)
+
+    _mcp_oauth_cleanup_flows()
+    with _MCP_OAUTH_LOCK:
+        flow = dict(_MCP_OAUTH_FLOWS.pop(state, {}) or {})
+
+    if not flow:
+        return HTMLResponse("<html><body><h2>Robinhood MCP OAuth failed</h2><p>State not found or expired.</p></body></html>", status_code=400)
+
+    if float(flow.get("expires_at", 0)) <= time.time():
+        return HTMLResponse("<html><body><h2>Robinhood MCP OAuth failed</h2><p>Authorization state expired.</p></body></html>", status_code=400)
+
+    token_payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": str(flow.get("redirect_uri") or ""),
+        "client_id": str(flow.get("client_id") or ""),
+        "code_verifier": str(flow.get("code_verifier") or ""),
+    }
+    client_secret = _mcp_oauth_client_secret()
+    if client_secret:
+        token_payload["client_secret"] = client_secret
+
+    token_body = urlparse.urlencode(token_payload).encode("utf-8")
+    token_req = urlrequest.Request(
+        str(flow.get("token_endpoint") or ""),
+        data=token_body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlrequest.urlopen(token_req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            token_data = json.loads(raw) if raw else {}
+    except urlerror.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")[:500]
+        except Exception:
+            detail = ""
+        msg = f"Token exchange failed: HTTP {e.code} {e.reason}"
+        if detail:
+            msg = f"{msg} | {detail}"
+        return HTMLResponse(f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{html.escape(msg)}</p></body></html>", status_code=400)
+    except Exception as e:
+        return HTMLResponse(
+            f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{html.escape(f'Token exchange failed: {e}')}</p></body></html>",
+            status_code=400,
+        )
+
+    access_token = str((token_data or {}).get("access_token") or "").strip()
+    token_type = str((token_data or {}).get("token_type") or "Bearer").strip() or "Bearer"
+    if not access_token:
+        return HTMLResponse("<html><body><h2>Robinhood MCP OAuth failed</h2><p>No access_token returned by token endpoint.</p></body></html>", status_code=400)
+
+    set_runtime_mcp_auth_config({
+        "auth_header": "Authorization",
+        "bearer_token": f"{token_type} {access_token}".strip(),
+    })
+
+    continue_url = str(flow.get("continue_url") or "").strip()
+    if continue_url:
+        sep = "&" if "?" in continue_url else "?"
+        safe_continue = f"{continue_url}{sep}mcp_oauth=success".replace("'", "%27")
+        html_body = (
+            "<html><body><h2>Robinhood MCP OAuth complete</h2>"
+            f"<p>Backend token configured. Returning to app...</p><script>window.location.href='{safe_continue}';</script>"
+            f"<p><a href='{safe_continue}'>Continue</a></p></body></html>"
+        )
+        return HTMLResponse(html_body, status_code=200)
+
+    return HTMLResponse(
+        "<html><body><h2>Robinhood MCP OAuth complete</h2><p>Backend token configured. You can close this tab and refresh MCP status in QuantFlow.</p></body></html>",
+        status_code=200,
+    )
+
 @app.post("/broker/mcp/login")
 def broker_mcp_login():
     status = broker_mcp_status()
@@ -985,6 +1236,14 @@ def broker_mcp_login():
     return {
         "ok": ok,
         "message": message,
+        "backend_oauth": {
+            "start_endpoint": "/broker/mcp/oauth/start",
+            "metadata_endpoint": "/broker/mcp/oauth/metadata",
+            "callback_endpoint": "/broker/mcp/oauth/callback",
+            "requires_client_id_env": "QF_MCP_OAUTH_CLIENT_ID",
+            "optional_client_secret_env": "QF_MCP_OAUTH_CLIENT_SECRET",
+            "optional_redirect_uri_env": "QF_MCP_OAUTH_REDIRECT_URI",
+        },
         "auth_instructions": _mcp_client_login_steps(),
         "status": status,
         "readiness": readiness,
@@ -1105,6 +1364,7 @@ def broker_mcp_readiness():
     ]
 
     next_steps = [
+        "Preferred: run backend OAuth via POST /broker/mcp/oauth/start and complete browser auth callback.",
         "Configure MCP auth via PUT /broker/mcp/config (preferred for runtime) or env vars as fallback.",
         "For production, point secret_refs to Vault/AWS/GCP/Azure and avoid raw token payloads.",
         "Authenticate the Robinhood Agentic account in your MCP-capable client session (see /broker/mcp/login auth_instructions).",
