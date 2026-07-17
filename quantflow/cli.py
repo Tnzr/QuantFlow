@@ -31,6 +31,15 @@ from .ops.maintenance import build_refresh_plan, execute_refresh_plan
 from .features.training import build_training_frame
 
 
+def _lazy_import_models():
+    from .models.dataset import build_dataset as _build_dataset
+    from .models.trainer import train_model, TrainingConfig, Trainer
+    from .models.losses import LossConfig
+    from .models.backtest_engine import AIBacktestEngine
+    from .models.architectures import create_model
+    return _build_dataset, train_model, TrainingConfig, Trainer, LossConfig, AIBacktestEngine, create_model
+
+
 def cmd_init_db(args):
     create_schema(args.db)
     print(f"[green]DB initialized at {args.db}")
@@ -384,6 +393,305 @@ def cmd_export_table(args):
     print(f"[green]Exported {args.table} to parquet: {out_path}")
 
 
+def cmd_build_dataset(args):
+    from .data.universe import SECTOR_UNIVERSE
+    build_model_dataset, _, _, _, _, _, _ = _lazy_import_models()
+
+    print("[cyan]Building ML training dataset...")
+    tickers = None
+    if args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    elif args.sector:
+        tickers = SECTOR_UNIVERSE.get(args.sector, []) + SECTOR_UNIVERSE.get(f"{args.sector} — Alternatives", [])
+    if not tickers:
+        tickers = SECTOR_UNIVERSE.get("Financials", []) + SECTOR_UNIVERSE.get("Financials — Alternatives", [])
+
+    print(f"[yellow]Tickers: {tickers}")
+    df = build_model_dataset(
+        tickers=tickers,
+        period=args.period,
+        interval=args.interval,
+        lookback=args.lookback,
+        forecast_horizon=args.forecast_horizon,
+        snapshot_step=args.snapshot_step,
+        max_rows=args.max_rows or None,
+        export_path=args.out or None,
+    )
+    print(f"[green]Dataset built: {len(df)} rows, {df['ticker'].nunique()} tickers")
+    print(f"[green]Columns: {list(df.columns)}")
+
+    if "event_state_code" in df.columns:
+        dist = df["event_state_code"].value_counts().to_dict()
+        for code in sorted(dist):
+            label = {0: "inter_event", 1: "pre_event", 2: "onset"}.get(code, str(code))
+            print(f"  {label}: {dist[code]} ({100*dist[code]/len(df):.1f}%)")
+
+
+def cmd_train(args):
+    from quantflow.data.labeler import build_labeled_dataset
+    from .data.universe import SECTOR_UNIVERSE
+    _, train_model, TrainingConfig, Trainer, LossConfig, _, _ = _lazy_import_models()
+
+    print("[cyan]Loading dataset...")
+    tickers = None
+    if args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+
+    df = build_labeled_dataset(
+        tickers=tickers,
+        period=args.period,
+        interval=args.interval,
+        snapshot_step=args.snapshot_step,
+        forecast_horizon=args.forecast_horizon,
+        max_rows=args.max_rows or None,
+    )
+
+    print(f"[yellow]Loaded {len(df)} rows, {df['ticker'].nunique()} tickers")
+
+    config = TrainingConfig(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        lookback=args.lookback,
+        forecast_horizon=args.forecast_horizon,
+        architecture=args.arch,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+        use_multi_scale=not args.no_multi_scale,
+        use_coherent_heads=not args.no_coherent_heads,
+        checkpoint_dir=args.checkpoint_dir,
+    )
+
+    loss_config = LossConfig(
+        classification_weight=args.cls_weight,
+        regression_weight=args.reg_weight,
+        coherence_weight=args.coh_weight,
+    )
+
+    print(f"[cyan]Training {args.arch} model (hidden_dim={args.hidden_dim}, epochs={args.epochs})...")
+    trainer, history, predictions = train_model(df, config=config, loss_config=loss_config, device=args.device)
+
+    if args.save:
+        trainer.save_model(args.save)
+    print(f"[green]Training complete. Best val loss: {trainer.best_val_loss:.4f}")
+
+
+def cmd_ai_backtest(args):
+    print("[cyan]AI Backtest — loading model and running backtest...")
+    import torch
+    from .data.universe import SECTOR_UNIVERSE
+    _, _, TrainingConfig, Trainer, _, AIBacktestEngine, create_model = _lazy_import_models()
+    from .models.dataset import FEATURE_COLUMNS
+
+    if not args.model:
+        print("[red]Error: --model path is required")
+        return
+
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] if args.tickers else (
+        SECTOR_UNIVERSE.get("Financials", []) + SECTOR_UNIVERSE.get("Financials — Alternatives", [])
+    )[:5]
+
+    print(f"[yellow]Tickers: {tickers}")
+
+    config = TrainingConfig(
+        architecture=args.arch,
+        lookback=args.lookback,
+        forecast_horizon=args.forecast_horizon,
+        hidden_dim=args.hidden_dim,
+    )
+
+    from .models.dataset import FEATURE_COLUMNS
+    model = create_model(
+        architecture=config.architecture,
+        input_dim=len(FEATURE_COLUMNS),
+        hidden_dim=config.hidden_dim,
+        forecast_horizon=config.forecast_horizon,
+        use_multi_scale=not args.no_multi_scale,
+        use_coherent_heads=not args.no_coherent_heads,
+    )
+
+    trainer = Trainer(model, config=config, device=args.device)
+    trainer.load_model(args.model)
+
+    engine = AIBacktestEngine(
+        trainer=trainer,
+        entry_threshold=args.entry_threshold,
+        exit_threshold=args.exit_threshold,
+        max_hold_days=args.max_hold_days,
+        stop_loss_pct=args.stop_loss_pct,
+        take_profit_pct=args.take_profit_pct,
+    )
+
+    result = engine.run(
+        tickers=tickers,
+        period=args.period,
+        interval=args.interval,
+        start_date=args.start,
+    )
+
+    print(f"\n[yellow]Backtest Results:")
+    print(f"  Trades: {result.n_trades}")
+    print(f"  Win Rate: {result.win_rate:.2%}")
+    print(f"  Avg Return: {result.avg_ret:.2%}")
+    print(f"  Max Drawdown: {result.max_drawdown:.2%}")
+    print(f"  Sharpe: {result.sharpe_ratio:.2f}")
+    print(f"  Sortino: {result.sortino_ratio:.2f}")
+    print(f"  CAGR: {result.cagr:.2%}")
+    print(f"  Profit Factor: {result.profit_factor:.2f}")
+    print(f"  Total Return: {result.total_return:.2%}")
+
+    if not result.by_ticker.empty:
+        print(f"\n[yellow]By Ticker:")
+        for row in result.by_ticker.to_dict(orient="records"):
+            print(f"  {row['ticker']}: trades={row['n_trades']} win={row['win_rate']:.2%} avg_ret={row['avg_ret']:.2%}")
+
+    if args.viz:
+        try:
+            from .models.visualization import generate_backtest_visualizations
+            import pandas as pd
+
+            print(f"\n[cyan]Generating visualizations from portfolio signals...")
+
+            signals = {}
+            daily_signals = getattr(result, "daily_signals", {})
+            if daily_signals:
+                first_tk = next(iter(daily_signals.keys()), None)
+                if first_tk and not daily_signals[first_tk].empty:
+                    df_sig = daily_signals[first_tk]
+                    signals = {
+                        "prob_inter_event": df_sig.get("prob_inter_event", pd.Series(dtype=float)).values,
+                        "prob_pre_event": df_sig.get("prob_pre_event", pd.Series(dtype=float)).values,
+                        "prob_onset": df_sig.get("prob_onset", pd.Series(dtype=float)).values,
+                        "forecast_tau": df_sig.get("forecast_tau", pd.Series(dtype=float)).values,
+                    }
+
+            paths = generate_backtest_visualizations(
+                result, signals,
+                output_dir=args.viz_dir,
+                ticker="portfolio",
+                prefix="ai_backtest",
+            )
+            for name, path in paths.items():
+                if path:
+                    print(f"  [green]{name}[/green]: {path}")
+        except Exception as e:
+            print(f"[red]Visualization failed: {e}")
+
+
+def cmd_predict(args):
+    print("[cyan]AI Prediction — loading model and running inference...")
+    import torch
+    import pandas as pd
+    import numpy as np
+    from .data.universe import HIGH_INTEREST
+    from .features.indicators import fetch_ohlcv, compute_indicators
+    from .models.dataset import FEATURE_COLUMNS, _prepare_features
+    _, _, _, _, _, _, create_model = _lazy_import_models()
+
+    if not args.model:
+        print("[red]Error: --model path is required")
+        return
+
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] if args.tickers else HIGH_INTEREST[:10]
+
+    config = TrainingConfig(
+        architecture=args.arch,
+        lookback=args.lookback,
+        hidden_dim=args.hidden_dim,
+    )
+
+    model = create_model(
+        architecture=config.architecture,
+        input_dim=len(FEATURE_COLUMNS),
+        hidden_dim=config.hidden_dim,
+        forecast_horizon=args.forecast_horizon,
+        use_multi_scale=not args.no_multi_scale,
+        use_coherent_heads=not args.no_coherent_heads,
+    )
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
+    model.to(device)
+    model.eval()
+
+    results = []
+    for ticker in tickers:
+        try:
+            from .data.labeler import _build_features_at
+            from .models.dataset import FEATURE_COLUMNS
+
+            df = fetch_ohlcv(ticker, period=args.period)
+            df = compute_indicators(df)
+            if len(df) < args.lookback:
+                results.append({"ticker": ticker, "error": "insufficient data"})
+                continue
+
+            feature_rows = []
+            start_idx = max(0, len(df) - args.lookback * 2)
+            for idx in range(start_idx, len(df)):
+                feat = _build_features_at(df, idx, ticker=ticker, forecast_horizon=args.forecast_horizon)
+                if "error" not in feat:
+                    feature_rows.append(feat)
+
+            if len(feature_rows) < args.lookback:
+                results.append({"ticker": ticker, "error": f"insufficient features: {len(feature_rows)}"})
+                continue
+
+            feat_df = pd.DataFrame(feature_rows)
+            feat_df = _prepare_features(feat_df)
+
+            available_cols = [c for c in FEATURE_COLUMNS if c in feat_df.columns]
+            features = feat_df[available_cols].values[-args.lookback:].astype(np.float32)
+
+            if features.shape[0] < args.lookback:
+                results.append({"ticker": ticker, "error": "insufficient lookback"})
+                continue
+
+            if features.shape[1] != len(FEATURE_COLUMNS):
+                if features.shape[1] > len(FEATURE_COLUMNS):
+                    features = features[:, :len(FEATURE_COLUMNS)]
+                else:
+                    pad = np.zeros((features.shape[0], len(FEATURE_COLUMNS) - features.shape[1]), dtype=np.float32)
+                    features = np.concatenate([features, pad], axis=1)
+
+            features_clean = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+            x = torch.from_numpy(features_clean).unsqueeze(0).to(device)
+            with torch.no_grad():
+                outputs = model(x)
+
+            probs = outputs["past_state_probs"].cpu().numpy()[0]
+            forecast = float(outputs["future_forecast"].cpu().numpy()[0].mean())
+            sigma = float(outputs["uncertainty_sigma"].cpu().numpy()[0].mean())
+
+            results.append({
+                "ticker": ticker,
+                "price": float(df["adj close"].iloc[-1]),
+                "state": int(np.argmax(probs)),
+                "state_label": {0: "inter_event", 1: "pre_event", 2: "onset"}.get(int(np.argmax(probs)), "unknown"),
+                "prob_inter_event": float(probs[0]),
+                "prob_pre_event": float(probs[1]),
+                "prob_onset": float(probs[2]),
+                "forecast_tau_days": forecast,
+                "uncertainty": sigma,
+            })
+        except Exception as e:
+            results.append({"ticker": ticker, "error": str(e)})
+
+    print(f"\n[yellow]AI Predictions ({len(results)} tickers)")
+    for r in sorted(results, key=lambda x: x.get("prob_pre_event", 0) + x.get("prob_onset", 0) * 1.5, reverse=True):
+        if "error" in r:
+            print(f"  {r['ticker']}: [red]ERROR — {r['error']}")
+        else:
+            state_color = "green" if r["state"] == 0 else ("yellow" if r["state"] == 1 else "red")
+            print(
+                f"  [{state_color}]{r['state_label']:>12}[/{state_color}] "
+                f"{r['ticker']:>6} "
+                f"${r['price']:.2f} "
+                f"inter={r['prob_inter_event']:.2f} pre={r['prob_pre_event']:.2f} onset={r['prob_onset']:.2f} "
+                f"tau={r['forecast_tau_days']:.1f}d unc={r['uncertainty']:.3f}"
+            )
+
+
 def main():
     p = argparse.ArgumentParser(prog="quantflow")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -484,6 +792,77 @@ def main():
     p13.add_argument("--db", default="sqlite:///quantflow.db")
     p13.add_argument("--out", required=True)
     p13.set_defaults(func=cmd_export_table)
+
+    p14 = sub.add_parser("build-dataset")
+    p14.add_argument("--tickers", default="")
+    p14.add_argument("--sector", default="", help="Sector key from SECTOR_UNIVERSE (e.g., 'Financials')")
+    p14.add_argument("--period", default="5y")
+    p14.add_argument("--interval", default="1d")
+    p14.add_argument("--lookback", type=int, default=60)
+    p14.add_argument("--forecast-horizon", type=int, default=21)
+    p14.add_argument("--snapshot-step", type=int, default=3)
+    p14.add_argument("--max-rows", type=int, default=0)
+    p14.add_argument("--out", default="")
+    p14.set_defaults(func=cmd_build_dataset)
+
+    p15 = sub.add_parser("train")
+    p15.add_argument("--tickers", default="")
+    p15.add_argument("--period", default="5y")
+    p15.add_argument("--interval", default="1d")
+    p15.add_argument("--snapshot-step", type=int, default=3)
+    p15.add_argument("--lookback", type=int, default=60)
+    p15.add_argument("--forecast-horizon", type=int, default=21)
+    p15.add_argument("--max-rows", type=int, default=0)
+    p15.add_argument("--arch", default="bilstm", choices=["bilstm", "transformer", "tcn"])
+    p15.add_argument("--hidden-dim", type=int, default=128)
+    p15.add_argument("--dropout", type=float, default=0.2)
+    p15.add_argument("--epochs", type=int, default=50)
+    p15.add_argument("--batch-size", type=int, default=64)
+    p15.add_argument("--learning-rate", type=float, default=1e-4)
+    p15.add_argument("--no-multi-scale", action="store_true")
+    p15.add_argument("--no-coherent-heads", action="store_true")
+    p15.add_argument("--cls-weight", type=float, default=0.35)
+    p15.add_argument("--reg-weight", type=float, default=0.25)
+    p15.add_argument("--coh-weight", type=float, default=0.10)
+    p15.add_argument("--checkpoint-dir", default="checkpoints")
+    p15.add_argument("--device", default="")
+    p15.add_argument("--save", default="")
+    p15.set_defaults(func=cmd_train)
+
+    p16 = sub.add_parser("ai-backtest")
+    p16.add_argument("--tickers", default="")
+    p16.add_argument("--model", required=True, help="Path to saved model .pt file")
+    p16.add_argument("--arch", default="bilstm", choices=["bilstm", "transformer", "tcn"])
+    p16.add_argument("--hidden-dim", type=int, default=128)
+    p16.add_argument("--lookback", type=int, default=60)
+    p16.add_argument("--forecast-horizon", type=int, default=21)
+    p16.add_argument("--no-multi-scale", action="store_true")
+    p16.add_argument("--no-coherent-heads", action="store_true")
+    p16.add_argument("--period", default="5y")
+    p16.add_argument("--interval", default="1d")
+    p16.add_argument("--start", default="2020-01-01")
+    p16.add_argument("--entry-threshold", type=float, default=0.60)
+    p16.add_argument("--exit-threshold", type=float, default=0.40)
+    p16.add_argument("--max-hold-days", type=int, default=21)
+    p16.add_argument("--stop-loss-pct", type=float, default=0.05)
+    p16.add_argument("--take-profit-pct", type=float, default=0.0)
+    p16.add_argument("--device", default="")
+    p16.add_argument("--viz", action="store_true", help="Generate visualization charts")
+    p16.add_argument("--viz-dir", default="reports", help="Output directory for visualization charts")
+    p16.set_defaults(func=cmd_ai_backtest)
+
+    p17 = sub.add_parser("predict")
+    p17.add_argument("--tickers", default="")
+    p17.add_argument("--model", required=True, help="Path to saved model .pt file")
+    p17.add_argument("--arch", default="bilstm", choices=["bilstm", "transformer", "tcn"])
+    p17.add_argument("--hidden-dim", type=int, default=128)
+    p17.add_argument("--lookback", type=int, default=60)
+    p17.add_argument("--forecast-horizon", type=int, default=21)
+    p17.add_argument("--no-multi-scale", action="store_true")
+    p17.add_argument("--no-coherent-heads", action="store_true")
+    p17.add_argument("--period", default="2y")
+    p17.add_argument("--device", default="")
+    p17.set_defaults(func=cmd_predict)
 
     args = p.parse_args()
     args.func(args)

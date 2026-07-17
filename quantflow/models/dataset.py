@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Dataset, random_split
+
+from ..data.labeler import build_labeled_dataset
+from ..data.universe import SECTOR_UNIVERSE
+from ..features.indicators import fetch_ohlcv, compute_indicators
+
+logger = logging.getLogger(__name__)
+
+
+FEATURE_COLUMNS = [
+    "ret_1d", "ret_5d", "ret_21d", "ret_63d",
+    "rsi14", "atr14", "vol20",
+    "distance_sma20_pct", "distance_sma50_pct", "distance_sma200_pct",
+    "support_gap_pct", "resistance_gap_pct",
+    "composite_score", "trend_score", "momentum_score",
+    "rsi_quality_score", "volatility_regime_score", "atr_efficiency_score",
+    "forecast_return_pct", "forecast_band_pct", "forecast_daily_trend_pct",
+]
+
+LABEL_COLUMNS = [
+    "event_state_code",
+    "target_1d", "target_5d", "target_21d",
+    "target_direction_5d", "target_direction_21d",
+    "drawdown_5d_max", "drawdown_21d_max",
+    "tau_forward_synthetic",
+]
+
+
+def _build_tau_forward(row: pd.Series) -> float:
+    """Synthesize tau (time-to-event) from event state and forward drawdown."""
+    code = row.get("event_state_code", 0)
+    target_21d = row.get("target_21d", 0.0) or 0.0
+    dd_21d = row.get("drawdown_21d_max", 0.0) or 0.0
+
+    if code == 2:
+        return max(1.0, min(5.0, -dd_21d * 100))
+    elif code == 1:
+        if target_21d < -0.01:
+            return max(3.0, min(21.0, -target_21d * 252.0))
+        return max(5.0, min(21.0, -dd_21d * 200) if dd_21d else 21.0)
+    else:
+        return 21.0
+
+
+def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Select and impute feature columns for model input."""
+    available = [c for c in FEATURE_COLUMNS if c in df.columns]
+    data = df[available].copy()
+    data = data.fillna(0.0)
+    data = data.replace([np.inf, -np.inf], 0.0)
+    return data
+
+
+class FinancialTimeSeriesDataset(Dataset):
+    """Time-series dataset for stock market event-state prediction.
+
+    Handles ticker-grouped, chronologically ordered sequences with lookback windows.
+    Each sample is a window of consecutive feature rows with forward labels.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        lookback: int = 60,
+        forecast_horizon: int = 21,
+        feature_cols: Optional[List[str]] = None,
+        label_cols: Optional[List[str]] = None,
+        ticker_col: str = "ticker",
+        date_col: str = "as_of_date",
+    ):
+        self.lookback = lookback
+        self.forecast_horizon = forecast_horizon
+        self.feature_cols = feature_cols or FEATURE_COLUMNS
+        self.label_cols = label_cols or LABEL_COLUMNS
+
+        df[date_col] = pd.to_datetime(df[date_col])
+        df = df.sort_values([ticker_col, date_col]).reset_index(drop=True)
+
+        feature_df = _prepare_features(df)
+        self._samples: List[Tuple[np.ndarray, Dict[str, np.ndarray], str, str]] = []
+
+        for ticker in df[ticker_col].unique():
+            ticker_mask = df[ticker_col].values == ticker
+            ticker_idx = np.where(ticker_mask)[0].tolist()
+            if len(ticker_idx) <= self.lookback:
+                continue
+            dates = df[date_col].values[ticker_mask]
+            ticker_features = feature_df.iloc[ticker_idx].values.astype(np.float32)
+            ticker_labels = df.iloc[ticker_idx]
+
+            for i in range(self.lookback, len(ticker_idx) - 1):
+                window = ticker_features[i - self.lookback:i]
+                row_labels = ticker_labels.iloc[i]
+
+                tau = _build_tau_forward(row_labels)
+                dd5 = row_labels.get("drawdown_5d_max", 0.0) or 0.0
+                dd21 = row_labels.get("drawdown_21d_max", 0.0) or 0.0
+
+                label_dict = {
+                    "event_state_code": np.array(int(row_labels.get("event_state_code", 0)), dtype=np.int64),
+                    "tau_forward": np.array(tau, dtype=np.float32),
+                    "target_5d": np.array(row_labels.get("target_5d", 0.0) or 0.0, dtype=np.float32),
+                    "target_21d": np.array(row_labels.get("target_21d", 0.0) or 0.0, dtype=np.float32),
+                    "target_direction_5d": np.array(int(row_labels.get("target_direction_5d", 0)), dtype=np.int64),
+                    "target_direction_21d": np.array(int(row_labels.get("target_direction_21d", 0)), dtype=np.int64),
+                    "drawdown_5d_max": np.array(dd5, dtype=np.float32),
+                    "drawdown_21d_max": np.array(dd21, dtype=np.float32),
+                }
+                date_str = str(dates[i])[:10] if i < len(dates) else ""
+                self._samples.append((window, label_dict, ticker, date_str))
+
+        self.feature_dim = len(self.feature_cols)
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], str]:
+        features, labels, ticker, date = self._samples[idx]
+        return (
+            torch.from_numpy(features),
+            {k: torch.tensor(v) for k, v in labels.items()},
+            ticker,
+        )
+
+    @property
+    def class_distribution(self) -> Dict[str, int]:
+        counts = {0: 0, 1: 0, 2: 0}
+        for _, labels, _, _ in self._samples:
+            code = int(labels["event_state_code"].item())
+            if code in counts:
+                counts[code] += 1
+        return counts
+
+
+def build_dataset(
+    tickers: Optional[List[str]] = None,
+    period: str = "5y",
+    interval: str = "1d",
+    lookback: int = 60,
+    forecast_horizon: int = 21,
+    snapshot_step: int = 3,
+    max_rows: Optional[int] = None,
+    export_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """Build a labeled dataset using the existing labeler pipeline and prepare for ML training."""
+    if tickers is None:
+        tickers = SECTOR_UNIVERSE.get("Financials", []) + SECTOR_UNIVERSE.get("Financials — Alternatives", [])
+        logger.info(f"Using Financials sector tickers: {tickers}")
+
+    logger.info(f"Building labeled dataset for {len(tickers)} tickers (period={period}, interval={interval})...")
+    df = build_labeled_dataset(
+        tickers=tickers,
+        period=period,
+        interval=interval,
+        snapshot_step=snapshot_step,
+        forecast_horizon=forecast_horizon,
+        onset_dd_threshold=0.05,
+        pre_event_dd_threshold=0.02,
+        max_rows=max_rows,
+        export_path=export_path,
+    )
+    df["tau_forward_synthetic"] = df.apply(_build_tau_forward, axis=1)
+    return df
+
+
+def prepare_dataloaders(
+    df: pd.DataFrame,
+    lookback: int = 60,
+    forecast_horizon: int = 21,
+    batch_size: int = 64,
+    val_split: float = 0.15,
+    test_split: float = 0.10,
+    num_workers: int = 0,
+    seed: int = 42,
+) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
+    """Split dataset chronologically and return DataLoaders.
+
+    Uses ticker-level grouping to ensure no data leakage across splits.
+    """
+    tickers = df["ticker"].unique()
+    np.random.seed(seed)
+    np.random.shuffle(tickers)
+
+    n_val = max(1, int(len(tickers) * val_split))
+    n_test = max(1, int(len(tickers) * test_split))
+    n_train = len(tickers) - n_val - n_test
+
+    train_tickers = set(tickers[:n_train])
+    val_tickers = set(tickers[n_train:n_train + n_val])
+    test_tickers = set(tickers[n_train + n_val:])
+
+    train_df = df[df["ticker"].isin(train_tickers)].copy()
+    val_df = df[df["ticker"].isin(val_tickers)].copy()
+    test_df = df[df["ticker"].isin(test_tickers)].copy()
+
+    logger.info(f"Split: train={len(train_df)} rows ({n_train} tickers), "
+                f"val={len(val_df)} rows ({n_val} tickers), "
+                f"test={len(test_df)} rows ({n_test} tickers)")
+
+    train_ds = FinancialTimeSeriesDataset(train_df, lookback=lookback, forecast_horizon=forecast_horizon)
+    val_ds = FinancialTimeSeriesDataset(val_df, lookback=lookback, forecast_horizon=forecast_horizon)
+    test_ds = FinancialTimeSeriesDataset(test_df, lookback=lookback, forecast_horizon=forecast_horizon)
+
+    logger.info(f"Dataset created: feature_dim={train_ds.feature_dim}, "
+                f"train_samples={len(train_ds)}, val_samples={len(val_ds)}, test_samples={len(test_ds)}")
+    logger.info(f"Train class distribution: {train_ds.class_distribution}")
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+
+    return train_loader, val_loader, test_loader, train_ds.feature_dim
