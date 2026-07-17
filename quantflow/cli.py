@@ -466,6 +466,7 @@ def cmd_train(args):
         classification_weight=args.cls_weight,
         regression_weight=args.reg_weight,
         coherence_weight=args.coh_weight,
+        direction_weight=args.dir_weight,
     )
 
     print(f"[cyan]Training {args.arch} model (hidden_dim={args.hidden_dim}, epochs={args.epochs})...")
@@ -821,9 +822,10 @@ def main():
     p15.add_argument("--learning-rate", type=float, default=1e-4)
     p15.add_argument("--no-multi-scale", action="store_true")
     p15.add_argument("--no-coherent-heads", action="store_true")
-    p15.add_argument("--cls-weight", type=float, default=0.35)
-    p15.add_argument("--reg-weight", type=float, default=0.25)
+    p15.add_argument("--cls-weight", type=float, default=0.30)
+    p15.add_argument("--reg-weight", type=float, default=0.20)
     p15.add_argument("--coh-weight", type=float, default=0.10)
+    p15.add_argument("--dir-weight", type=float, default=0.10)
     p15.add_argument("--checkpoint-dir", default="checkpoints")
     p15.add_argument("--device", default="")
     p15.add_argument("--save", default="")

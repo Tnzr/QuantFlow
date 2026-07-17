@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from .trainer import Trainer
 from ..features.indicators import fetch_ohlcv, compute_indicators
@@ -57,6 +58,9 @@ class AIBacktestEngine:
     Uses the TemporalStateModel to generate event-state probabilities and
     time-to-event forecasts, then simulates a simultaneous multi-ticker
     portfolio with daily rebalancing and position management.
+
+    Batched GPU inference: all tickers' features are stacked and processed
+    in a single model forward pass per day for maximum throughput.
     """
 
     def __init__(
@@ -80,6 +84,9 @@ class AIBacktestEngine:
         self.use_forecast_for_exit = use_forecast_for_exit
         self.top_n = top_n
         self.cash_return_annual = cash_return_annual
+        self.lookback = trainer.config.lookback
+        self.feature_dim = trainer.model.input_dim
+        self.device = trainer.device
 
     def run(
         self,
@@ -106,7 +113,7 @@ class AIBacktestEngine:
         end_date: Optional[str] = None,
     ) -> BacktestResult:
         ticker_dfs: Dict[str, pd.DataFrame] = {}
-        for ticker in tickers:
+        for ticker in tqdm(tickers, desc="Fetching OHLCV"):
             df = fetch_ohlcv(ticker, period=period, interval=interval)
             if df.empty or len(df) < 100:
                 logger.warning(f"Skipping {ticker}: insufficient data ({len(df)} rows)")
@@ -132,14 +139,9 @@ class AIBacktestEngine:
             return self._empty_result()
 
         date_range = all_dates
-        min_warmup = self.trainer.config.lookback
+        min_warmup = self.lookback
 
-        daily_signals: Dict[str, dict] = {}
-        for ticker, df in ticker_dfs.items():
-            if len(df) <= min_warmup:
-                continue
-            sig = self._generate_signals_for_ticker(df, date_range, min_warmup)
-            daily_signals[ticker] = sig
+        daily_signals = self._generate_all_signals_batched(ticker_dfs, date_range, min_warmup)
 
         initial_cash = 1.0
         cash = initial_cash
@@ -157,19 +159,15 @@ class AIBacktestEngine:
 
         trade_list: List[Trade] = []
         trade_log: List[Dict] = []
-        active_position_snapshots: List[Dict] = []
 
         daily_risk_cash_return = (1 + self.cash_return_annual) ** (1 / 252) - 1
 
-        prev_portfolio_value = initial_equity
-
-        for day_idx, current_date in enumerate(date_range):
+        for day_idx in tqdm(range(len(date_range)), desc="Simulating portfolio"):
+            current_date = date_range[day_idx]
             if day_idx == 0:
                 daily_equity_series.loc[current_date] = initial_equity
                 daily_cash_series.loc[current_date] = cash
                 continue
-
-            prev_portfolio_value = daily_equity_series.iloc[day_idx - 1]
 
             for ticker, pos in positions.items():
                 if pos is None:
@@ -187,10 +185,13 @@ class AIBacktestEngine:
                 if pos is None:
                     continue
                 if current_date in ticker_dfs[ticker].index:
-                    pnl = pos["shares"] * ticker_dfs[ticker].loc[current_date]["adj close"] if "adj close" in ticker_dfs[ticker].columns else pos["shares"] * ticker_dfs[ticker].loc[current_date]["Close"]
-                    positions_pnl[ticker] = float(pnl)
+                    price = float(
+                        ticker_dfs[ticker].loc[current_date, "adj close"]
+                        if "adj close" in ticker_dfs[ticker].columns
+                        else ticker_dfs[ticker].loc[current_date, "Close"]
+                    )
+                    positions_pnl[ticker] = pos["shares"] * price
 
-            portfolio_value = cash + sum(positions_pnl.values())
             cash += cash * daily_risk_cash_return
 
             positions_to_close: List[str] = []
@@ -210,7 +211,8 @@ class AIBacktestEngine:
                 exit_reason = ""
 
                 sig = daily_signals.get(ticker, {})
-                prob_inter = sig.get("prob_inter_event", np.zeros(1))[day_idx] if day_idx < len(sig.get("prob_inter_event", np.zeros(1))) else 0.0
+                dl = len(sig.get("prob_inter_event", np.zeros(1)))
+                prob_inter = sig.get("prob_inter_event", np.zeros(1))[day_idx] if day_idx < dl else 0.0
                 forecast_tau = sig.get("forecast_tau", np.full(1, 21.0))[day_idx] if day_idx < len(sig.get("forecast_tau", np.full(1, 21.0))) else 21.0
 
                 if prob_inter >= self.exit_threshold:
@@ -234,7 +236,7 @@ class AIBacktestEngine:
                     exit_signal = True
                     exit_reason = "max_hold"
 
-                if self.use_forecast_for_exit and forecast_tau > self.max_hold_days * 0.8:
+                if self.use_forecast_for_exit and float(forecast_tau) > self.max_hold_days * 0.8:
                     exit_signal = True
                     exit_reason = "forecast_exit"
 
@@ -334,12 +336,13 @@ class AIBacktestEngine:
 
         daily_signals_dfs: Dict[str, pd.DataFrame] = {}
         for ticker, sig_dict in daily_signals.items():
+            max_len = min(len(date_range), len(sig_dict.get("prob_inter_event", np.zeros(1))))
             df_sig = pd.DataFrame({
-                "prob_inter_event": sig_dict.get("prob_inter_event", np.zeros(len(date_range)))[:len(date_range)],
-                "prob_pre_event": sig_dict.get("prob_pre_event", np.zeros(len(date_range)))[:len(date_range)],
-                "prob_onset": sig_dict.get("prob_onset", np.zeros(len(date_range)))[:len(date_range)],
-                "forecast_tau": sig_dict.get("forecast_tau", np.full(len(date_range), 21.0))[:len(date_range)],
-            }, index=pd.DatetimeIndex(date_range[:len(sig_dict.get("prob_inter_event", np.zeros(len(date_range))))]))
+                "prob_inter_event": sig_dict.get("prob_inter_event", np.zeros(max_len))[:max_len],
+                "prob_pre_event": sig_dict.get("prob_pre_event", np.zeros(max_len))[:max_len],
+                "prob_onset": sig_dict.get("prob_onset", np.zeros(max_len))[:max_len],
+                "forecast_tau": sig_dict.get("forecast_tau", np.full(max_len, 21.0))[:max_len],
+            }, index=pd.DatetimeIndex(date_range[:max_len]))
             daily_signals_dfs[ticker] = df_sig
 
         if trade_list:
@@ -418,83 +421,116 @@ class AIBacktestEngine:
             trade_log=trade_log,
         )
 
-    def _generate_signals_for_ticker(
-        self, df: pd.DataFrame, shared_dates: List[pd.Timestamp], min_warmup: int,
-    ) -> Dict[str, np.ndarray]:
+    def _generate_all_signals_batched(
+        self, ticker_dfs: Dict[str, pd.DataFrame],
+        shared_dates: List[pd.Timestamp], min_warmup: int,
+    ) -> Dict[str, dict]:
+        """Generate signals for all tickers using batched GPU inference.
+
+        Instead of sequential per-ticker inference, this constructs a
+        single feature tensor per day spanning all tickers and performs
+        one forward pass over the batch.
+        """
         from ..data.labeler import _build_features_at
         from .dataset import FEATURE_COLUMNS, _prepare_features
 
-        n = len(df)
-        lookback = self.trainer.config.lookback
-        feature_dim = self.trainer.model.input_dim
-
-        feature_rows = []
-        for i in range(lookback, n):
-            feat = _build_features_at(df, i, ticker="ticker", forecast_horizon=21)
-            feature_rows.append(feat)
-
         n_shared = len(shared_dates)
-        probs_inter = np.zeros(n_shared)
-        probs_pre = np.zeros(n_shared)
-        probs_onset = np.zeros(n_shared)
-        forecast_tau = np.full(n_shared, 21.0)
+        valid_tickers = sorted(ticker_dfs.keys())
+        n_tickers = len(valid_tickers)
+        lookback = self.lookback
+        feature_dim = self.feature_dim
 
-        if not feature_rows:
-            return {
-                "prob_inter_event": probs_inter,
-                "prob_pre_event": probs_pre,
-                "prob_onset": probs_onset,
-                "forecast_tau": forecast_tau,
-            }
+        ticker_feature_mats: Dict[str, np.ndarray] = {}
+        ticker_date_idx_maps: Dict[str, dict] = {}
 
-        feat_df = pd.DataFrame(feature_rows)
-        feat_df = _prepare_features(feat_df)
-        expected_cols = [c for c in FEATURE_COLUMNS if c in feat_df.columns]
+        for ticker in tqdm(valid_tickers, desc="Building features"):
+            df = ticker_dfs[ticker]
+            n = len(df)
+            feature_rows = []
+            row_to_df_idx = []
+            for i in range(lookback, n):
+                feat = _build_features_at(df, i, ticker=ticker, forecast_horizon=21)
+                feature_rows.append(feat)
+                row_to_df_idx.append(i)
 
-        if len(expected_cols) != feature_dim:
-            if len(expected_cols) > feature_dim:
-                expected_cols = expected_cols[:feature_dim]
-            else:
-                expected_cols = expected_cols + [expected_cols[0]] * (feature_dim - len(expected_cols))
-                expected_cols = expected_cols[:feature_dim]
+            if not feature_rows:
+                ticker_feature_mats[ticker] = np.zeros((0, feature_dim), dtype=np.float32)
+                ticker_date_idx_maps[ticker] = {}
+                continue
 
-        feature_data = feat_df[expected_cols].fillna(0.0).values.astype(np.float32)
-        if feature_data.shape[1] != feature_dim:
+            feat_df = pd.DataFrame(feature_rows)
+            feat_df = _prepare_features(feat_df)
+            expected_cols = [c for c in FEATURE_COLUMNS if c in feat_df.columns]
+            feature_data = feat_df[expected_cols].fillna(0.0).values.astype(np.float32)
+
             if feature_data.shape[1] > feature_dim:
                 feature_data = feature_data[:, :feature_dim]
-            else:
+            elif feature_data.shape[1] < feature_dim:
                 pad = np.zeros((feature_data.shape[0], feature_dim - feature_data.shape[1]), dtype=np.float32)
                 feature_data = np.concatenate([feature_data, pad], axis=1)
 
-        n_features = len(feature_data)
+            ticker_feature_mats[ticker] = feature_data
+            date_map = {}
+            for feat_i, df_idx in enumerate(row_to_df_idx):
+                date_map[feat_i] = df_idx
+            ticker_date_idx_maps[ticker] = date_map
+
+        all_signals: Dict[str, dict] = {}
+        for ticker in valid_tickers:
+            all_signals[ticker] = {
+                "prob_inter_event": np.zeros(n_shared, dtype=np.float32),
+                "prob_pre_event": np.zeros(n_shared, dtype=np.float32),
+                "prob_onset": np.zeros(n_shared, dtype=np.float32),
+                "forecast_tau": np.full(n_shared, 21.0, dtype=np.float32),
+            }
+
+        n_features_per_ticker = [ticker_feature_mats[t].shape[0] for t in valid_tickers]
+        min_features = min(n_features_per_ticker) if n_features_per_ticker else 0
+        if min_features <= lookback:
+            return all_signals
+
+        fcast_len = min_features - lookback
+        batch_size = 32
 
         self.trainer.model.eval()
-        with torch.no_grad():
-            for i in range(min(lookback, n_features - 1) + 1, n_features):
-                if i < lookback:
-                    continue
-                window = feature_data[i - lookback:i]
-                if window.shape[0] != lookback:
-                    continue
-                x = torch.from_numpy(window).unsqueeze(0).to(self.trainer.device)
+        for day_offset in tqdm(range(0, fcast_len, batch_size), desc="Batched GPU inference"):
+            end_off = min(day_offset + batch_size, fcast_len)
+            windows = []
+            ticker_window_map = []
+
+            for tk_i, ticker in enumerate(valid_tickers):
+                fmat = ticker_feature_mats[ticker]
+                for off in range(day_offset, end_off):
+                    start = off
+                    end = off + lookback
+                    if end <= fmat.shape[0]:
+                        windows.append(fmat[start:end])
+                        ticker_window_map.append((ticker, off))
+
+            if not windows:
+                continue
+
+            batch_tensor = torch.from_numpy(np.stack(windows, axis=0)).to(self.device)
+            with torch.no_grad():
                 try:
-                    outputs = self.trainer.model(x)
-                    probs = outputs["past_state_probs"].cpu().numpy()[0]
-                    idx_in_df = min(lookback + i, n - 1)
-                    if idx_in_df < n_shared:
-                        probs_inter[idx_in_df] = probs[0]
-                        probs_pre[idx_in_df] = probs[1]
-                        probs_onset[idx_in_df] = probs[2]
-                        forecast_tau[idx_in_df] = float(outputs["future_forecast"].cpu().numpy()[0].mean())
+                    outputs = self.trainer.model(batch_tensor)
+                    probs = outputs["past_state_probs"].cpu().numpy()
+                    forecasts = outputs["future_forecast"].cpu().numpy().mean(axis=1)
                 except Exception:
                     continue
 
-        return {
-            "prob_inter_event": probs_inter,
-            "prob_pre_event": probs_pre,
-            "prob_onset": probs_onset,
-            "forecast_tau": forecast_tau,
-        }
+            for i, (ticker, off) in enumerate(ticker_window_map):
+                feat_idx = off + lookback
+                date_map = ticker_date_idx_maps[ticker]
+                if feat_idx in date_map:
+                    df_idx = date_map[feat_idx]
+                    if df_idx < n_shared:
+                        all_signals[ticker]["prob_inter_event"][df_idx] = float(probs[i][0])
+                        all_signals[ticker]["prob_pre_event"][df_idx] = float(probs[i][1])
+                        all_signals[ticker]["prob_onset"][df_idx] = float(probs[i][2])
+                        all_signals[ticker]["forecast_tau"][df_idx] = float(forecasts[i])
+
+        return all_signals
 
     @staticmethod
     def _max_drawdown(equity: np.ndarray) -> float:

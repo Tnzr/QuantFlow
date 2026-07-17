@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from tqdm import tqdm
 
 from .architectures import TemporalStateModel, create_model
 from .losses import CompositeLoss, LossConfig
@@ -150,15 +151,24 @@ class Trainer:
         logger.info(f"Starting training: {self.config.epochs} epochs, device={self.device}")
         logger.info(f"Model: {sum(p.numel() for p in self.model.parameters()):,} parameters")
 
+        try:
+            import wandb
+            _wandb_available = True
+        except ImportError:
+            _wandb_available = False
+
         for epoch in range(self.current_epoch, self.config.epochs):
             self.model.train()
             epoch_start = time.time()
             epoch_losses: Dict[str, float] = {}
             epoch_correct = 0
             epoch_samples = 0
+            epoch_forecast_errors = []
+
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{self.config.epochs}", leave=False)
 
             accumulation_counter = 0
-            for batch_idx, batch in enumerate(train_loader):
+            for batch_idx, batch in enumerate(pbar):
                 outputs, losses_dict, labels = self._step(batch)
                 accumulation_counter += 1
 
@@ -169,6 +179,13 @@ class Trainer:
                 labels_dev = labels["event_state_code"]
                 epoch_correct += (preds == labels_dev).sum().item()
                 epoch_samples += labels_dev.size(0)
+
+                with torch.no_grad():
+                    fcast = outputs["future_forecast"].squeeze(-1)
+                    tgt_fcast = labels.get("tau_forward_synthetic", torch.zeros_like(fcast))
+                    epoch_forecast_errors.append((fcast - tgt_fcast.to(fcast.device)).abs().mean().item())
+
+                pbar.set_postfix(loss=losses_dict.get("total", 0).item())
                 scheduler.step()
 
             n_batches = max(len(train_loader), 1)
@@ -190,6 +207,17 @@ class Trainer:
                 f"acc={val_metrics.get('accuracy', 0):.3f}"
             )
 
+            if _wandb_available and wandb.run:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train/loss": train_metrics.get("total", 0),
+                    "train/accuracy": train_metrics.get("accuracy", 0),
+                    "train/lr": train_metrics.get("lr", 0),
+                    "train/forecast_mae": np.mean(epoch_forecast_errors) if epoch_forecast_errors else 0,
+                    "val/loss": val_metrics.get("total", 0),
+                    "val/accuracy": val_metrics.get("accuracy", 0),
+                })
+
             val_total = val_metrics.get("total", float("inf"))
             if val_total < self.best_val_loss - self.config.early_stopping_min_delta:
                 self.best_val_loss = val_total
@@ -204,6 +232,13 @@ class Trainer:
 
             if not self.config.save_best_only and (epoch + 1) % self.config.save_frequency_epochs == 0:
                 self._save_checkpoint(epoch, val_metrics, is_best=False)
+
+        if _wandb_available and wandb.run:
+            wandb.run.summary["best_val_loss"] = self.best_val_loss
+            wandb.run.summary["final_train_accuracy"] = self.train_history[-1].get("accuracy", 0) if self.train_history else 0
+            wandb.run.summary["final_val_accuracy"] = self.val_history[-1].get("accuracy", 0) if self.val_history else 0
+            wandb.run.summary["epochs_run"] = len(self.train_history)
+            wandb.run.summary["model_params"] = sum(p.numel() for p in self.model.parameters())
 
         return {"train_history": self.train_history, "val_history": self.val_history}
 
@@ -296,6 +331,37 @@ def train_model(
     predictions = trainer.predict(test_loader)
 
     try:
+        import wandb
+        if wandb.run:
+            wandb.run.summary["test/loss"] = test_metrics.get("total", 0)
+            wandb.run.summary["test/accuracy"] = test_metrics.get("accuracy", 0)
+            pred_table = wandb.Table(dataframe=predictions.head(1000))
+            wandb.log({"test/predictions_sample": pred_table})
+
+            if "event_state_pred" in predictions.columns and "true_state" in predictions.columns:
+                from sklearn.metrics import confusion_matrix
+                cm = confusion_matrix(predictions["true_state"], predictions["event_state_pred"], labels=[0, 1, 2])
+                import io
+                import matplotlib
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.imshow(cm, cmap="Blues")
+                ax.set_xticks([0, 1, 2]); ax.set_xticklabels(["Inter", "Pre", "Onset"])
+                ax.set_yticks([0, 1, 2]); ax.set_yticklabels(["Inter", "Pre", "Onset"])
+                for i in range(3):
+                    for j in range(3):
+                        ax.text(j, i, str(cm[i, j]), ha="center", va="center", fontweight="bold")
+                ax.set_xlabel("Predicted"); ax.set_ylabel("Actual"); ax.set_title("Confusion Matrix")
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches="tight")
+                plt.close(fig)
+                buf.seek(0)
+                wandb.log({"test/confusion_matrix": wandb.Image(buf)})
+    except Exception:
+        pass
+
+    try:
         from .visualization import generate_training_visualizations
         viz_paths = generate_training_visualizations(
             history, predictions,
@@ -303,6 +369,14 @@ def train_model(
             prefix="training",
         )
         logger.info(f"Training visualizations saved: {viz_paths}")
+        try:
+            import wandb
+            if wandb.run:
+                for name, path in viz_paths.items():
+                    if path and Path(path).exists():
+                        wandb.log({f"viz/{name}": wandb.Image(str(path))})
+        except Exception:
+            pass
     except Exception:
         pass
 

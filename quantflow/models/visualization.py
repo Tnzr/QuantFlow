@@ -109,7 +109,7 @@ def _plot_per_ticker_equity(ax, result):
         _plot_metrics_table(ax, result)
         return
 
-    total_alloc = daily_alloc.sum()
+    total_alloc = daily_alloc.sum().sum() if isinstance(daily_alloc.sum(), pd.Series) else float(daily_alloc.sum())
     if total_alloc > 0:
         top_tickers = daily_alloc.sum().nlargest(5).index.tolist()
     else:
@@ -119,10 +119,11 @@ def _plot_per_ticker_equity(ax, result):
         ax.text(0.5, 0.5, "No per-ticker data", ha="center", va="center", transform=ax.transAxes); return
 
     for tk in top_tickers:
-        tk_eq = daily_alloc[tk]
-        tk_eq_norm = tk_eq / tk_eq.max() if tk_eq.max() > 0 else tk_eq
-        if hasattr(tk_eq, "index") and isinstance(tk_eq.index, pd.DatetimeIndex):
-            ax.plot(tk_eq.index, tk_eq_norm, linewidth=1.2, alpha=0.85, label=tk)
+        tk_eq = daily_alloc[tk].fillna(0.0)
+        tk_max = float(tk_eq.max()) if tk_eq.max() > 0 else 1.0
+        tk_eq_norm = tk_eq / tk_max
+        if isinstance(tk_eq_norm, pd.Series) and isinstance(tk_eq_norm.index, pd.DatetimeIndex):
+            ax.plot(tk_eq_norm.index, tk_eq_norm.values, linewidth=1.2, alpha=0.85, label=tk)
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
             ax.xaxis.set_major_locator(mdates.YearLocator())
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=7)
@@ -185,12 +186,15 @@ def _plot_head_probabilities(ax, result, signals=None):
             po_agg = np.zeros(len(all_dates))
             count = np.zeros(len(all_dates))
             for df_int, df_pre, df_ons in zip(agg_int, agg_pre, agg_ons):
-                for i, d in enumerate(all_dates):
-                    if d in df_int.index:
-                        pi_agg[i] += df_int.loc[d]
-                        pp_agg[i] += df_pre.loc[d]
-                        po_agg[i] += df_ons.loc[d]
-                        count[i] += 1
+                    for i, d in enumerate(all_dates):
+                        try:
+                            if d in df_int.index:
+                                pi_agg[i] += float(df_int.loc[d]) if hasattr(df_int.loc[d], '__float__') else float(df_int.loc[d].iloc[0])
+                                pp_agg[i] += float(df_pre.loc[d]) if hasattr(df_pre.loc[d], '__float__') else float(df_pre.loc[d].iloc[0])
+                                po_agg[i] += float(df_ons.loc[d]) if hasattr(df_ons.loc[d], '__float__') else float(df_ons.loc[d].iloc[0])
+                                count[i] += 1
+                        except (ValueError, TypeError, IndexError, KeyError):
+                            continue
             mask = count > 0
             pi_agg[mask] /= count[mask]
             pp_agg[mask] /= count[mask]
@@ -589,8 +593,9 @@ def plot_inference_monitor(
         ax.set_ylim(0, 1.05)
         _ax(ax, f"{tk} — Signal Waterfall", xlabel="Trading Days", ylabel="Prob")
 
+        has_forecast = "forecast_tau" in sig_df.columns
         handles1, labels1 = ax.get_legend_handles_labels()
-        handles2, labels2 = ax2.get_legend_handles_labels() if "forecast_tau" in sig_df.columns else ([], [])
+        handles2, labels2 = (ax2.get_legend_handles_labels() if has_forecast else ([], []))
         ax.legend(handles1 + handles2, labels1 + labels2, fontsize=6, loc="upper right", ncol=4)
 
     for extra in range(n_plots, len(axes)):
