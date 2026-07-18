@@ -462,42 +462,41 @@ class Trainer:
                 ax3.text(0.5, 0.5, "No scale activations available (TCN/Transformer pipeline)",
                          ha="center", va="center", transform=ax3.transAxes, fontsize=10)
 
-            # Panel 4: Drawdown-based trend regions
+            # Panel 4: Drawdown-based trend regions (cumulative forward returns)
             ax4 = axes[3]
             if len(targets) > 0:
-                price_sim = np.cumprod(1 + np.random.randn(len(targets)) * 0.01) * 100
-                peak = np.maximum.accumulate(price_sim)
-                dd = (price_sim - peak) / peak * 100
-                ax4.plot(x, price_sim, color="#2ecc71", linewidth=1.5, label="Price (sim)")
+                target_returns = np.clip(targets / 252.0, -0.05, 0.05)
+                price_from_returns = 100.0 * np.cumprod(1 + np.concatenate([[0], target_returns[:-1]]))
+                peak = np.maximum.accumulate(price_from_returns)
+                dd = (price_from_returns - peak) / peak * 100
+                ax4.plot(x, price_from_returns, color="#2ecc71", linewidth=1.5, label="Forward Return Index")
 
                 dd_threshold = 3.0
-                in_dd = dd < -dd_threshold
-                uptrend = np.ones(len(dd), dtype=bool)
+                in_drawdown = dd < -dd_threshold
+
+                exit_drawdown_signal = np.zeros(len(dd), dtype=bool)
                 for i in range(1, len(dd)):
-                    if in_dd[i]:
-                        uptrend[i] = False
-                    elif not in_dd[i] and not in_dd[i - 1]:
-                        uptrend[i] = True
-                        for j in range(i, min(i + 5, len(dd))):
-                            uptrend[j] = True
+                    if dd[i] >= -dd_threshold * 0.5 and in_drawdown[i - 1]:
+                        exit_drawdown_signal[i] = True
 
                 for i in range(len(x)):
-                    if i > 0 and uptrend[i]:
-                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.08, color="#27ae60")
-                    elif i > 0:
-                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.08, color="#e74c3c")
+                    if in_drawdown[i]:
+                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.10, color="#e74c3c")
+                    elif i > 0 and not in_drawdown[i]:
+                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.06, color="#27ae60")
 
                 ax4_twin = ax4.twinx()
                 ax4_twin.fill_between(x, 0, dd, alpha=0.15, color="#e74c3c")
-                ax4_twin.set_ylim(-30, 0)
+                ax4_twin.axhline(y=-dd_threshold, color="#e74c3c", ls="--", lw=0.5, alpha=0.5)
+                ax4_twin.set_ylim(-30, 5)
                 ax4_twin.set_ylabel("Drawdown %", fontsize=8, color="#e74c3c")
                 ax4_twin.tick_params(colors="#e74c3c", labelsize=7)
 
-                buy_confirms = buy_mask & ~in_dd
-                buy_confirmed_count = buy_confirms.sum()
-                ax4.set_title(f"Price Trend & Drawdown Regions (buy signals: {buy_confirmed_count} confirmed/{buy_mask.sum()} raw)", fontsize=10)
+                buy_confirms = buy_mask & ~in_drawdown
+                buy_confirmed_count = int(buy_confirms.sum())
+                ax4.set_title(f"Forward Return Index & Drawdown (≥{dd_threshold}%% dd = red, buy={buy_confirmed_count}/{int(buy_mask.sum())} confirmed)", fontsize=10)
                 ax4.legend(loc="upper left", fontsize=7)
-                ax4.set_ylabel("Price ($)")
+                ax4.set_ylabel("Return Index")
 
             for ax in axes:
                 ax.grid(True, alpha=0.15, linestyle="--")
