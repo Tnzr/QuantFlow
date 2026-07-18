@@ -40,7 +40,7 @@ class TrainingConfig:
     early_stopping_min_delta: float = 0.001
 
     use_amp: bool = False
-    stateful: bool = False
+    stateful: bool = True
     keep_hidden_across_epochs: bool = True
 
     save_best_only: bool = True
@@ -101,18 +101,19 @@ class Trainer:
 
         return CosineAnnealingLR(self.optimizer, T_max=total_steps, eta_min=self.config.min_lr)
 
-    def _to_device(self, batch: Tuple[torch.Tensor, Dict[str, torch.Tensor], str]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        features, labels, _ = batch
+    def _to_device(self, batch: Tuple[torch.Tensor, Dict[str, torch.Tensor], str]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], str]:
+        features, labels, tickers = batch
         features = features.to(self.device)
-        labels = {k: v.to(self.device) for k, v in labels.items()}
-        return features, labels
+        labels = {k: v.to(self.device) for k, v in labels.items() if isinstance(v, torch.Tensor)}
+        return features, labels, tickers
 
-    def _step(self, batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    def _step(self, batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]], h_prev=None) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], list]:
         self.optimizer.zero_grad()
 
-        features, labels = self._to_device(batch)
-        outputs = self.model(features)
+        features, labels, tickers = self._to_device(batch)
+        outputs = self.model(features, h_prev=h_prev)
         losses = self.criterion(outputs, labels)
+        h_new = outputs.get("hidden_state", None)
 
         if self.scaler:
             self.scaler.scale(losses["total"]).backward()
@@ -133,7 +134,7 @@ class Trainer:
 
             self.optimizer.step()
 
-        return outputs, losses, labels
+        return outputs, losses, labels, h_new
 
     def _evaluate(self, loader: DataLoader) -> Dict[str, float]:
         self.model.eval()
@@ -149,7 +150,7 @@ class Trainer:
 
         with torch.no_grad():
             for batch in loader:
-                features, labels = self._to_device(batch)
+                features, labels, _ = self._to_device(batch)
                 outputs = self.model(features)
                 losses = self.criterion(outputs, labels)
 
@@ -214,11 +215,20 @@ class Trainer:
             batch_grad_norms = []
 
             pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{self.config.epochs}", leave=False)
+            hidden_states = {}
+            prev_ticker = None
 
-            accumulation_counter = 0
             for batch_idx, batch in enumerate(pbar):
-                outputs, losses_dict, labels = self._step(batch)
-                accumulation_counter += 1
+                features_raw, labels_raw, tickers = batch
+                ticker = tickers[0] if isinstance(tickers, (list, tuple)) else tickers
+                if ticker != prev_ticker:
+                    prev_ticker = ticker
+                h_prev = hidden_states.get(ticker, None)
+                if h_prev is not None:
+                    h_prev = [h.detach() for h in h_prev]
+                outputs, losses_dict, labels, h_new = self._step(batch, h_prev=h_prev)
+                if h_new is not None:
+                    hidden_states[ticker] = [h.detach() for h in h_new]
 
                 batch_loss = losses_dict["total"].item()
                 batch_losses.append(batch_loss)
@@ -308,6 +318,9 @@ class Trainer:
                     if viz_img is not None:
                         wandb.log({"viz/epoch_forecast_overview": viz_img}, step=epoch_last_step, commit=False)
 
+            if not self.config.keep_hidden_across_epochs:
+                hidden_states = {}
+
             val_total = val_metrics.get("total", float("inf"))
             if val_total < self.best_val_loss - self.config.early_stopping_min_delta:
                 self.best_val_loss = val_total
@@ -371,7 +384,7 @@ class Trainer:
                 for batch in loader:
                     if sum(arr.shape[0] for arr in all_probs if len(arr) > 0) >= max_samples:
                         break
-                    features, labels = self._to_device(batch)
+                    features, labels, _ = self._to_device(batch)
                     outputs = self.model(features)
 
                     probs = outputs["past_state_probs"].cpu().numpy()
@@ -565,7 +578,7 @@ class Trainer:
         all_outputs = []
         with torch.no_grad():
             for batch in loader:
-                features, labels = self._to_device(batch)
+                features, labels, _ = self._to_device(batch)
                 outputs = self.model(features)
 
                 probs = outputs["past_state_probs"].cpu().numpy()

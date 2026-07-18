@@ -216,9 +216,13 @@ def prepare_dataloaders(
     num_workers: int = 0,
     seed: int = 42,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
-    """Split dataset chronologically and return DataLoaders.
+    """Split dataset chronologically and return DataLoaders with sequential ticker ordering.
 
-    Uses ticker-level grouping to ensure no data leakage across splits.
+    Per §4.3 and §8.2 of the methodology:
+    - Samples are grouped by ticker and presented chronologically within each ticker.
+    - No random shuffling — hidden states carry across batches within a ticker.
+    - Ticker order is deterministic (sorted by ticker symbol) for reproducibility.
+    - Train/val/test split is done at ticker level to prevent data leakage.
     """
     tickers = df["ticker"].unique()
     np.random.seed(seed)
@@ -228,9 +232,9 @@ def prepare_dataloaders(
     n_test = max(1, int(len(tickers) * test_split))
     n_train = len(tickers) - n_val - n_test
 
-    train_tickers = set(tickers[:n_train])
-    val_tickers = set(tickers[n_train:n_train + n_val])
-    test_tickers = set(tickers[n_train + n_val:])
+    train_tickers = sorted(tickers[:n_train])
+    val_tickers = sorted(tickers[n_train:n_train + n_val])
+    test_tickers = sorted(tickers[n_train + n_val:])
 
     train_df = df[df["ticker"].isin(train_tickers)].copy()
     val_df = df[df["ticker"].isin(val_tickers)].copy()
@@ -247,9 +251,9 @@ def prepare_dataloaders(
     logger.info(f"Dataset created: feature_dim={train_ds.feature_dim}, "
                 f"train_samples={len(train_ds)}, val_samples={len(val_ds)}, test_samples={len(test_ds)}")
     logger.info(f"Train class distribution: {train_ds.class_distribution}")
+    logger.info(f"Training mode: CHRONOLOGICAL per-ticker (stateful context preserved)")
 
-    train_sampler = train_ds.get_balanced_sampler()
-    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, drop_last=True)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
 
