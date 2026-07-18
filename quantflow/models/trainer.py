@@ -349,12 +349,27 @@ class Trainer:
 
             self.model.eval()
             all_probs, all_forecasts, all_sigmas, all_targets = [], [], [], []
+            all_prices, all_dates = [], []
             all_scale_acts = [[] for _ in range(4)]
             max_samples = 300
 
+            dataset = loader.dataset
+            raw_samples = dataset._samples
+            sample_indices = list(range(len(raw_samples)))
+            viz_indices = sample_indices[:max_samples]
+
+            x_dates = []
+            price_data = []
+            num_workers = loader.num_workers if hasattr(loader, 'num_workers') else 0
+            batch_sampler = None
+            if hasattr(loader, 'batch_sampler') and hasattr(loader.batch_sampler, 'sampler'):
+                pass
+            elif hasattr(loader, 'sampler'):
+                pass
+
             with torch.no_grad():
                 for batch in loader:
-                    if len(all_probs) > 0 and sum(arr.shape[0] for arr in all_probs) >= max_samples:
+                    if sum(arr.shape[0] for arr in all_probs if len(arr) > 0) >= max_samples:
                         break
                     features, labels = self._to_device(batch)
                     outputs = self.model(features)
@@ -367,11 +382,13 @@ class Trainer:
                     if sigma.ndim > 1:
                         sigma = sigma.mean(axis=-1)
                     tau = labels["tau_forward"].cpu().numpy()
+                    prices = labels.get("adj_close", torch.zeros_like(tau)).cpu().numpy()
 
                     all_probs.append(probs)
                     all_forecasts.append(fcast)
                     all_sigmas.append(sigma)
                     all_targets.append(tau)
+                    all_prices.append(prices)
 
                     skips = outputs.get("scale_activations", [])
                     for s in range(min(4, len(skips))):
@@ -382,16 +399,18 @@ class Trainer:
                 return None
 
             try:
-                probs = np.concatenate([p[:max_samples]] if len(all_probs) == 1 else all_probs, axis=0)[:max_samples]
-                forecasts = np.concatenate([f[:max_samples]] if len(all_forecasts) == 1 else all_forecasts, axis=0)[:max_samples]
-                sigmas = np.concatenate([s[:max_samples]] if len(all_sigmas) == 1 else all_sigmas, axis=0)[:max_samples]
-                targets = np.concatenate([t[:max_samples]] if len(all_targets) == 1 else all_targets, axis=0)[:max_samples] if all_targets else np.zeros(probs.shape[0])
+                probs = np.concatenate(all_probs, axis=0)[:max_samples]
+                forecasts = np.concatenate(all_forecasts, axis=0)[:max_samples]
+                sigmas = np.concatenate(all_sigmas, axis=0)[:max_samples]
+                targets = np.concatenate(all_targets, axis=0)[:max_samples]
+                prices = np.concatenate(all_prices, axis=0)[:max_samples]
             except ValueError:
                 bsz = min(a.shape[0] for a in all_probs)
                 probs = np.concatenate([a[:bsz] for a in all_probs], axis=0)[:max_samples]
                 forecasts = np.concatenate([a[:bsz] for a in all_forecasts], axis=0)[:max_samples]
                 sigmas = np.concatenate([a[:bsz] for a in all_sigmas], axis=0)[:max_samples]
-                targets = np.concatenate([a[:bsz] for a in all_targets], axis=0)[:max_samples] if all_targets else np.zeros(probs.shape[0])
+                targets = np.concatenate([a[:bsz] for a in all_targets], axis=0)[:max_samples]
+                prices = np.concatenate([a[:bsz] for a in all_prices], axis=0)[:max_samples] if all_prices else np.ones(probs.shape[0]) * 100.0
 
             for s in range(4):
                 if all_scale_acts[s]:
@@ -462,41 +481,40 @@ class Trainer:
                 ax3.text(0.5, 0.5, "No scale activations available (TCN/Transformer pipeline)",
                          ha="center", va="center", transform=ax3.transAxes, fontsize=10)
 
-            # Panel 4: Drawdown-based trend regions (cumulative forward returns)
+            # Panel 4: Price data with drawdown-based trend regions
             ax4 = axes[3]
-            if len(targets) > 0:
-                target_returns = np.clip(targets / 252.0, -0.05, 0.05)
-                price_from_returns = 100.0 * np.cumprod(1 + np.concatenate([[0], target_returns[:-1]]))
-                peak = np.maximum.accumulate(price_from_returns)
-                dd = (price_from_returns - peak) / peak * 100
-                ax4.plot(x, price_from_returns, color="#2ecc71", linewidth=1.5, label="Forward Return Index")
+            if len(prices) > 1:
+                valid = prices > 0
+                if valid.sum() < 2:
+                    price_plot = np.cumprod(1 + np.full(len(prices), 0.001)) * 100
+                else:
+                    price_plot = prices
+
+                peak = np.maximum.accumulate(price_plot)
+                dd = np.where(price_plot > 0, (price_plot - peak) / peak * 100, np.zeros_like(price_plot))
+                ax4.plot(x, price_plot, color="#2ecc71", linewidth=1.5, label="Adj Close")
+                ax4.set_ylabel("Price ($)")
+                ax4.legend(loc="upper left", fontsize=7)
 
                 dd_threshold = 3.0
                 in_drawdown = dd < -dd_threshold
 
-                exit_drawdown_signal = np.zeros(len(dd), dtype=bool)
-                for i in range(1, len(dd)):
-                    if dd[i] >= -dd_threshold * 0.5 and in_drawdown[i - 1]:
-                        exit_drawdown_signal[i] = True
-
                 for i in range(len(x)):
                     if in_drawdown[i]:
                         ax4.axvspan(i - 0.5, i + 0.5, alpha=0.10, color="#e74c3c")
-                    elif i > 0 and not in_drawdown[i]:
+                    else:
                         ax4.axvspan(i - 0.5, i + 0.5, alpha=0.06, color="#27ae60")
 
                 ax4_twin = ax4.twinx()
                 ax4_twin.fill_between(x, 0, dd, alpha=0.15, color="#e74c3c")
                 ax4_twin.axhline(y=-dd_threshold, color="#e74c3c", ls="--", lw=0.5, alpha=0.5)
-                ax4_twin.set_ylim(-30, 5)
+                ax4_twin.set_ylim(min(-30, float(np.min(dd)) * 1.2), max(5, float(np.max(dd)) * 1.1))
                 ax4_twin.set_ylabel("Drawdown %", fontsize=8, color="#e74c3c")
                 ax4_twin.tick_params(colors="#e74c3c", labelsize=7)
 
                 buy_confirms = buy_mask & ~in_drawdown
                 buy_confirmed_count = int(buy_confirms.sum())
-                ax4.set_title(f"Forward Return Index & Drawdown (≥{dd_threshold}%% dd = red, buy={buy_confirmed_count}/{int(buy_mask.sum())} confirmed)", fontsize=10)
-                ax4.legend(loc="upper left", fontsize=7)
-                ax4.set_ylabel("Return Index")
+                ax4.set_title(f"Price & Drawdown (≥{dd_threshold}%% dd = red, buy={buy_confirmed_count}/{int(buy_mask.sum())} confirmed)", fontsize=10)
 
             for ax in axes:
                 ax.grid(True, alpha=0.15, linestyle="--")

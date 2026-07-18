@@ -104,6 +104,7 @@ class FinancialTimeSeriesDataset(Dataset):
                 tau = _build_tau_forward(row_labels)
                 dd5 = row_labels.get("drawdown_5d_max", 0.0) or 0.0
                 dd21 = row_labels.get("drawdown_21d_max", 0.0) or 0.0
+                date_str = str(dates[i])[:10] if i < len(dates) else ""
 
                 label_dict = {
                     "event_state_code": np.array(int(row_labels.get("event_state_code", 0)), dtype=np.int64),
@@ -114,8 +115,9 @@ class FinancialTimeSeriesDataset(Dataset):
                     "target_direction_21d": np.array(int(row_labels.get("target_direction_21d", 0)), dtype=np.int64),
                     "drawdown_5d_max": np.array(dd5, dtype=np.float32),
                     "drawdown_21d_max": np.array(dd21, dtype=np.float32),
+                    "adj_close": np.array(float(row_labels.get("close", 0.0) or 0.0), dtype=np.float32),
+                    "as_of_date": date_str,
                 }
-                date_str = str(dates[i])[:10] if i < len(dates) else ""
                 self._samples.append((window, label_dict, ticker, date_str))
 
         self.feature_dim = len(self.feature_cols)
@@ -125,9 +127,13 @@ class FinancialTimeSeriesDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], str]:
         features, labels, ticker, date = self._samples[idx]
+        tensor_labels = {}
+        for k, v in labels.items():
+            if isinstance(v, np.ndarray) or isinstance(v, (int, float)):
+                tensor_labels[k] = torch.tensor(v)
         return (
             torch.from_numpy(features),
-            {k: torch.tensor(v) for k, v in labels.items()},
+            tensor_labels,
             ticker,
         )
 
@@ -135,10 +141,18 @@ class FinancialTimeSeriesDataset(Dataset):
     def class_distribution(self) -> Dict[str, int]:
         counts = {0: 0, 1: 0, 2: 0}
         for _, labels, _, _ in self._samples:
-            code = int(labels["event_state_code"].item())
+            code = int(labels["event_state_code"].item() if hasattr(labels["event_state_code"], 'item') else labels["event_state_code"])
             if code in counts:
                 counts[code] += 1
         return counts
+
+    def _get_metadata_by_idx(self, idx: int) -> dict:
+        _, labels, ticker, date = self._samples[idx]
+        return {
+            "ticker": ticker,
+            "date": date,
+            "adj_close": float(labels.get("adj_close", 0.0)),
+        }
 
     @property
     def sample_weights(self) -> np.ndarray:
