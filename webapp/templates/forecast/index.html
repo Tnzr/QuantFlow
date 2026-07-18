@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}ML Forecast — {{ app_name }}{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-white mb-6">ML Event Forecast</h1>
+
+<div class="card mb-6">
+    <h3 class="text-lg font-semibold text-white mb-3">Ticker Forecast</h3>
+    <form class="flex gap-3" onsubmit="event.preventDefault(); window.location.href='/forecast/ticker/' + document.getElementById('fcst-ticker').value.toUpperCase()">
+        <input id="fcst-ticker" class="input-field max-w-xs" placeholder="e.g. AAPL, NVDA" autocomplete="off">
+        <button type="submit" class="btn-primary">Forecast</button>
+    </form>
+</div>
+
+<div class="grid md:grid-cols-3 gap-6">
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-3">Model Info</h3>
+        <div class="space-y-2 text-sm">
+            <div class="flex justify-between"><span class="text-gray-400">Architecture</span><span class="text-white">BiLSTM Dual-Head</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Input Dim</span><span class="text-white">21 features</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Lookback</span><span class="text-white">60 trading days</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Forecast Horizon</span><span class="text-white">21 days</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Parameters</span><span class="text-white">1.6M</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">Test Accuracy</span><span class="text-teal-500 font-semibold">79.7%</span></div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-3">Prediction States</h3>
+        <div class="space-y-3 text-sm">
+            <div class="flex items-center gap-2">
+                <span class="w-3 h-3 rounded bg-green-500"></span>
+                <span class="text-gray-300">Inter-Event</span>
+                <span class="text-gray-500 ml-auto">Stable market phase</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="w-3 h-3 rounded bg-yellow-500"></span>
+                <span class="text-gray-300">Pre-Event</span>
+                <span class="text-gray-500 ml-auto">Building toward a move</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="w-3 h-3 rounded bg-red-500"></span>
+                <span class="text-gray-300">Onset</span>
+                <span class="text-gray-500 ml-auto">Event in progress (volatile)</span>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-3">What is Event Forecasting?</h3>
+        <p class="text-sm text-gray-400">
+            Our temporal state model analyzes 21 technical indicators over 60-day windows to predict three market regime states and estimate time-to-event with calibrated uncertainty bands. Trained on 31,655 snapshots across 140 tickers.
+        </p>
+        <a href="/docs" class="text-teal-500 text-sm hover:underline mt-2 inline-block">Read the methodology &rarr;</a>
+    </div>
+</div>
+{% endblock %}

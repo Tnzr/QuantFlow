@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Pricing — {{ app_name }}{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-bold text-white mb-2">Pricing Plans</h1>
+<p class="text-gray-400 mb-8">Start free, upgrade when you need more power.</p>
+
+<div class="grid md:grid-cols-3 gap-6">
+    <div class="card border-gray-800">
+        <h3 class="text-xl font-semibold text-white mb-1">Free</h3>
+        <p class="text-3xl font-bold text-white mb-4">$0<span class="text-sm text-gray-400">/mo</span></p>
+        <ul class="space-y-2 text-sm text-gray-400 mb-6">
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 3 scanner presets</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 5 ticker research</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 3 ML signals/day</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Basic backtesting</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 10 AI agent queries/day</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Read-only broker</li>
+        </ul>
+        <a href="/register?tier=free" class="btn-secondary w-full block text-center">Get Started</a>
+    </div>
+
+    <div class="card border-teal-800 relative">
+        <div class="absolute -top-3 left-1/2 -translate-x-1/2 bg-teal-600 text-white text-xs px-3 py-1 rounded-full font-semibold">Popular</div>
+        <h3 class="text-xl font-semibold text-white mb-1">Pro</h3>
+        <p class="text-3xl font-bold text-white mb-4">$29<span class="text-sm text-gray-400">/mo</span></p>
+        <ul class="space-y-2 text-sm text-gray-400 mb-6">
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> All scanner presets</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 50 ticker research</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 50 ML signals/day</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> ML-optimized portfolio</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> 100 AI agent queries/day</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Read + execute broker</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> API access (1000 req/day)</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> PDF reports</li>
+        </ul>
+        <a href="/register?tier=pro" class="btn-primary w-full block text-center">Start Pro Trial</a>
+    </div>
+
+    <div class="card border-gray-800">
+        <h3 class="text-xl font-semibold text-white mb-1">Enterprise</h3>
+        <p class="text-3xl font-bold text-white mb-4">$199<span class="text-sm text-gray-400">/mo</span></p>
+        <ul class="space-y-2 text-sm text-gray-400 mb-6">
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Unlimited everything</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Real-time data (1 min)</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Full MCP broker</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Unlimited API access</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> PDF + CSV + API export</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Custom model training</li>
+            <li class="flex items-center gap-2"><span class="text-teal-500">✓</span> Dedicated support</li>
+        </ul>
+        <a href="/register?tier=enterprise" class="btn-secondary w-full block text-center">Contact Sales</a>
+    </div>
+</div>
+{% endblock %}

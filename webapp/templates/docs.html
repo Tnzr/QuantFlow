@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Documentation — {{ app_name }}{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-white mb-6">Documentation</h1>
+<div class="card">
+    <h3 class="text-lg font-semibold text-white mb-4">ML Methodology</h3>
+    <p class="text-gray-400 text-sm mb-4">
+        QuantFlow uses a BiLSTM Dual-Head Temporal State Model trained on 31,655 labeled snapshots across 140 tickers for multi-class event-state classification and time-to-event regression.
+    </p>
+    <div class="flex gap-3">
+        <a href="https://github.com/Tnzr/QuantFlow/blob/main/quantflow/documentation/ML_DL_Architecture_Methodology.md" class="btn-secondary text-sm" target="_blank">Read Full Methodology</a>
+        <a href="/forecast" class="btn-primary text-sm">Try ML Forecast</a>
+    </div>
+</div>
+{% endblock %}

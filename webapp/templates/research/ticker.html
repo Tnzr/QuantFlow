@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker }} Research — {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-3 mb-6">
+    <a href="/research" class="text-gray-400 hover:text-white">&larr; Research</a>
+    <h1 class="text-2xl font-bold text-white">{{ ticker }}</h1>
+    <span class="badge badge-blue">Loading...</span>
+</div>
+
+<div class="grid md:grid-cols-3 gap-6 mb-6">
+    <div class="card">
+        <div class="text-sm text-gray-400">Price</div>
+        <div class="text-2xl font-bold text-white skeleton w-24 h-8 rounded"></div>
+    </div>
+    <div class="card">
+        <div class="text-sm text-gray-400">ML State</div>
+        <div class="text-2xl font-bold text-white skeleton w-32 h-8 rounded"></div>
+    </div>
+    <div class="card">
+        <div class="text-sm text-gray-400">Forecast Tau</div>
+        <div class="text-2xl font-bold text-white skeleton w-16 h-8 rounded"></div>
+    </div>
+</div>
+
+<div class="card">
+    <h3 class="text-lg font-semibold text-white mb-3">ML Signal Waterfall</h3>
+    <div id="signal-chart" class="w-full h-64 skeleton rounded"></div>
+</div>
+{% endblock %}

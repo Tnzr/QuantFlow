@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Portfolio — {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h1 class="text-2xl font-bold text-white">Portfolio</h1>
+        <p class="text-gray-400 text-sm">Manage positions and optimize allocations</p>
+    </div>
+    <div class="flex gap-2">
+        <a href="/portfolio/allocate" class="btn-primary text-sm">Optimize Allocation</a>
+    </div>
+</div>
+
+<div class="grid md:grid-cols-4 gap-4 mb-6">
+    <div class="card">
+        <div class="text-sm text-gray-400">Total Value</div>
+        <div class="text-2xl font-bold text-white">$0.00</div>
+    </div>
+    <div class="card">
+        <div class="text-sm text-gray-400">Positions</div>
+        <div class="text-2xl font-bold text-white">0</div>
+    </div>
+    <div class="card">
+        <div class="text-sm text-gray-400">Daily P&L</div>
+        <div class="text-2xl font-bold text-green-400">$0.00</div>
+    </div>
+    <div class="card">
+        <div class="text-sm text-gray-400">Allocation Method</div>
+        <div class="text-2xl font-bold text-white">Manual</div>
+    </div>
+</div>
+
+<div class="card">
+    <h3 class="text-lg font-semibold text-white mb-3">Holdings</h3>
+    <div class="text-gray-500 text-sm py-8 text-center">
+        <p class="mb-2">No positions yet</p>
+        <p class="text-xs">Connect your broker in Settings or use the AI Agent to build a paper portfolio.</p>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Allocation — {{ app_name }}{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-white mb-6">Portfolio Allocation Optimizer</h1>
+
+<div class="grid md:grid-cols-2 gap-6">
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-4">Configuration</h3>
+        <form class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Tickers</label>
+                <input class="input-field" placeholder="AAPL, MSFT, GOOGL, AMZN, NVDA" value="AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, JPM, V, MA">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Method</label>
+                <select class="input-field">
+                    <option value="mean_variance">Mean-Variance (Markowitz)</option>
+                    <option value="hrp">Hierarchical Risk Parity</option>
+                    <option value="equal_weight">Equal Weight</option>
+                    <option value="volatility_scaled">Volatility Scaled</option>
+                    <option value="ml_weighted" selected>ML Signal Weighted</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Max Position Size (%)</label>
+                <input type="number" class="input-field" value="25" min="5" max="50">
+            </div>
+            <button type="submit" class="btn-primary w-full">Run Optimizer</button>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-4">Allocation Results</h3>
+        <div class="text-gray-500 text-sm py-8 text-center">
+            <p>Configure and run the optimizer to see results</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

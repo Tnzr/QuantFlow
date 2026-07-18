@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Backtest — {{ app_name }}{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-white mb-6">Strategy Backtesting</h1>
+
+<div class="grid md:grid-cols-2 gap-6">
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-4">Backtest Configuration</h3>
+        <form class="space-y-4" id="backtest-form">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Tickers</label>
+                <input class="input-field" placeholder="AAPL,MSFT,GOOGL" value="AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,V,MA,JNJ,WMT,PG,XOM,CVX,LLY,UNH,HD,BAC,CRM">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Start Date</label>
+                    <input type="date" class="input-field" value="2020-01-01">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Period</label>
+                    <select class="input-field">
+                        <option value="5y" selected>5 Years</option>
+                        <option value="3y">3 Years</option>
+                        <option value="1y">1 Year</option>
+                    </select>
+                </div>
+            </div>
+            <div class="grid grid-cols-3 gap-3">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Entry Threshold</label>
+                    <input type="number" class="input-field" value="0.60" step="0.05" min="0.40" max="0.80">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Stop Loss %</label>
+                    <input type="number" class="input-field" value="5" step="1" min="0" max="20">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Top N</label>
+                    <input type="number" class="input-field" value="5" min="2" max="10">
+                </div>
+            </div>
+            <button type="submit" class="btn-primary w-full">Run Backtest</button>
+        </form>
+        <p class="text-xs text-gray-500 mt-2">
+            {{ current_user.tier_config.backtest_daily }} backtests/day on your {{ current_user.tier_config.name }} plan.
+        </p>
+    </div>
+    <div class="card">
+        <h3 class="text-lg font-semibold text-white mb-4">Results</h3>
+        <div id="backtest-results" class="text-gray-500 text-sm py-8 text-center">
+            <p>Configure and run a backtest to see results</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

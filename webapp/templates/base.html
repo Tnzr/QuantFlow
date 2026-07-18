@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950 text-gray-100">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}QuantFlow{% endblock %} — AI Investment Research</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://unpkg.com/htmx-ext-sse@2.2.3/sse.js"></script>
+    <script src="https://js.stripe.com/v3/"></script>
+    {% if firebase_auth_enabled %}
+    <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.9.1/firebase-app.js";
+    import { getAuth, signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.9.1/firebase-auth.js";
+    window.firebaseConfig = {
+        apiKey: "{{ firebase_api_key }}",
+        authDomain: "{{ firebase_auth_domain }}",
+        projectId: "{{ firebase_project_id }}",
+    };
+    window.firebaseApp = initializeApp(window.firebaseConfig);
+    window.firebaseAuth = getAuth(window.firebaseApp);
+    window.GoogleAuthProvider = GoogleAuthProvider;
+    window.signInWithPopup = signInWithPopup;
+    window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+    window.createUserWithEmailAndPassword = createUserWithEmailAndPassword;
+    </script>
+    {% endif %}
+    <style>
+      body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+      .card { @apply bg-gray-900 border border-gray-800 rounded-xl p-6; }
+      .btn-primary { @apply bg-teal-600 hover:bg-teal-500 text-white font-semibold py-2 px-4 rounded-lg transition-colors; }
+      .btn-secondary { @apply bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold py-2 px-4 rounded-lg border border-gray-700 transition-colors; }
+      .input-field { @apply bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full focus:border-teal-500 focus:ring-1 focus:ring-teal-500 outline-none; }
+      .badge { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium; }
+      .badge-green { @apply bg-green-900/50 text-green-400; }
+      .badge-yellow { @apply bg-yellow-900/50 text-yellow-400; }
+      .badge-red { @apply bg-red-900/50 text-red-400; }
+      .badge-blue { @apply bg-blue-900/50 text-blue-400; }
+      .skeleton { @apply animate-pulse bg-gray-800 rounded; }
+      .tooltip { @apply absolute z-50 px-2 py-1 text-xs text-white bg-gray-800 rounded shadow-lg; }
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: #1f2937; }
+      ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+      .htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
+      .htmx-request .htmx-indicator { opacity: 1; }
+      .htmx-request.htmx-indicator { opacity: 1; }
+    </style>
+    {% block head_extra %}{% endblock %}
+</head>
+<body class="h-full">
+    <nav class="sticky top-0 z-50 bg-gray-950/80 backdrop-blur border-b border-gray-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-14 items-center">
+                <div class="flex items-center gap-6">
+                    <a href="/" class="flex items-center gap-2 text-lg font-bold text-teal-500">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+                        {{ app_name }}
+                    </a>
+                    {% if current_user and current_user.is_authenticated %}
+                    <div class="hidden md:flex items-center gap-1">
+                        <a href="/dashboard" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">Dashboard</a>
+                        <a href="/research" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">Research</a>
+                        <a href="/portfolio" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">Portfolio</a>
+                        <a href="/backtest" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">Backtest</a>
+                        <a href="/forecast" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">Forecast</a>
+                        <a href="/agent" class="px-3 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors">AI Agent</a>
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="flex items-center gap-3">
+                    {% if current_user and current_user.is_authenticated %}
+                    <span class="text-xs px-2 py-1 rounded-full bg-teal-900/50 text-teal-400 border border-teal-800">
+                        {{ current_user.tier_config.name }}
+                    </span>
+                    <div class="relative group">
+                        <a href="/settings" class="flex items-center gap-2 text-sm text-gray-400 hover:text-white">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                            {{ current_user.display_name or current_user.email }}
+                        </a>
+                    </div>
+                    {% else %}
+                    <a href="/login" class="btn-secondary text-sm">Sign In</a>
+                    <a href="/register" class="btn-primary text-sm">Get Started</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="mb-4 space-y-2">
+            {% for category, message in messages %}
+            <div class="p-3 rounded-lg text-sm {% if category == 'error' %}bg-red-900/30 text-red-400 border border-red-800{% elif category == 'success' %}bg-green-900/30 text-green-400 border border-green-800{% else %}bg-blue-900/30 text-blue-400 border border-blue-800{% endif %}">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="border-t border-gray-800 py-6 mt-12">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-sm text-gray-500">
+            <p>{{ app_name }} v{{ app_version }} — Educational Investment Research Platform. Not financial advice.</p>
+            <div class="mt-2 space-x-4">
+                <a href="/pricing" class="hover:text-gray-300">Pricing</a>
+                <a href="/docs" class="hover:text-gray-300">Documentation</a>
+                <a href="mailto:support@quantflow.ai" class="hover:text-gray-300">Contact</a>
+            </div>
+        </div>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
