@@ -245,13 +245,13 @@ class Trainer:
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 pbar.set_postfix(loss=f"{batch_loss:.2f}", lr=f"{current_lr:.2e}")
 
+                global_step = epoch * len(train_loader) + batch_idx
                 if _wandb_available and wandb.run and batch_idx % 10 == 0:
                     wandb.log({
                         "batch/loss": batch_loss,
                         "batch/grad_norm": grad_norm,
                         "batch/lr": current_lr,
-                        "batch_idx": batch_idx + epoch * len(train_loader),
-                    }, commit=False)
+                    }, step=global_step, commit=False)
 
                 scheduler.step()
 
@@ -284,8 +284,9 @@ class Trainer:
             )
 
             if _wandb_available and wandb.run:
+                epoch_last_step = epoch * len(train_loader) + max(batch_idx, 0)
                 wandb.log({
-                    "epoch": epoch + 1,
+                    "epoch": epoch_global_step,
                     "train/loss": train_metrics.get("total", 0),
                     "train/accuracy": train_metrics.get("accuracy", 0),
                     "train/accuracy_inter": train_metrics.get("accuracy_inter", 0),
@@ -301,11 +302,11 @@ class Trainer:
                     "val/forecast_mae": val_metrics.get("forecast_mae", 0),
                     "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
                     "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
-                }, commit=True)
+                }, step=epoch_last_step, commit=True)
                 if (epoch + 1) % 5 == 0 or epoch == 0:
                     viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
                     if viz_img is not None:
-                        wandb.log({"viz/epoch_forecast_overview": viz_img}, commit=False)
+                        wandb.log({"viz/epoch_forecast_overview": viz_img}, step=epoch_last_step, commit=False)
 
             val_total = val_metrics.get("total", float("inf"))
             if val_total < self.best_val_loss - self.config.early_stopping_min_delta:
@@ -349,9 +350,12 @@ class Trainer:
             self.model.eval()
             all_probs, all_forecasts, all_sigmas, all_targets = [], [], [], []
             all_scale_acts = [[] for _ in range(4)]
+            max_samples = 300
 
             with torch.no_grad():
                 for batch in loader:
+                    if len(all_probs) > 0 and sum(arr.shape[0] for arr in all_probs) >= max_samples:
+                        break
                     features, labels = self._to_device(batch)
                     outputs = self.model(features)
 
@@ -377,14 +381,25 @@ class Trainer:
             if not all_probs:
                 return None
 
-            probs = np.concatenate(all_probs, axis=0)[:300]
-            forecasts = np.concatenate(all_forecasts, axis=0)[:300]
-            sigmas = np.concatenate(all_sigmas, axis=0)[:300]
-            targets = np.concatenate(all_targets, axis=0)[:300] if all_targets else np.zeros(len(probs))
+            try:
+                probs = np.concatenate([p[:max_samples]] if len(all_probs) == 1 else all_probs, axis=0)[:max_samples]
+                forecasts = np.concatenate([f[:max_samples]] if len(all_forecasts) == 1 else all_forecasts, axis=0)[:max_samples]
+                sigmas = np.concatenate([s[:max_samples]] if len(all_sigmas) == 1 else all_sigmas, axis=0)[:max_samples]
+                targets = np.concatenate([t[:max_samples]] if len(all_targets) == 1 else all_targets, axis=0)[:max_samples] if all_targets else np.zeros(probs.shape[0])
+            except ValueError:
+                bsz = min(a.shape[0] for a in all_probs)
+                probs = np.concatenate([a[:bsz] for a in all_probs], axis=0)[:max_samples]
+                forecasts = np.concatenate([a[:bsz] for a in all_forecasts], axis=0)[:max_samples]
+                sigmas = np.concatenate([a[:bsz] for a in all_sigmas], axis=0)[:max_samples]
+                targets = np.concatenate([a[:bsz] for a in all_targets], axis=0)[:max_samples] if all_targets else np.zeros(probs.shape[0])
 
             for s in range(4):
                 if all_scale_acts[s]:
-                    all_scale_acts[s] = np.concatenate(all_scale_acts[s], axis=1)[:, :300]
+                    try:
+                        all_scale_acts[s] = np.concatenate(all_scale_acts[s], axis=0)[:probs.shape[0]]
+                    except ValueError:
+                        bsz = min(a.shape[0] for a in all_scale_acts[s])
+                        all_scale_acts[s] = np.concatenate([a[:bsz] for a in all_scale_acts[s]], axis=0)[:probs.shape[0]]
 
             fig, axes = plt.subplots(4, 1, figsize=(18, 16), dpi=100)
 
@@ -490,15 +505,18 @@ class Trainer:
             fig.tight_layout()
 
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+            fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white", dpi=80)
             plt.close(fig)
             buf.seek(0)
             import wandb
-            return wandb.Image(buf.getvalue())
+            from PIL import Image
+            img = Image.open(buf)
+            return wandb.Image(img, caption=f"Epoch {epoch} Forecast")
         except Exception as exc:
             logger.warning(f"Epoch inference viz failed: {exc}")
             return None
 
+    def _save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
         checkpoint = {
             "epoch": epoch + 1,
             "model_state_dict": self.model.state_dict(),
@@ -633,7 +651,8 @@ def train_model(
                 fig.savefig(buf, format="png", bbox_inches="tight", dpi=120)
                 plt.close(fig)
                 buf.seek(0)
-                wandb.log({"test/confusion_and_distribution": wandb.Image(buf.getvalue())})
+                from PIL import Image
+                wandb.log({"test/confusion_and_distribution": wandb.Image(Image.open(buf))})
     except Exception as exc:
         logger.warning(f"Wandb logging failed: {exc}")
 
