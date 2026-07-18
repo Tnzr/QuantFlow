@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, random_split
 
 from ..data.labeler import build_labeled_dataset
 from ..data.universe import SECTOR_UNIVERSE
@@ -140,6 +140,26 @@ class FinancialTimeSeriesDataset(Dataset):
                 counts[code] += 1
         return counts
 
+    @property
+    def sample_weights(self) -> np.ndarray:
+        dist = self.class_distribution
+        total = sum(dist.values())
+        class_weight = {
+            c: total / max(count, 1) for c, count in dist.items()
+        }
+        weights = np.zeros(len(self._samples), dtype=np.float64)
+        for i, (_, labels, _, _) in enumerate(self._samples):
+            code = int(labels["event_state_code"].item())
+            weights[i] = class_weight.get(code, 1.0)
+        return weights
+
+    def get_balanced_sampler(self) -> WeightedRandomSampler:
+        return WeightedRandomSampler(
+            weights=torch.from_numpy(self.sample_weights).double(),
+            num_samples=len(self._samples),
+            replacement=True,
+        )
+
 
 def build_dataset(
     tickers: Optional[List[str]] = None,
@@ -214,7 +234,8 @@ def prepare_dataloaders(
                 f"train_samples={len(train_ds)}, val_samples={len(val_ds)}, test_samples={len(test_ds)}")
     logger.info(f"Train class distribution: {train_ds.class_distribution}")
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True)
+    train_sampler = train_ds.get_balanced_sampler()
+    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
 

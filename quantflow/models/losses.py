@@ -22,7 +22,7 @@ class LossConfig:
     classification_loss_type: str = "focal"
     regression_loss: str = "smoothl1"
     focal_alpha: float = 0.25
-    focal_gamma: float = 3.0
+    focal_gamma: float = 2.0
     label_smoothing: float = 0.05
 
     classification_temporal_boost: float = 0.5
@@ -31,7 +31,7 @@ class LossConfig:
     classification_temporal_max_multiplier: float = 4.0
     regression_temporal_max_multiplier: float = 3.0
 
-    class_weights: tuple = (0.8, 0.6, 1.0)
+    class_weights: tuple = (1.0, 1.0, 1.0)
 
     def normalize_weights(self) -> Dict[str, float]:
         raw = {

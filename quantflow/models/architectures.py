@@ -295,14 +295,15 @@ class TemporalStateModel(nn.Module):
         encoded = self._encode(x)
         fused_seq, h_new = self.multi_scale(encoded, h_prev) if self.use_multi_scale else (encoded, None)
 
-        fused = fused_seq[:, -1, :]
+        fused_last = fused_seq[:, -1, :]
+        fused_mean = fused_seq.mean(dim=1)
 
-        past_probs, past_logits = self.past_head(fused)
+        past_probs, past_logits = self.past_head(fused_mean)
         class_logits = past_logits if self.use_coherent_heads else None
-        future = self.future_head(fused, class_logits)
+        future = self.future_head(fused_last, class_logits)
 
-        unc_mu, unc_sigma = self.uncertainty_head(fused)
-        dynamics = self.dynamics_head(fused)
+        unc_mu, unc_sigma = self.uncertainty_head(fused_last)
+        dynamics = self.dynamics_head(fused_last)
 
         return {
             "past_state_probs": past_probs,

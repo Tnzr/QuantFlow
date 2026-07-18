@@ -387,13 +387,16 @@ def plot_training_monitor(
     if tr:
         _plot_loss_breakdown(fig.add_subplot(gs[1, 0]), tr, vl)
 
+    if tr:
+        _plot_per_class_accuracy(fig.add_subplot(gs[1, 1]), tr, vl)
+
     if predictions is not None and not predictions.empty:
-        _plot_classification_confusion(fig.add_subplot(gs[1, 1]), predictions)
-        _plot_prediction_vs_actual(fig.add_subplot(gs[1, 2]), predictions)
+        _plot_classification_confusion(fig.add_subplot(gs[1, 2]), predictions)
         _plot_state_transitions(fig.add_subplot(gs[2, :2]), predictions)
         _plot_forecast_error(fig.add_subplot(gs[2, 2]), predictions)
     else:
         _plot_state_transitions_empty(fig.add_subplot(gs[2, :]))
+        _plot_prediction_vs_actual(fig.add_subplot(gs[2, 2]), predictions) if predictions is not None and not predictions.empty else None
 
     fig.suptitle("Training Performance Monitor", fontsize=14, fontweight="bold", y=0.99)
     fig.savefig(output_path, bbox_inches="tight", facecolor="white")
@@ -434,7 +437,7 @@ def _plot_lr_schedule(ax, tr):
 def _plot_loss_breakdown(ax, tr, vl):
     if not tr: return
     last = tr[-1]
-    components = {k: v for k, v in last.items() if k not in ("epoch", "lr", "total", "accuracy") and not k.startswith("_")}
+    components = {k: v for k, v in last.items() if k not in ("epoch", "lr", "total", "accuracy", "accuracy_inter", "accuracy_pre", "accuracy_onset", "grad_norm_mean") and not k.startswith("_")}
     components.pop("total", None)
     labels = list(components.keys())
     vals = list(components.values())
@@ -442,6 +445,24 @@ def _plot_loss_breakdown(ax, tr, vl):
     colors = plt.cm.Set2(np.linspace(0, 1, len(labels)))
     ax.barh(labels, vals, color=colors, alpha=0.7)
     _ax(ax, "Loss Components (Final Epoch)", xlabel="Value")
+
+
+def _plot_per_class_accuracy(ax, tr, vl):
+    if not tr: return
+    epochs = [e.get("epoch", i) for i, e in enumerate(tr)]
+    for class_idx, label, color in [(0, "Inter", _S["inter"]), (1, "Pre", _S["pre"]), (2, "Onset", _S["onset"])]:
+        key = f"accuracy_{['inter','pre','onset'][class_idx]}"
+        ax.plot(epochs, [e.get(key, 0) * 100 for e in tr], color=color, linewidth=1.5, label=f"Train {label}")
+    if vl:
+        v_epochs = [e.get("epoch", i) for i, e in enumerate(vl)]
+        for class_idx, label, color in [(0, "Inter", _S["inter"]), (1, "Pre", _S["pre"]), (2, "Onset", _S["onset"])]:
+            key = f"accuracy_{['inter','pre','onset'][class_idx]}"
+            vals = [e.get(key, 0) * 100 for e in vl]
+            if any(v > 0 for v in vals):
+                ax.plot(v_epochs, vals, color=color, linewidth=1.0, linestyle="--", alpha=0.6, label=f"Val {label}")
+    ax.set_ylim(0, 105)
+    _ax(ax, "Per-Class Accuracy", xlabel="Epoch", ylabel="%")
+    ax.legend(fontsize=5, loc="lower right", ncol=3)
 
 
 def _plot_classification_confusion(ax, preds):
