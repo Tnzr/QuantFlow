@@ -10,13 +10,13 @@ import torch.nn.functional as F
 
 @dataclass
 class LossConfig:
-    classification_weight: float = 0.30
-    regression_weight: float = 0.20
+    classification_weight: float = 0.40
+    regression_weight: float = 0.25
     distance_weight: float = 0.10
-    coherence_weight: float = 0.10
-    dynamics_weight: float = 0.05
-    uncertainty_weight: float = 0.10
-    direction_weight: float = 0.10
+    coherence_weight: float = 0.05
+    dynamics_weight: float = 0.02
+    uncertainty_weight: float = 0.08
+    direction_weight: float = 0.05
     ranking_weight: float = 0.05
 
     classification_loss_type: str = "focal"
@@ -73,14 +73,20 @@ class CompositeLoss(nn.Module):
         return focal.mean()
 
     def _classification_loss(self, logits: torch.Tensor, targets: torch.Tensor, tau_target: torch.Tensor) -> torch.Tensor:
-        base_loss = F.cross_entropy(logits, targets, reduction="none")
+        epsilon = self.config.label_smoothing
+        n_classes = logits.size(-1)
+        smooth_targets = torch.full_like(logits, epsilon / (n_classes - 1))
+        smooth_targets.scatter_(1, targets.unsqueeze(1), 1.0 - epsilon)
+        neg_log = -(smooth_targets * F.log_softmax(logits, dim=-1))
+        base_loss = neg_log.sum(dim=-1)
+
+        alpha = self.config.focal_alpha
+        gamma = self.config.focal_gamma
+        prob_true = F.softmax(logits, dim=-1).gather(1, targets.unsqueeze(1)).squeeze(1)
+        focal_factor = alpha * (1.0 - prob_true) ** gamma
 
         cw = torch.tensor(self.config.class_weights, device=logits.device, dtype=torch.float32)
         class_weight_per_sample = cw[targets]
-        alpha = self.config.focal_alpha
-        gamma = self.config.focal_gamma
-        pt = torch.exp(-base_loss)
-        focal_factor = alpha * (1 - pt) ** gamma
 
         tau_clamped = tau_target.clamp(1.0, 21.0)
         temporal_weight = 1.0 + self.config.classification_temporal_boost * torch.exp(

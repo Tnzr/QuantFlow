@@ -30,10 +30,11 @@ class TrainingConfig:
     weight_decay: float = 1e-5
     gradient_clip_norm: float = 2.0
     gradient_accumulation_steps: int = 1
+    gradient_noise_eta: float = 0.005
 
     lr_scheduler: str = "cosine"
-    warmup_epochs: int = 5
-    min_lr: float = 1e-6
+    warmup_epochs: int = 0
+    min_lr: float = 1e-5
 
     early_stopping_patience: int = 15
     early_stopping_min_delta: float = 0.001
@@ -91,11 +92,14 @@ class Trainer:
 
     def _create_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LRScheduler:
         total_steps = self.config.epochs * steps_per_epoch
-        warmup_steps = self.config.warmup_epochs * steps_per_epoch
 
-        warmup = LinearLR(self.optimizer, start_factor=0.01, total_iters=warmup_steps)
-        cosine = CosineAnnealingLR(self.optimizer, T_max=total_steps - warmup_steps, eta_min=self.config.min_lr)
-        return SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+        if self.config.warmup_epochs > 0:
+            warmup_steps = self.config.warmup_epochs * steps_per_epoch
+            warmup = LinearLR(self.optimizer, start_factor=0.1, total_iters=warmup_steps)
+            cosine = CosineAnnealingLR(self.optimizer, T_max=total_steps - warmup_steps, eta_min=self.config.min_lr)
+            return SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+
+        return CosineAnnealingLR(self.optimizer, T_max=total_steps, eta_min=self.config.min_lr)
 
     def _to_device(self, batch: Tuple[torch.Tensor, Dict[str, torch.Tensor], str]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         features, labels, _ = batch
@@ -119,6 +123,14 @@ class Trainer:
         else:
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip_norm)
+
+            if self.config.gradient_noise_eta > 0 and self.model.training:
+                with torch.no_grad():
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            noise = torch.randn_like(p.grad) * self.config.gradient_noise_eta * p.grad.norm(2).clamp(max=1.0)
+                            p.grad.add_(noise)
+
             self.optimizer.step()
 
         return outputs, losses, labels
@@ -130,6 +142,10 @@ class Trainer:
         total_samples = 0
         class_correct = {0: 0, 1: 0, 2: 0}
         class_count = {0: 0, 1: 0, 2: 0}
+        forecast_errors = []
+        forecast_errors_weighted = []
+        forecast_direction_correct = 0
+        forecast_direction_total = 0
 
         with torch.no_grad():
             for batch in loader:
@@ -149,11 +165,29 @@ class Trainer:
                     class_count[c] += mask.sum().item()
                     class_correct[c] += (preds[mask] == c).sum().item()
 
+                fcast = outputs["future_forecast"].squeeze(-1)
+                if fcast.dim() > 1:
+                    fcast = fcast.mean(dim=-1)
+                tgt_tau = labels["tau_forward"]
+                tau_clamped = tgt_tau.clamp(1.0, 21.0)
+                abs_err = (fcast - tau_clamped).abs()
+                forecast_errors.append(float(abs_err.mean()))
+
+                temporal_weight = torch.exp(-tau_clamped / 5.0)
+                w_err = (abs_err * temporal_weight).mean()
+                forecast_errors_weighted.append(float(w_err))
+
+                forecast_direction_correct += ((fcast.sign() == tau_clamped.sign()) | (fcast > 0)).sum().item()
+                forecast_direction_total += fcast.size(0)
+
         avg_losses = {k: v / max(len(loader), 1) for k, v in total_losses.items()}
         avg_losses["accuracy"] = total_correct / max(total_samples, 1)
         avg_losses["accuracy_inter"] = class_correct[0] / max(class_count[0], 1)
         avg_losses["accuracy_pre"] = class_correct[1] / max(class_count[1], 1)
         avg_losses["accuracy_onset"] = class_correct[2] / max(class_count[2], 1)
+        avg_losses["forecast_mae"] = float(np.mean(forecast_errors)) if forecast_errors else 0.0
+        avg_losses["forecast_mae_temporal"] = float(np.mean(forecast_errors_weighted)) if forecast_errors_weighted else 0.0
+        avg_losses["forecast_dir_acc"] = forecast_direction_correct / max(forecast_direction_total, 1)
         return avg_losses
 
     def fit(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict[str, Any]:
@@ -245,6 +279,7 @@ class Trainer:
                 f"i={train_metrics.get('accuracy_inter', 0):.2f} "
                 f"p={train_metrics.get('accuracy_pre', 0):.2f} "
                 f"o={train_metrics.get('accuracy_onset', 0):.2f} | "
+                f"fcst_mae={val_metrics.get('forecast_mae', 0):.1f}d | "
                 f"grad={train_metrics['grad_norm_mean']:.3f}"
             )
 
@@ -263,6 +298,9 @@ class Trainer:
                     "val/accuracy_inter": val_metrics.get("accuracy_inter", 0),
                     "val/accuracy_pre": val_metrics.get("accuracy_pre", 0),
                     "val/accuracy_onset": val_metrics.get("accuracy_onset", 0),
+                    "val/forecast_mae": val_metrics.get("forecast_mae", 0),
+                    "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
+                    "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
                 }, commit=True)
 
             val_total = val_metrics.get("total", float("inf"))
