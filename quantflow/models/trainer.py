@@ -286,7 +286,7 @@ class Trainer:
             if _wandb_available and wandb.run:
                 epoch_last_step = epoch * len(train_loader) + max(batch_idx, 0)
                 wandb.log({
-                    "epoch": epoch_global_step,
+                    "epoch": epoch + 1,
                     "train/loss": train_metrics.get("total", 0),
                     "train/accuracy": train_metrics.get("accuracy", 0),
                     "train/accuracy_inter": train_metrics.get("accuracy_inter", 0),
