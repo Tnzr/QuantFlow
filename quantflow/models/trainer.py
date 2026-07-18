@@ -382,7 +382,7 @@ class Trainer:
                     if sigma.ndim > 1:
                         sigma = sigma.mean(axis=-1)
                     tau = labels["tau_forward"].cpu().numpy()
-                    prices = labels.get("adj_close", torch.zeros_like(tau)).cpu().numpy()
+                    prices = labels.get("adj_close", torch.zeros_like(torch.from_numpy(tau))).cpu().numpy()
 
                     all_probs.append(probs)
                     all_forecasts.append(fcast)
