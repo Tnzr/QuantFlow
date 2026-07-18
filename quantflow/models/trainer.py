@@ -302,6 +302,10 @@ class Trainer:
                     "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
                     "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
                 }, commit=True)
+                if (epoch + 1) % 5 == 0 or epoch == 0:
+                    viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
+                    if viz_img is not None:
+                        wandb.log({"viz/epoch_forecast_overview": viz_img}, commit=False)
 
             val_total = val_metrics.get("total", float("inf"))
             if val_total < self.best_val_loss - self.config.early_stopping_min_delta:
@@ -327,7 +331,174 @@ class Trainer:
 
         return {"train_history": self.train_history, "val_history": self.val_history}
 
-    def _save_checkpoint(self, epoch: int, metrics: Dict[str, float], is_best: bool = False):
+    def _generate_epoch_inference_viz(self, loader: DataLoader, epoch: int):
+        """Generate epoch-level inference visualization for wandb.
+
+        Produces a 4-panel figure:
+        1. State probability ribbon with buy/sell/hold overlay
+        2. Forecast tau vs actual forward return error
+        3. Latent token activation heatmap (scale S0→S3)
+        4. Price with drawdown-based trend regions
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import io
+
+            self.model.eval()
+            all_probs, all_forecasts, all_sigmas, all_targets = [], [], [], []
+            all_scale_acts = [[] for _ in range(4)]
+
+            with torch.no_grad():
+                for batch in loader:
+                    features, labels = self._to_device(batch)
+                    outputs = self.model(features)
+
+                    probs = outputs["past_state_probs"].cpu().numpy()
+                    fcast = outputs["future_forecast"].squeeze(-1).cpu().numpy()
+                    if fcast.ndim > 1:
+                        fcast = fcast.mean(axis=-1)
+                    sigma = outputs["uncertainty_sigma"].squeeze(-1).cpu().numpy()
+                    if sigma.ndim > 1:
+                        sigma = sigma.mean(axis=-1)
+                    tau = labels["tau_forward"].cpu().numpy()
+
+                    all_probs.append(probs)
+                    all_forecasts.append(fcast)
+                    all_sigmas.append(sigma)
+                    all_targets.append(tau)
+
+                    skips = outputs.get("scale_activations", [])
+                    for s in range(min(4, len(skips))):
+                        act = skips[s].cpu().numpy()
+                        all_scale_acts[s].append(act.mean(axis=1))
+
+            if not all_probs:
+                return None
+
+            probs = np.concatenate(all_probs, axis=0)[:300]
+            forecasts = np.concatenate(all_forecasts, axis=0)[:300]
+            sigmas = np.concatenate(all_sigmas, axis=0)[:300]
+            targets = np.concatenate(all_targets, axis=0)[:300] if all_targets else np.zeros(len(probs))
+
+            for s in range(4):
+                if all_scale_acts[s]:
+                    all_scale_acts[s] = np.concatenate(all_scale_acts[s], axis=1)[:, :300]
+
+            fig, axes = plt.subplots(4, 1, figsize=(18, 16), dpi=100)
+
+            # Panel 1: State probability ribbon + buy/sell regions
+            ax1 = axes[0]
+            x = np.arange(len(probs))
+            ax1.fill_between(x, 0, probs[:, 0], alpha=0.3, color="#27ae60", label="Inter")
+            ax1.fill_between(x, probs[:, 0], probs[:, 0] + probs[:, 1], alpha=0.3, color="#f39c12", label="Pre")
+            ax1.fill_between(x, probs[:, 0] + probs[:, 1], 1.0, alpha=0.3, color="#e74c3c", label="Onset")
+
+            risk = probs[:, 1] + probs[:, 2] * 1.5
+            ax1.plot(x, risk, color="#1abc9c", linewidth=1.0, alpha=0.7, label="Risk Score")
+            buy_mask = risk >= 0.60
+            sell_mask = probs[:, 0] >= 0.40
+            for i in range(len(x)):
+                if buy_mask[i]:
+                    ax1.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="#27ae60")
+            ax1.set_ylim(0, 1.05)
+            ax1.set_ylabel("Probability"); ax1.set_title(f"Epoch {epoch} — Head Probabilities & Signal Regions")
+            ax1.legend(loc="upper left", ncol=4, fontsize=7)
+
+            # Panel 2: Forecast tau with error vs actual
+            ax2 = axes[1]
+            ax2.plot(x, forecasts, color="#9b59b6", linewidth=1.5, label="Forecast tau")
+            ax2.fill_between(x, np.maximum(0, forecasts - 2 * sigmas), forecasts + 2 * sigmas,
+                             alpha=0.12, color="#9b59b6")
+            ax2.plot(x, targets, color="#e67e22", linewidth=1.0, alpha=0.6, label="Target tau")
+            ax2.axhline(21, color="gray", ls="--", alpha=0.4)
+            ax2.axhline(5, color="#e74c3c", ls="--", alpha=0.4)
+            mae = np.abs(forecasts - targets).mean()
+            ax2.text(0.02, 0.95, f"MAE: {mae:.1f}d", transform=ax2.transAxes, fontsize=7,
+                     va="top", bbox=dict(boxstyle="round", fc="white", alpha=0.8))
+            ax2.set_ylabel("Days"); ax2.set_title("Forecast Tau vs Target with ±2σ")
+            ax2.legend(loc="upper right", fontsize=7)
+
+            # Panel 3: Latent token activations
+            ax3 = axes[2]
+            has_scale_acts = any(len(a) > 0 for a in all_scale_acts)
+            if has_scale_acts:
+                import matplotlib.gridspec as gs_inner
+                inner_gs = gs_inner.GridSpecFromSubplotSpec(4, 1, subplot_spec=ax3.get_subplotspec(),
+                                                            hspace=0.05)
+                inner_axes = [fig.add_subplot(inner_gs[i]) for i in range(4)]
+                for s in range(4):
+                    ax_inner = inner_axes[s]
+                    if s < len(all_scale_acts) and len(all_scale_acts[s]) > 0:
+                        act = all_scale_acts[s]
+                        n_dims = min(8, act.shape[0])
+                        im = ax_inner.imshow(act[:n_dims], aspect="auto", cmap="RdYlBu_r", interpolation="nearest")
+                        ax_inner.set_ylabel(f"S{s}", fontsize=8, rotation=0, labelpad=10)
+                        ax_inner.tick_params(labelsize=6)
+                        ax_inner.set_yticklabels([])
+                    else:
+                        ax_inner.text(0.5, 0.5, f"S{s}: no data", ha="center", va="center",
+                                     transform=ax_inner.transAxes, fontsize=7)
+                    if s < 3:
+                        ax_inner.set_xticklabels([])
+                ax3.set_title("Latent Token Activations (4-scale cascade, top-8 dims)", fontsize=10)
+            else:
+                ax3.text(0.5, 0.5, "No scale activations available (TCN/Transformer pipeline)",
+                         ha="center", va="center", transform=ax3.transAxes, fontsize=10)
+
+            # Panel 4: Drawdown-based trend regions
+            ax4 = axes[3]
+            if len(targets) > 0:
+                price_sim = np.cumprod(1 + np.random.randn(len(targets)) * 0.01) * 100
+                peak = np.maximum.accumulate(price_sim)
+                dd = (price_sim - peak) / peak * 100
+                ax4.plot(x, price_sim, color="#2ecc71", linewidth=1.5, label="Price (sim)")
+
+                dd_threshold = 3.0
+                in_dd = dd < -dd_threshold
+                uptrend = np.ones(len(dd), dtype=bool)
+                for i in range(1, len(dd)):
+                    if in_dd[i]:
+                        uptrend[i] = False
+                    elif not in_dd[i] and not in_dd[i - 1]:
+                        uptrend[i] = True
+                        for j in range(i, min(i + 5, len(dd))):
+                            uptrend[j] = True
+
+                for i in range(len(x)):
+                    if i > 0 and uptrend[i]:
+                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.08, color="#27ae60")
+                    elif i > 0:
+                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.08, color="#e74c3c")
+
+                ax4_twin = ax4.twinx()
+                ax4_twin.fill_between(x, 0, dd, alpha=0.15, color="#e74c3c")
+                ax4_twin.set_ylim(-30, 0)
+                ax4_twin.set_ylabel("Drawdown %", fontsize=8, color="#e74c3c")
+                ax4_twin.tick_params(colors="#e74c3c", labelsize=7)
+
+                buy_confirms = buy_mask & ~in_dd
+                buy_confirmed_count = buy_confirms.sum()
+                ax4.set_title(f"Price Trend & Drawdown Regions (buy signals: {buy_confirmed_count} confirmed/{buy_mask.sum()} raw)", fontsize=10)
+                ax4.legend(loc="upper left", fontsize=7)
+                ax4.set_ylabel("Price ($)")
+
+            for ax in axes:
+                ax.grid(True, alpha=0.15, linestyle="--")
+                ax.tick_params(labelsize=7)
+            fig.tight_layout()
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            buf.seek(0)
+            import wandb
+            return wandb.Image(buf.getvalue())
+        except Exception as exc:
+            logger.warning(f"Epoch inference viz failed: {exc}")
+            return None
+
         checkpoint = {
             "epoch": epoch + 1,
             "model_state_dict": self.model.state_dict(),

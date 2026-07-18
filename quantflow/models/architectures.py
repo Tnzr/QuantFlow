@@ -83,7 +83,7 @@ class MultiScaleTokenCascade(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, u_t: torch.Tensor, h_prev: Optional[list[torch.Tensor]] = None) -> Tuple[torch.Tensor, list[torch.Tensor]]:
+    def forward(self, u_t: torch.Tensor, h_prev: Optional[list[torch.Tensor]] = None) -> Tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
         h_new = []
         x = u_t
         skips = []
@@ -103,7 +103,7 @@ class MultiScaleTokenCascade(nn.Module):
 
         skip_sum = sum(self.skip_projections[i](skips[i]) for i in range(4))
         fused = self.fusion(torch.cat([x, skip_sum], dim=-1))
-        return fused, h_new
+        return fused, h_new, skips
 
 
 class MultiScaleTokenSCascade(nn.Module):
@@ -137,7 +137,7 @@ class MultiScaleTokenSCascade(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, u_t: torch.Tensor, _h: Optional[list] = None) -> Tuple[torch.Tensor, list]:
+    def forward(self, u_t: torch.Tensor, _h: Optional[list] = None) -> Tuple[torch.Tensor, list, list]:
         x = u_t.transpose(1, 2)
         skips = []
         for s in range(4):
@@ -147,7 +147,7 @@ class MultiScaleTokenSCascade(nn.Module):
         x = x.mean(dim=-1)
         skip_sum = skip_sum.mean(dim=-1)
         fused = self.fusion(torch.cat([x, skip_sum], dim=-1))
-        return fused, []
+        return fused, [], skips
 
 
 class ModalityFusionGate(nn.Module):
@@ -282,7 +282,7 @@ class TemporalStateModel(nn.Module):
         self.use_multi_scale = use_multi_scale
 
         self.fusion_gate = ModalityFusionGate(hidden_dim, num_modalities)
-        self.multi_scale = MultiScaleTokenCascade(hidden_dim, hidden_dim, dropout) if use_multi_scale else nn.Identity()
+        self.multi_scale = MultiScaleTokenCascade(hidden_dim, hidden_dim, dropout) if use_multi_scale else None
         self.past_head = PastStateHead(hidden_dim, num_classes, dropout)
         self.future_head = FutureForecastHead(hidden_dim, forecast_horizon, dropout)
         self.uncertainty_head = UncertaintyHead(hidden_dim, dropout)
@@ -293,7 +293,10 @@ class TemporalStateModel(nn.Module):
 
     def forward(self, x: torch.Tensor, h_prev: Optional[list] = None) -> Dict[str, torch.Tensor]:
         encoded = self._encode(x)
-        fused_seq, h_new = self.multi_scale(encoded, h_prev) if self.use_multi_scale else (encoded, None)
+        if self.use_multi_scale and self.multi_scale is not None:
+            fused_seq, h_new, skips = self.multi_scale(encoded, h_prev)
+        else:
+            fused_seq, h_new, skips = encoded, None, []
 
         fused_last = fused_seq[:, -1, :]
         fused_mean = fused_seq.mean(dim=1)
@@ -314,6 +317,8 @@ class TemporalStateModel(nn.Module):
             "uncertainty_sigma": unc_sigma,
             "dynamics_residual": dynamics,
             "hidden_state": h_new,
+            "fused_sequence": fused_seq,
+            "scale_activations": skips,
         }
 
 
