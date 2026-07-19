@@ -172,6 +172,37 @@ class ModalityFusionGate(nn.Module):
         return sum(alpha[..., i:i + 1] * modality_tokens[i] for i in range(len(modality_tokens)))
 
 
+class AttentionPool(nn.Module):
+    """Learned attention pooling over the temporal (lookback) dimension.
+
+    Replaces static mean-pooling for the classification head. Mean-pooling
+    over the full 60-day lookback window dilutes exactly the kind of
+    short-window, recent-day signal that distinguishes onset/pre-event states
+    from inter-event states (mean-pool treats day 1 and day 60 identically).
+    This module learns per-timestep attention scores so the model can focus on
+    whichever days are most discriminative — analogous to how a trader's eye
+    weighs the last few candlesticks far more heavily than a two-month-old bar.
+    Pooling is over the PAST lookback window only (already causal/known at
+    inference time), so this introduces no lookahead leakage.
+    """
+
+    def __init__(self, hidden_dim: int, dropout: float = 0.2):
+        super().__init__()
+        self.score = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """seq: [B, T, H] -> pooled: [B, H], weights: [B, T]"""
+        scores = self.score(seq).squeeze(-1)
+        weights = F.softmax(scores, dim=-1)
+        pooled = torch.einsum("bt,bth->bh", weights, seq)
+        return pooled, weights
+
+
 class PastStateHead(nn.Module):
     """Certainty generator — classifies current state relative to critical event per §5.2."""
 
@@ -283,6 +314,7 @@ class TemporalStateModel(nn.Module):
 
         self.fusion_gate = ModalityFusionGate(hidden_dim, num_modalities)
         self.multi_scale = MultiScaleTokenCascade(hidden_dim, hidden_dim, dropout) if use_multi_scale else None
+        self.past_pool = AttentionPool(hidden_dim, dropout)
         self.past_head = PastStateHead(hidden_dim, num_classes, dropout)
         self.future_head = FutureForecastHead(hidden_dim, forecast_horizon, dropout)
         self.uncertainty_head = UncertaintyHead(hidden_dim, dropout)
@@ -299,9 +331,9 @@ class TemporalStateModel(nn.Module):
             fused_seq, h_new, skips = encoded, None, []
 
         fused_last = fused_seq[:, -1, :]
-        fused_mean = fused_seq.mean(dim=1)
+        pooled_for_past, past_attn_weights = self.past_pool(fused_seq)
 
-        past_probs, past_logits = self.past_head(fused_mean)
+        past_probs, past_logits = self.past_head(pooled_for_past)
         class_logits = past_logits if self.use_coherent_heads else None
         future = self.future_head(fused_last, class_logits)
 
@@ -311,6 +343,7 @@ class TemporalStateModel(nn.Module):
         return {
             "past_state_probs": past_probs,
             "past_state_logits": past_logits,
+            "past_attn_weights": past_attn_weights,
             "future_forecast": future["forecast"],
             "future_bins": future["bins"],
             "uncertainty_mu": unc_mu,
