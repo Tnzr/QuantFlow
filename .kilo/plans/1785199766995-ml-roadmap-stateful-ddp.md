@@ -174,7 +174,27 @@ GPU 3: tickers[3N/4:]    → chronological batches → hidden_states[GPU3]
 
 ---
 
-## §6 Training Launch Plan
+## §7 Data Pipeline Resolution
+
+### Current State (Critical Issue Discovered 2026-07-18)
+- **Resolution:** ~7-day gaps (weekly snapshots via `snapshot_step=5`)
+- **Samples per ticker:** ~227 over 4.5 years
+- **Temporal carries per ticker:** ~227/60 ≈ 3.8 GRU stateful propagations
+- **Impact:** Only ~4 sequential context passes — model cannot learn meaningful temporal dynamics
+- **Classification collapse explained:** GRU resets after just 3-4 batches per ticker, stateful benefit is negligible
+
+### Required Fix
+- `snapshot_step=1` — daily resolution
+- ~1135 samples per ticker, ~19 temporal carries, ~159K total samples
+- Rebuild `full_universe_5y.parquet` with `snapshot_step=1`
+- Rebuild `checkpoints/bilstm_v7_stateful.pt` on daily data
+
+### Future: Minute-Level Data
+- `interval="5m"` with yfinance (500 bars per request limit)
+- `snapshot_step=1` (every 5-minute bar)
+- ~78 bars/day × 252 days × 5 years × 140 tickers = ~13.7M rows
+- Requires: parallel fetch, HDF5/Parquet partitioning, distributed training
+- Temporal carries: ~13.7M/140/60 ≈ 1636 per ticker — well within GRU capacity
 
 ### Configuration (full universe)
 | Parameter | Value | Rationale |
@@ -197,3 +217,34 @@ GPU 3: tickers[3N/4:]    → chronological batches → hidden_states[GPU3]
 - [ ] Forecast MAE: decreasing from initial ~10d toward < 5d
 - [ ] Epoch viz: all 4 panels generated at epochs 1, 5, 10, 15, 20
 - [ ] No CUDA OOM or hidden state explosion
+
+---
+
+## §8 Seasonality Features
+
+### Pre-Computed Calendar Features (Zero Training Cost)
+| Feature | Encoding | Rationale |
+|---------|----------|-----------|
+| Day of week | sin/cos(2) | Monday/Friday effects, weekend gap |
+| Month of year | sin/cos(2) | January effect, summer doldrums |
+| Year quarter | One-hot(4) | Institutional rebalancing |
+| Quarter phase | Scalar (0.0–1.0) | Where in the 13-week cycle |
+
+### Oscillatory Encoding: sin/cos for Cyclic Features
+Rather than one-hot encoding cyclic features (DoW, MoY), use continuous encoding:
+```python
+dow_sin = sin(2π × dow / 5)    # 5 trading days
+dow_cos = cos(2π × dow / 5)
+moy_sin = sin(2π × month / 12)
+moy_cos = cos(2π × month / 12)
+```
+2 floats per cyclic feature vs 5 (DoW) or 12 (MoY) one-hot dims.
+
+### Multi-Modal Integration
+Seasonality as separate modality — keeps temporal features (price/volume) separate from calendar features:
+```
+[Price/Volume] → BiLSTM encoder ─┐
+[Seasonality]   → MLP/embedding ──┤→ FusionGate → Cascade → 4 heads
+```
+Phase 1: 3 scalars added to feature vector at dataset build (zero cost).
+Phase 2: Separate encoder + modality gate.

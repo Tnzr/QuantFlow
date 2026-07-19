@@ -313,7 +313,7 @@ class Trainer:
                     "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
                     "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
                 }, step=epoch_last_step, commit=True)
-                if (epoch + 1) % 5 == 0 or epoch == 0:
+                if True:
                     viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
                     if viz_img is not None:
                         wandb.log({"viz/epoch_forecast_overview": viz_img}, step=epoch_last_step, commit=False)

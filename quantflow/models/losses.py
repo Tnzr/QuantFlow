@@ -31,7 +31,7 @@ class LossConfig:
     classification_temporal_max_multiplier: float = 4.0
     regression_temporal_max_multiplier: float = 3.0
 
-    class_weights: tuple = (2.0, 0.3, 1.0)
+    class_weights: tuple = (1.0, 1.5, 2.0)
 
     def normalize_weights(self) -> Dict[str, float]:
         raw = {
