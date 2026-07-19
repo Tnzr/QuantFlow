@@ -80,3 +80,52 @@ Status: IN PROGRESS
   price+drawdown, confusion matrix) — "raw signal trace with event markers" and "derived
   physiology/feature overlays" are EEG-monitoring-domain language from the template methodology doc and
   don't map 1:1 onto financial features; interpreted analogues are covered by existing panels.
+
+---
+
+## UPDATE 2026-07-18: Loss/monitoring fixes verified working, but collapse persists — new root cause isolated
+
+### Monitoring fixes: CONFIRMED WORKING (10-epoch live test, wandb run 0woxrjrm)
+- Zero wandb step-ordering warnings across all runs (previously present every epoch).
+- Zero viz-generation errors; spread-window/confusion-matrix/anomaly-flag panel renders every epoch.
+- Automated `CLASS COLLAPSE` detector fired correctly at epoch 1 in every test run below — exactly the
+  instrumentation gap this session set out to close.
+
+### Collapse persists — 4 independent ablations, ALL produced byte-identical results
+Every configuration below converged to `accuracy=0.804287045666356` (the test set's literal
+majority-class fraction) with `accuracy_inter=0.0, accuracy_pre=1.0, accuracy_onset=0.0`:
+
+| # | Test | Config | Result |
+|---|------|--------|--------|
+| 1 | Dynamic per-batch class weighting (this session's loss fix) | `class_weight_mode=dynamic`, `focal_gamma=2.0` | Collapse (verified weighting itself gives real 2.4-2.6x boost) |
+| 2 | Attention-pool classification head (this session's architecture fix) | Same loss config + `AttentionPool` replacing mean-pool | Byte-identical collapse |
+| 3 | Decoupled forecast/classification heads | `use_coherent_heads=False` | Byte-identical collapse |
+| 4 | Classification-only objective | `classification_weight=1.0`, all 7 other loss weights = 0.0 | Byte-identical collapse |
+
+Gradient-flow sanity check confirmed gradients DO reach `past_head`/`past_pool` parameters (non-zero,
+no wiring bug).
+
+### Decisive test: features ARE separable — RandomForest (shuffled, sklearn `class_weight='balanced'`)
+on the same underlying features (last-day + window mean/std, 63-dim) achieves:
+```
+inter:  recall 0.93, precision 0.46
+pre:    recall 0.77, precision 0.95
+onset:  recall 0.81, precision 0.47
+```
+This rules out data/label/feature separability as the cause.
+
+### New leading hypothesis
+The one variable every failing deep-learning config shares — and that the successful RF test does NOT
+share — is **strictly chronological, non-shuffled, per-ticker sequential batch order**, mandated by
+methodology §4.3/§8.2 for stateful hidden-state carry. Consecutive daily samples from one ticker are
+highly autocorrelated; non-shuffled SGD sees long runs of the same regime per batch, which likely causes
+gradient drift toward whichever regime is locally dominant, overwhelming any class-weighting scheme
+(static or dynamic) because the weighting's effectiveness depends on batch diversity that rarely exists
+in a temporally-local window regardless of raw class counts.
+
+### Decision needed (not resolved this session — user chose to stop and review rather than continue testing)
+Two-phase curriculum candidate: Phase A pretrains the encoder + classification head on SHUFFLED samples
+(breaking statefulness, matching the RF setup) to learn separable features; Phase B fine-tunes statefully/
+chronologically per methodology, ideally preserving the learned decision boundary. Not yet implemented —
+requires deciding whether to formalize this as a permanent training phase in `TrainingConfig`/`Trainer`
+before writing it, since it's a real methodology-level design change, not a config tweak.
