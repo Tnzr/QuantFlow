@@ -248,3 +248,38 @@ Seasonality as separate modality — keeps temporal features (price/volume) sepa
 ```
 Phase 1: 3 scalars added to feature vector at dataset build (zero cost).
 Phase 2: Separate encoder + modality gate.
+
+---
+
+## §9 Alpaca Data Provider Migration
+
+### Capabilities
+- **Real-time**: WebSocket streaming for production forecasting
+- **Historical**: Full multi-year OHLCV at 1-min+ (no 60-day limit like yfinance)
+- **Trading**: Paper + live via Alpaca API (MCP backup to Robinhood MCP)
+- **Free tier**: 200 API calls/min, unlimited historical data in paper
+- **Docs**: https://docs.alpaca.markets — REST + WebSocket, Python SDK
+
+### 5-Min yfinance Interim Test
+- 60-day window: `interval="5m", period="60d"` at `snapshot_step=1`
+- ~3,900 bars/ticker × 20 tickers = 78,000 rows
+- Validate intraday model before Alpaca migration
+
+### Alpaca Production Pipeline (Post-Daily-Validation)
+- 5 years × 78 bars/day × 252 × 140 tickers = ~13.8M rows
+- Script: `scripts/build_alpaca_dataset.py`
+
+## §10 Classification Collapse Status
+
+| Metric | v1-v6 (random) | v7 (weekly stateful) | v8 daily |
+|--------|---------------|---------------------|----------|
+| acc_pre | 0.85→1.0 | 1.0 | 1.0 |
+| acc_inter | 0.11→0.0 | 0.0 | 0.0 |
+| acc_onset | 0.86→0.0 | 0.0 | 0.0 |
+| Focal gamma | 2.0 | 2.0 | 5.0 |
+| Class weights | (1,1,1) | (1,1.5,2) | (5,0.25,3) |
+| Loss trend | plateau epoch 3 | plateau epoch 2 | plateau epoch 2 |
+
+Verdict: Classification collapse is invariant to data resolution, statefulness, and loss weighting. Root cause is architectural — the PastStateHead (mean-pool → 128→64→32→3) collapses to majority class regardless of input.
+
+Fix candidates: attention-weighted pool instead of mean-pool, BatchNorm before classifier, or pretrain on synthetic data.
