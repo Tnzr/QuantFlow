@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from quantflow.models.trainer import TrainingConfig, Trainer
 from quantflow.models.architectures import create_model
 from quantflow.models.losses import LossConfig, CompositeLoss
-from quantflow.models.dataset import FinancialTimeSeriesDataset, FEATURE_COLUMNS
+from quantflow.models.dataset import FinancialTimeSeriesDataset, FEATURE_COLUMNS, TickerBatchSampler
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +84,21 @@ def _prepare_dataloaders_ddp(
         logger.info(f"Train class distribution: {train_ds.class_distribution}")
         logger.info(f"Training mode: CHRONOLOGICAL per-ticker DDP ({world_size} GPUs)")
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    # Ticker-boundary-safe batching — see TickerBatchSampler docstring in
+    # dataset.py. Prevents a batch from silently spanning two tickers, which
+    # would corrupt per-ticker stateful hidden-state carry.
+    train_loader = DataLoader(
+        train_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(train_ds.ticker_ranges, batch_size, drop_last=True),
+    )
+    val_loader = DataLoader(
+        val_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(val_ds.ticker_ranges, batch_size, drop_last=False),
+    )
+    test_loader = DataLoader(
+        test_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(test_ds.ticker_ranges, batch_size, drop_last=False),
+    )
 
     return train_loader, val_loader, test_loader, train_ds.feature_dim
 

@@ -34,10 +34,27 @@ def main():
     parser.add_argument("--wandb-name", default="")
     parser.add_argument("--device", default="")
     parser.add_argument("--no-wandb", action="store_true")
-    parser.add_argument("--cls-weight", type=float, default=0.30)
-    parser.add_argument("--reg-weight", type=float, default=0.20)
-    parser.add_argument("--coh-weight", type=float, default=0.10)
-    parser.add_argument("--dir-weight", type=float, default=0.10)
+    # NOTE: defaults below are None-by-default and only override LossConfig's
+    # own dataclass defaults when explicitly passed, so this script's defaults
+    # can never silently diverge from LossConfig's defaults again (previously
+    # --cls-weight defaulted to 0.30 here vs 0.50 in LossConfig, so running
+    # without the flag used a different value than a direct LossConfig()).
+    parser.add_argument("--cls-weight", type=float, default=None)
+    parser.add_argument("--reg-weight", type=float, default=None)
+    parser.add_argument("--coh-weight", type=float, default=None)
+    parser.add_argument("--dir-weight", type=float, default=None)
+    parser.add_argument("--focal-gamma", type=float, default=None,
+                         help="Focal loss gamma. Standard/stable value is 2.0 (LossConfig default). "
+                              "Values >3 combined with class weighting can cause classification collapse.")
+    parser.add_argument("--focal-alpha", type=float, default=None)
+    parser.add_argument("--class-weight-mode", choices=["dynamic", "static"], default=None,
+                         help="'dynamic' (default, recommended) computes class weights per-batch from "
+                              "that batch's own class frequency per methodology §6.2.1/§8.2. 'static' uses "
+                              "the hardcoded --static-class-weights tuple, which is prone to collapse if "
+                              "hand-tuned too aggressively.")
+    parser.add_argument("--static-class-weights", type=float, nargs=3, default=None,
+                         metavar=("INTER", "PRE", "ONSET"),
+                         help="Only used when --class-weight-mode static.")
     parser.add_argument("--max-rows", type=int, default=0)
     args = parser.parse_args()
 
@@ -61,12 +78,26 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
     )
 
-    loss_config = LossConfig(
-        classification_weight=args.cls_weight,
-        regression_weight=args.reg_weight,
-        coherence_weight=args.coh_weight,
-        direction_weight=args.dir_weight,
-    )
+    loss_overrides = {}
+    if args.cls_weight is not None:
+        loss_overrides["classification_weight"] = args.cls_weight
+    if args.reg_weight is not None:
+        loss_overrides["regression_weight"] = args.reg_weight
+    if args.coh_weight is not None:
+        loss_overrides["coherence_weight"] = args.coh_weight
+    if args.dir_weight is not None:
+        loss_overrides["direction_weight"] = args.dir_weight
+    if args.focal_gamma is not None:
+        loss_overrides["focal_gamma"] = args.focal_gamma
+    if args.focal_alpha is not None:
+        loss_overrides["focal_alpha"] = args.focal_alpha
+    if args.class_weight_mode is not None:
+        loss_overrides["class_weight_mode"] = args.class_weight_mode
+    if args.static_class_weights is not None:
+        loss_overrides["class_weights"] = tuple(args.static_class_weights)
+
+    loss_config = LossConfig(**loss_overrides)
+    print(f"Loss config: {loss_config}")
 
     if not args.no_wandb:
         wandb_name = args.wandb_name or f"{args.arch}-h{args.hidden_dim}-e{args.epochs}"

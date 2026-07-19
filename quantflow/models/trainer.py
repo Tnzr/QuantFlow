@@ -86,6 +86,7 @@ class Trainer:
         self.patience_counter = 0
         self.train_history: List[Dict[str, float]] = []
         self.val_history: List[Dict[str, float]] = []
+        self._last_confusion: Optional[np.ndarray] = None
 
         checkpoint_path = Path(self.config.checkpoint_dir)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -143,10 +144,12 @@ class Trainer:
         total_samples = 0
         class_correct = {0: 0, 1: 0, 2: 0}
         class_count = {0: 0, 1: 0, 2: 0}
+        pred_count = {0: 0, 1: 0, 2: 0}
         forecast_errors = []
         forecast_errors_weighted = []
         forecast_direction_correct = 0
         forecast_direction_total = 0
+        confusion = np.zeros((3, 3), dtype=np.int64)  # [true, pred]
 
         with torch.no_grad():
             for batch in loader:
@@ -165,6 +168,9 @@ class Trainer:
                     mask = labels_dev == c
                     class_count[c] += mask.sum().item()
                     class_correct[c] += (preds[mask] == c).sum().item()
+                    pred_count[c] += (preds == c).sum().item()
+                for t, p in zip(labels_dev.cpu().numpy(), preds.cpu().numpy()):
+                    confusion[int(t), int(p)] += 1
 
                 fcast = outputs["future_forecast"].squeeze(-1)
                 if fcast.dim() > 1:
@@ -178,8 +184,18 @@ class Trainer:
                 w_err = (abs_err * temporal_weight).mean()
                 forecast_errors_weighted.append(float(w_err))
 
-                forecast_direction_correct += ((fcast.sign() == tau_clamped.sign()) | (fcast > 0)).sum().item()
-                forecast_direction_total += fcast.size(0)
+                # Direction metric: does the model's risk assessment (pre+onset
+                # probability) agree with the realized bearish/bullish forward
+                # 21d return? This replaces a prior formula that was always
+                # near-100% regardless of model quality (tau is always clamped
+                # positive, so `tau.sign()` was a constant).
+                past_probs = outputs["past_state_probs"]
+                risk_prob = past_probs[:, 1] + past_probs[:, 2]
+                target_21d = labels.get("target_21d", torch.zeros_like(risk_prob))
+                predicted_bearish = risk_prob >= 0.5
+                actual_bearish = target_21d < 0
+                forecast_direction_correct += (predicted_bearish == actual_bearish).sum().item()
+                forecast_direction_total += risk_prob.size(0)
 
         avg_losses = {k: v / max(len(loader), 1) for k, v in total_losses.items()}
         avg_losses["accuracy"] = total_correct / max(total_samples, 1)
@@ -189,6 +205,18 @@ class Trainer:
         avg_losses["forecast_mae"] = float(np.mean(forecast_errors)) if forecast_errors else 0.0
         avg_losses["forecast_mae_temporal"] = float(np.mean(forecast_errors_weighted)) if forecast_errors_weighted else 0.0
         avg_losses["forecast_dir_acc"] = forecast_direction_correct / max(forecast_direction_total, 1)
+
+        # Class-collapse detection: fraction of predictions landing on the
+        # single most-predicted class. Near 1.0 means the model is outputting
+        # (almost) one class regardless of input — the exact failure mode this
+        # session is diagnosing. Surfaced as a first-class metric instead of
+        # requiring visual inspection of a wandb image to notice.
+        total_preds = max(sum(pred_count.values()), 1)
+        avg_losses["pred_class_dominance"] = max(pred_count.values()) / total_preds
+        avg_losses["pred_inter_frac"] = pred_count[0] / total_preds
+        avg_losses["pred_pre_frac"] = pred_count[1] / total_preds
+        avg_losses["pred_onset_frac"] = pred_count[2] / total_preds
+        self._last_confusion = confusion
         return avg_losses
 
     def fit(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict[str, Any]:
@@ -291,9 +319,20 @@ class Trainer:
                 f"fcst_mae={val_metrics.get('forecast_mae', 0):.1f}d | "
                 f"grad={train_metrics['grad_norm_mean']:.3f}"
             )
+            if val_metrics.get("pred_class_dominance", 0.0) > 0.90:
+                logger.warning(
+                    f"CLASS COLLAPSE at epoch {epoch + 1}: {val_metrics['pred_class_dominance']:.0%} of "
+                    f"predictions are a single class (inter={val_metrics.get('pred_inter_frac', 0):.0%}, "
+                    f"pre={val_metrics.get('pred_pre_frac', 0):.0%}, onset={val_metrics.get('pred_onset_frac', 0):.0%})"
+                )
 
             if _wandb_available and wandb.run:
-                wandb.log({
+                # Generate the viz image BEFORE the commit=True log so it is
+                # attached to the SAME step as this epoch's scalars, instead of
+                # being buffered (commit=False) after the flush and silently
+                # merging into the *next* epoch's step (prior off-by-one bug).
+                viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1, val_metrics=val_metrics)
+                log_payload = {
                     "epoch": epoch + 1,
                     "train/loss": train_metrics.get("total", 0),
                     "train/accuracy": train_metrics.get("accuracy", 0),
@@ -310,10 +349,18 @@ class Trainer:
                     "val/forecast_mae": val_metrics.get("forecast_mae", 0),
                     "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
                     "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
-                }, commit=True)
-                viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
+                    # Automated collapse/anomaly detection per methodology §9.6 —
+                    # surfaced as scalars so collapse is visible on a line chart
+                    # immediately, not only by eyeballing an image panel.
+                    "anomaly/pred_class_dominance": val_metrics.get("pred_class_dominance", 0),
+                    "anomaly/pred_inter_frac": val_metrics.get("pred_inter_frac", 0),
+                    "anomaly/pred_pre_frac": val_metrics.get("pred_pre_frac", 0),
+                    "anomaly/pred_onset_frac": val_metrics.get("pred_onset_frac", 0),
+                    "anomaly/class_collapse_flag": 1.0 if val_metrics.get("pred_class_dominance", 0) > 0.90 else 0.0,
+                }
                 if viz_img is not None:
-                    wandb.log({"viz/epoch_forecast_overview": viz_img}, commit=False)
+                    log_payload["viz/epoch_forecast_overview"] = viz_img
+                wandb.log(log_payload, commit=True)
 
             if not self.config.keep_hidden_across_epochs:
                 hidden_states = {}
@@ -342,14 +389,59 @@ class Trainer:
 
         return {"train_history": self.train_history, "val_history": self.val_history}
 
-    def _generate_epoch_inference_viz(self, loader: DataLoader, epoch: int):
+    def _select_spread_windows(self, dataset, epoch: int, n_windows: int = 4, window_size: int = 80) -> List[Tuple[int, int]]:
+        """Pick `n_windows` contiguous sample ranges spread across the FULL
+        dataset timeline (different tickers / different time offsets), instead
+        of always the first N rows of the first ticker. The starting ticker is
+        rotated by epoch so the visualized slice also shifts across epochs.
+
+        Returns a list of (start_idx, end_idx) exclusive ranges into
+        `dataset._samples`, each confined to a single ticker's range.
+        """
+        ranges = getattr(dataset, "ticker_ranges", None)
+        if not ranges:
+            n = len(dataset._samples)
+            return [(0, min(window_size, n))] if n > 0 else []
+
+        eligible = [(t, s, e) for (t, s, e) in ranges if (e - s) >= window_size // 2]
+        if not eligible:
+            eligible = ranges
+
+        n_pick = min(n_windows, len(eligible))
+        # Evenly spaced ticker indices, rotated by epoch so the exact set of
+        # tickers/offsets shifts across epochs (addresses "viz never changes").
+        rotation = epoch % max(len(eligible), 1)
+        spread_idx = [
+            (rotation + int(i * len(eligible) / max(n_pick, 1))) % len(eligible)
+            for i in range(n_pick)
+        ]
+        windows = []
+        for idx in spread_idx:
+            _ticker, start, end = eligible[idx]
+            length = end - start
+            usable = min(window_size, length)
+            # Offset within the ticker's range also rotates by epoch so repeat
+            # visits to the same ticker show a different time segment.
+            max_offset = max(length - usable, 0)
+            offset = (epoch * 37) % (max_offset + 1)
+            w_start = start + offset
+            windows.append((w_start, w_start + usable))
+        return windows
+
+    def _generate_epoch_inference_viz(self, loader: DataLoader, epoch: int, val_metrics: Optional[Dict[str, float]] = None):
         """Generate epoch-level inference visualization for wandb.
 
-        Produces a 4-panel figure:
+        Produces a 5-panel figure:
         1. State probability ribbon with buy/sell/hold overlay
         2. Forecast tau vs actual forward return error
         3. Latent token activation heatmap (scale S0→S3)
-        4. Price with drawdown-based trend regions
+        4. Real price series with drawdown-based trend regions AND the model's
+           risk-score overlay, sampled across MULTIPLE windows spread over the
+           full validation timeline (not a fixed first-300-row slice) with a
+           real date x-axis per window.
+        5. Confusion matrix for this epoch's validation pass, plus automated
+           anomaly-detection flags (flat probability signal, token collapse,
+           single-class prediction domination) per methodology §9.6.
         """
         try:
             import matplotlib
@@ -358,31 +450,21 @@ class Trainer:
             import io
 
             self.model.eval()
-            all_probs, all_forecasts, all_sigmas, all_targets = [], [], [], []
-            all_prices, all_dates = [], []
-            all_scale_acts = [[] for _ in range(4)]
-            max_samples = 300
-
             dataset = loader.dataset
-            raw_samples = dataset._samples
-            sample_indices = list(range(len(raw_samples)))
-            viz_indices = sample_indices[:max_samples]
+            windows = self._select_spread_windows(dataset, epoch)
+            if not windows:
+                return None
 
-            x_dates = []
-            price_data = []
-            num_workers = loader.num_workers if hasattr(loader, 'num_workers') else 0
-            batch_sampler = None
-            if hasattr(loader, 'batch_sampler') and hasattr(loader.batch_sampler, 'sampler'):
-                pass
-            elif hasattr(loader, 'sampler'):
-                pass
+            all_probs, all_forecasts, all_sigmas, all_targets = [], [], [], []
+            all_prices, all_dates, window_bounds = [], [], []
+            all_scale_acts = [[] for _ in range(4)]
 
             with torch.no_grad():
-                for batch in loader:
-                    if sum(arr.shape[0] for arr in all_probs if len(arr) > 0) >= max_samples:
-                        break
-                    features, labels, _ = self._to_device(batch)
-                    outputs = self.model(features)
+                cursor = 0
+                for (start, end) in windows:
+                    feats = np.stack([dataset._samples[i][0] for i in range(start, end)], axis=0)
+                    feats_t = torch.from_numpy(feats).to(self.device)
+                    outputs = self.model(feats_t)
 
                     probs = outputs["past_state_probs"].cpu().numpy()
                     fcast = outputs["future_forecast"].squeeze(-1).cpu().numpy()
@@ -391,50 +473,53 @@ class Trainer:
                     sigma = outputs["uncertainty_sigma"].squeeze(-1).cpu().numpy()
                     if sigma.ndim > 1:
                         sigma = sigma.mean(axis=-1)
-                    tau = labels["tau_forward"].cpu().numpy()
-                    prices = labels.get("adj_close", torch.zeros_like(torch.from_numpy(tau))).cpu().numpy()
+
+                    taus, prices, dates = [], [], []
+                    for i in range(start, end):
+                        _, label_dict, _ticker, date_str = dataset._samples[i]
+                        taus.append(float(label_dict["tau_forward"]))
+                        prices.append(float(label_dict["adj_close"]))
+                        dates.append(date_str)
 
                     all_probs.append(probs)
                     all_forecasts.append(fcast)
                     all_sigmas.append(sigma)
-                    all_targets.append(tau)
-                    all_prices.append(prices)
+                    all_targets.append(np.array(taus, dtype=np.float32))
+                    all_prices.append(np.array(prices, dtype=np.float32))
+                    all_dates.extend(dates)
 
                     skips = outputs.get("scale_activations", [])
                     for s in range(min(4, len(skips))):
                         act = skips[s].cpu().numpy()
                         all_scale_acts[s].append(act.mean(axis=1))
 
+                    window_bounds.append((cursor, cursor + (end - start)))
+                    cursor += (end - start)
+
             if not all_probs:
                 return None
 
-            try:
-                probs = np.concatenate(all_probs, axis=0)[:max_samples]
-                forecasts = np.concatenate(all_forecasts, axis=0)[:max_samples]
-                sigmas = np.concatenate(all_sigmas, axis=0)[:max_samples]
-                targets = np.concatenate(all_targets, axis=0)[:max_samples]
-                prices = np.concatenate(all_prices, axis=0)[:max_samples]
-            except ValueError:
-                bsz = min(a.shape[0] for a in all_probs)
-                probs = np.concatenate([a[:bsz] for a in all_probs], axis=0)[:max_samples]
-                forecasts = np.concatenate([a[:bsz] for a in all_forecasts], axis=0)[:max_samples]
-                sigmas = np.concatenate([a[:bsz] for a in all_sigmas], axis=0)[:max_samples]
-                targets = np.concatenate([a[:bsz] for a in all_targets], axis=0)[:max_samples]
-                prices = np.concatenate([a[:bsz] for a in all_prices], axis=0)[:max_samples] if all_prices else np.ones(probs.shape[0]) * 100.0
+            probs = np.concatenate(all_probs, axis=0)
+            forecasts = np.concatenate(all_forecasts, axis=0)
+            sigmas = np.concatenate(all_sigmas, axis=0)
+            targets = np.concatenate(all_targets, axis=0)
+            prices = np.concatenate(all_prices, axis=0)
 
             for s in range(4):
                 if all_scale_acts[s]:
-                    try:
-                        all_scale_acts[s] = np.concatenate(all_scale_acts[s], axis=0)[:probs.shape[0]]
-                    except ValueError:
-                        bsz = min(a.shape[0] for a in all_scale_acts[s])
-                        all_scale_acts[s] = np.concatenate([a[:bsz] for a in all_scale_acts[s]], axis=0)[:probs.shape[0]]
+                    all_scale_acts[s] = np.concatenate(all_scale_acts[s], axis=0)
 
-            fig, axes = plt.subplots(4, 1, figsize=(18, 16), dpi=100)
+            n_windows = len(windows)
+            fig, axes = plt.subplots(5, 1, figsize=(18, 20), dpi=100,
+                                      gridspec_kw={"height_ratios": [1, 1, 1, 1.2, 1.1]})
+            x = np.arange(len(probs))
+
+            def _mark_window_boundaries(ax):
+                for (wb_start, wb_end) in window_bounds[1:]:
+                    ax.axvline(wb_start - 0.5, color="black", ls=":", lw=0.8, alpha=0.5)
 
             # Panel 1: State probability ribbon + buy/sell regions
             ax1 = axes[0]
-            x = np.arange(len(probs))
             ax1.fill_between(x, 0, probs[:, 0], alpha=0.3, color="#27ae60", label="Inter")
             ax1.fill_between(x, probs[:, 0], probs[:, 0] + probs[:, 1], alpha=0.3, color="#f39c12", label="Pre")
             ax1.fill_between(x, probs[:, 0] + probs[:, 1], 1.0, alpha=0.3, color="#e74c3c", label="Onset")
@@ -442,13 +527,14 @@ class Trainer:
             risk = probs[:, 1] + probs[:, 2] * 1.5
             ax1.plot(x, risk, color="#1abc9c", linewidth=1.0, alpha=0.7, label="Risk Score")
             buy_mask = risk >= 0.60
-            sell_mask = probs[:, 0] >= 0.40
             for i in range(len(x)):
                 if buy_mask[i]:
                     ax1.axvspan(i - 0.5, i + 0.5, alpha=0.12, color="#27ae60")
             ax1.set_ylim(0, 1.05)
-            ax1.set_ylabel("Probability"); ax1.set_title(f"Epoch {epoch} — Head Probabilities & Signal Regions")
+            ax1.set_ylabel("Probability")
+            ax1.set_title(f"Epoch {epoch} — Head Probabilities & Signal Regions ({n_windows} windows spread across full val timeline)")
             ax1.legend(loc="upper left", ncol=4, fontsize=7)
+            _mark_window_boundaries(ax1)
 
             # Panel 2: Forecast tau with error vs actual
             ax2 = axes[1]
@@ -463,10 +549,11 @@ class Trainer:
                      va="top", bbox=dict(boxstyle="round", fc="white", alpha=0.8))
             ax2.set_ylabel("Days"); ax2.set_title("Forecast Tau vs Target with ±2σ")
             ax2.legend(loc="upper right", fontsize=7)
+            _mark_window_boundaries(ax2)
 
             # Panel 3: Latent token activations
             ax3 = axes[2]
-            has_scale_acts = any(len(a) > 0 for a in all_scale_acts)
+            has_scale_acts = any(len(a) > 0 for a in all_scale_acts if isinstance(a, np.ndarray))
             if has_scale_acts:
                 import matplotlib.gridspec as gs_inner
                 inner_gs = gs_inner.GridSpecFromSubplotSpec(4, 1, subplot_spec=ax3.get_subplotspec(),
@@ -474,7 +561,7 @@ class Trainer:
                 inner_axes = [fig.add_subplot(inner_gs[i]) for i in range(4)]
                 for s in range(4):
                     ax_inner = inner_axes[s]
-                    if s < len(all_scale_acts) and len(all_scale_acts[s]) > 0:
+                    if isinstance(all_scale_acts[s], np.ndarray) and len(all_scale_acts[s]) > 0:
                         act = all_scale_acts[s]
                         n_dims = min(8, act.shape[0])
                         im = ax_inner.imshow(act[:n_dims], aspect="auto", cmap="RdYlBu_r", interpolation="nearest")
@@ -491,40 +578,94 @@ class Trainer:
                 ax3.text(0.5, 0.5, "No scale activations available (TCN/Transformer pipeline)",
                          ha="center", va="center", transform=ax3.transAxes, fontsize=10)
 
-            # Panel 4: Price data with drawdown-based trend regions
+            # Panel 4: Real price across the SAME spread windows, with a real
+            # date x-axis per window and drawdown-based trend regions. This is
+            # the actual-price panel the user needs to visually judge signal
+            # quality against real market action, not just tau error numbers.
             ax4 = axes[3]
             if len(prices) > 1:
                 valid = prices > 0
-                if valid.sum() < 2:
-                    price_plot = np.cumprod(1 + np.full(len(prices), 0.001)) * 100
-                else:
-                    price_plot = prices
+                price_plot = prices if valid.sum() >= 2 else np.cumprod(1 + np.full(len(prices), 0.001)) * 100
 
-                peak = np.maximum.accumulate(price_plot)
-                dd = np.where(price_plot > 0, (price_plot - peak) / peak * 100, np.zeros_like(price_plot))
-                ax4.plot(x, price_plot, color="#2ecc71", linewidth=1.5, label="Adj Close")
+                # Compute drawdown independently per window (cross-window
+                # discontinuities in price must not create fake "drawdowns").
+                dd = np.zeros_like(price_plot)
+                for (wb_start, wb_end) in window_bounds:
+                    seg = price_plot[wb_start:wb_end]
+                    if len(seg) == 0:
+                        continue
+                    peak = np.maximum.accumulate(seg)
+                    dd[wb_start:wb_end] = np.where(seg > 0, (seg - peak) / peak * 100, 0.0)
+
+                ax4.plot(x, price_plot, color="#2ecc71", linewidth=1.5, label="Adj Close (actual)")
+                ax4_risk = ax4.twinx()
+                ax4_risk.plot(x, risk, color="#1abc9c", linewidth=1.0, alpha=0.6, label="Model risk score")
+                ax4_risk.set_ylim(0, 1.05)
+                ax4_risk.set_ylabel("Risk score", fontsize=8, color="#1abc9c")
                 ax4.set_ylabel("Price ($)")
-                ax4.legend(loc="upper left", fontsize=7)
 
                 dd_threshold = 3.0
                 in_drawdown = dd < -dd_threshold
-
                 for i in range(len(x)):
-                    if in_drawdown[i]:
-                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.10, color="#e74c3c")
-                    else:
-                        ax4.axvspan(i - 0.5, i + 0.5, alpha=0.06, color="#27ae60")
-
-                ax4_twin = ax4.twinx()
-                ax4_twin.fill_between(x, 0, dd, alpha=0.15, color="#e74c3c")
-                ax4_twin.axhline(y=-dd_threshold, color="#e74c3c", ls="--", lw=0.5, alpha=0.5)
-                ax4_twin.set_ylim(min(-30, float(np.min(dd)) * 1.2), max(5, float(np.max(dd)) * 1.1))
-                ax4_twin.set_ylabel("Drawdown %", fontsize=8, color="#e74c3c")
-                ax4_twin.tick_params(colors="#e74c3c", labelsize=7)
+                    ax4.axvspan(i - 0.5, i + 0.5, alpha=0.10 if in_drawdown[i] else 0.06,
+                                color="#e74c3c" if in_drawdown[i] else "#27ae60")
 
                 buy_confirms = buy_mask & ~in_drawdown
-                buy_confirmed_count = int(buy_confirms.sum())
-                ax4.set_title(f"Price & Drawdown (≥{dd_threshold}%% dd = red, buy={buy_confirmed_count}/{int(buy_mask.sum())} confirmed)", fontsize=10)
+                ax4.set_title(
+                    f"Real Price vs Model Risk Score across {n_windows} spread windows "
+                    f"(dd\u2265{dd_threshold}%=red, buy_confirmed={int(buy_confirms.sum())}/{int(buy_mask.sum())})",
+                    fontsize=10,
+                )
+                # Real date ticks: one label per window (start date), plus the
+                # final date of the last window.
+                tick_pos, tick_labels = [], []
+                for (wb_start, wb_end) in window_bounds:
+                    tick_pos.append(wb_start)
+                    tick_labels.append(all_dates[wb_start] if wb_start < len(all_dates) else "")
+                if window_bounds:
+                    last_end = window_bounds[-1][1] - 1
+                    tick_pos.append(last_end)
+                    tick_labels.append(all_dates[last_end] if 0 <= last_end < len(all_dates) else "")
+                ax4.set_xticks(tick_pos)
+                ax4.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=6)
+                handles1, labels1 = ax4.get_legend_handles_labels()
+                handles2, labels2 = ax4_risk.get_legend_handles_labels()
+                ax4.legend(handles1 + handles2, labels1 + labels2, loc="upper left", fontsize=7)
+            _mark_window_boundaries(ax4)
+
+            # Panel 5: Confusion matrix + automated anomaly flags (§9.6)
+            ax5 = axes[4]
+            cm = self._last_confusion
+            anomalies = []
+            if cm is not None and cm.sum() > 0:
+                cm_norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
+                im5 = ax5.imshow(cm_norm, cmap="Blues", aspect="auto", vmin=0, vmax=1)
+                ax5.set_xticks([0, 1, 2]); ax5.set_xticklabels(["Inter", "Pre", "Onset"])
+                ax5.set_yticks([0, 1, 2]); ax5.set_yticklabels(["Inter", "Pre", "Onset"])
+                for i in range(3):
+                    for j in range(3):
+                        color = "white" if cm_norm[i, j] > 0.5 else "black"
+                        ax5.text(j, i, f"{cm[i, j]}\n({cm_norm[i, j]:.0%})", ha="center", va="center",
+                                  fontsize=7, color=color)
+                ax5.set_xlabel("Predicted"); ax5.set_ylabel("Actual")
+                ax5.set_title("Validation Confusion Matrix (this epoch)", fontsize=10)
+            else:
+                ax5.text(0.5, 0.5, "No confusion matrix data", ha="center", va="center", transform=ax5.transAxes)
+
+            if val_metrics is not None:
+                dominance = val_metrics.get("pred_class_dominance", 0.0)
+                if dominance > 0.90:
+                    anomalies.append(f"CLASS COLLAPSE: {dominance:.0%} of predictions are a single class")
+            if probs.shape[0] > 0 and float(np.std(probs[:, 1] + probs[:, 2])) < 0.02:
+                anomalies.append("FLAT SIGNAL: risk-score probability has near-zero variance across samples")
+            for s in range(4):
+                if isinstance(all_scale_acts[s], np.ndarray) and all_scale_acts[s].size > 0:
+                    if float(np.std(all_scale_acts[s])) < 1e-4:
+                        anomalies.append(f"TOKEN COLLAPSE: scale S{s} activations have near-zero variance")
+            anomaly_text = "\n".join(anomalies) if anomalies else "No anomalies detected"
+            ax5.text(1.15, 0.5, f"Automated anomaly flags:\n{anomaly_text}", transform=ax5.transAxes,
+                      fontsize=8, va="center", ha="left",
+                      bbox=dict(boxstyle="round", fc="#ffe6e6" if anomalies else "#e6ffe6", alpha=0.9))
 
             for ax in axes:
                 ax.grid(True, alpha=0.15, linestyle="--")
@@ -538,7 +679,7 @@ class Trainer:
             import wandb
             from PIL import Image
             img = Image.open(buf)
-            return wandb.Image(img, caption=f"Epoch {epoch} Forecast")
+            return wandb.Image(img, caption=f"Epoch {epoch} Forecast ({n_windows} spread windows)")
         except Exception as exc:
             logger.warning(f"Epoch inference viz failed: {exc}")
             return None

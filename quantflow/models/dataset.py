@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, random_split
+from torch.utils.data import DataLoader, Dataset, Sampler, WeightedRandomSampler, random_split
 
 from ..data.labeler import build_labeled_dataset
 from ..data.universe import SECTOR_UNIVERSE
@@ -87,6 +87,10 @@ class FinancialTimeSeriesDataset(Dataset):
 
         feature_df = _prepare_features(df)
         self._samples: List[Tuple[np.ndarray, Dict[str, np.ndarray], str, str]] = []
+        # (ticker, start_idx, end_idx_exclusive) into self._samples, in insertion
+        # order — used by TickerBatchSampler to guarantee no batch ever spans a
+        # ticker boundary (methodology §4.3 point 3: sequence-level sampling).
+        self.ticker_ranges: List[Tuple[str, int, int]] = []
 
         for ticker in df[ticker_col].unique():
             ticker_mask = df[ticker_col].values == ticker
@@ -97,6 +101,7 @@ class FinancialTimeSeriesDataset(Dataset):
             ticker_features = feature_df.iloc[ticker_idx].values.astype(np.float32)
             ticker_labels = df.iloc[ticker_idx]
 
+            range_start = len(self._samples)
             for i in range(self.lookback, len(ticker_idx) - 1):
                 window = ticker_features[i - self.lookback:i]
                 row_labels = ticker_labels.iloc[i]
@@ -105,6 +110,13 @@ class FinancialTimeSeriesDataset(Dataset):
                 dd5 = row_labels.get("drawdown_5d_max", 0.0) or 0.0
                 dd21 = row_labels.get("drawdown_21d_max", 0.0) or 0.0
                 date_str = str(dates[i])[:10] if i < len(dates) else ""
+                # Ordinal day count survives the tensor-type filter in
+                # __getitem__ (plain Python str does not) so real dates can be
+                # reconstructed downstream for plotting/monitoring.
+                try:
+                    date_ordinal = np.int64(pd.Timestamp(date_str).toordinal()) if date_str else np.int64(0)
+                except Exception:
+                    date_ordinal = np.int64(0)
 
                 label_dict = {
                     "event_state_code": np.array(int(row_labels.get("event_state_code", 0)), dtype=np.int64),
@@ -116,9 +128,12 @@ class FinancialTimeSeriesDataset(Dataset):
                     "drawdown_5d_max": np.array(dd5, dtype=np.float32),
                     "drawdown_21d_max": np.array(dd21, dtype=np.float32),
                     "adj_close": np.array(float(row_labels.get("close", 0.0) or 0.0), dtype=np.float32),
+                    "date_ordinal": np.array(date_ordinal, dtype=np.int64),
                     "as_of_date": date_str,
                 }
                 self._samples.append((window, label_dict, ticker, date_str))
+            if len(self._samples) > range_start:
+                self.ticker_ranges.append((ticker, range_start, len(self._samples)))
 
         self.feature_dim = len(self.feature_cols)
 
@@ -173,6 +188,43 @@ class FinancialTimeSeriesDataset(Dataset):
             num_samples=len(self._samples),
             replacement=True,
         )
+
+
+class TickerBatchSampler(Sampler[List[int]]):
+    """Yields batches that never span a ticker boundary.
+
+    `FinancialTimeSeriesDataset` concatenates all tickers' chronological
+    windows into one flat sample list. Plain sequential `batch_size` slicing
+    can therefore produce a batch containing rows from two different tickers
+    whenever a ticker's sample count isn't an exact multiple of `batch_size`.
+    `Trainer.fit()` carries stateful hidden state keyed by a single ticker per
+    batch — a boundary-spanning batch silently applies the wrong ticker's
+    hidden state to part of the batch, violating methodology §4.3 point 3
+    ("sequence-level, not sample-level, sampling"). This sampler guarantees
+    every yielded batch is drawn from exactly one ticker's contiguous,
+    chronologically-ordered range, with `drop_last` applied per-ticker.
+    """
+
+    def __init__(self, ticker_ranges: List[Tuple[str, int, int]], batch_size: int, drop_last: bool = True):
+        self.ticker_ranges = ticker_ranges
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+
+    def __iter__(self):
+        for _ticker, start, end in self.ticker_ranges:
+            idx = list(range(start, end))
+            for i in range(0, len(idx), self.batch_size):
+                chunk = idx[i:i + self.batch_size]
+                if len(chunk) < self.batch_size and self.drop_last:
+                    continue
+                yield chunk
+
+    def __len__(self) -> int:
+        n = 0
+        for _ticker, start, end in self.ticker_ranges:
+            length = end - start
+            n += (length // self.batch_size) if self.drop_last else -(-length // self.batch_size)
+        return n
 
 
 def build_dataset(
@@ -253,8 +305,19 @@ def prepare_dataloaders(
     logger.info(f"Train class distribution: {train_ds.class_distribution}")
     logger.info(f"Training mode: CHRONOLOGICAL per-ticker (stateful context preserved)")
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    # Ticker-boundary-safe batching (see TickerBatchSampler docstring) — required
+    # for methodology §4.3-compliant stateful hidden-state carry across batches.
+    train_loader = DataLoader(
+        train_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(train_ds.ticker_ranges, batch_size, drop_last=True),
+    )
+    val_loader = DataLoader(
+        val_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(val_ds.ticker_ranges, batch_size, drop_last=False),
+    )
+    test_loader = DataLoader(
+        test_ds, num_workers=num_workers,
+        batch_sampler=TickerBatchSampler(test_ds.ticker_ranges, batch_size, drop_last=False),
+    )
 
     return train_loader, val_loader, test_loader, train_ds.feature_dim

@@ -22,7 +22,7 @@ class LossConfig:
     classification_loss_type: str = "focal"
     regression_loss: str = "smoothl1"
     focal_alpha: float = 0.25
-    focal_gamma: float = 5.0
+    focal_gamma: float = 2.0
     label_smoothing: float = 0.05
 
     classification_temporal_boost: float = 0.5
@@ -31,7 +31,16 @@ class LossConfig:
     classification_temporal_max_multiplier: float = 4.0
     regression_temporal_max_multiplier: float = 3.0
 
-    class_weights: tuple = (5.0, 0.25, 3.0)
+    # Class-imbalance strategy per methodology §6.2.1/§8.2: weights are computed
+    # DYNAMICALLY from each batch's own class frequency (inverse-frequency,
+    # clipped) rather than a hand-tuned static tuple. Stacking a static tuple on
+    # top of focal loss + temporal weighting produced a bistable system that
+    # simply moves the collapse target between classes when hand-edited (see
+    # .kilo/plans/1784792483000-collapse-and-monitoring-remediation.md).
+    class_weight_mode: str = "dynamic"  # "dynamic" | "static"
+    class_weights: tuple = (1.5, 0.7, 1.5)  # fallback only when class_weight_mode == "static"
+    dynamic_class_weight_min: float = 0.3
+    dynamic_class_weight_max: float = 4.0
 
     def normalize_weights(self) -> Dict[str, float]:
         raw = {
@@ -72,6 +81,35 @@ class CompositeLoss(nn.Module):
         focal = alpha * (1 - pt) ** gamma * ce
         return focal.mean()
 
+    def _compute_class_weights(self, targets: torch.Tensor, n_classes: int) -> torch.Tensor:
+        """Compute per-sample class weights.
+
+        Per methodology §6.2.1/§8.2, imbalance correction should be DYNAMIC
+        (recomputed per batch from that batch's own class frequency), not a
+        static hand-tuned constant. Falls back to `class_weights` tuple only
+        if `class_weight_mode == "static"`.
+        """
+        if self.config.class_weight_mode == "static":
+            cw = torch.tensor(self.config.class_weights, device=targets.device, dtype=torch.float32)
+            return cw[targets]
+
+        counts = torch.bincount(targets, minlength=n_classes).float()
+        total = counts.sum().clamp(min=1.0)
+        present = counts > 0
+        # Inverse-frequency, normalized so the mean weight over PRESENT classes is 1.0
+        inv_freq = torch.zeros_like(counts)
+        inv_freq[present] = total / (n_classes * counts[present])
+        inv_freq = inv_freq.clamp(
+            self.config.dynamic_class_weight_min, self.config.dynamic_class_weight_max
+        )
+        # Renormalize so the batch's mean per-sample weight stays ~1.0 (keeps the
+        # overall loss magnitude stable across batches of varying composition).
+        cw = torch.ones(n_classes, device=targets.device, dtype=torch.float32)
+        cw[present] = inv_freq[present]
+        weight_per_sample = cw[targets]
+        mean_w = weight_per_sample.mean().clamp(min=1e-6)
+        return weight_per_sample / mean_w
+
     def _classification_loss(self, logits: torch.Tensor, targets: torch.Tensor, tau_target: torch.Tensor) -> torch.Tensor:
         epsilon = self.config.label_smoothing
         n_classes = logits.size(-1)
@@ -85,9 +123,11 @@ class CompositeLoss(nn.Module):
         prob_true = F.softmax(logits, dim=-1).gather(1, targets.unsqueeze(1)).squeeze(1)
         focal_factor = alpha * (1.0 - prob_true) ** gamma
 
-        cw = torch.tensor(self.config.class_weights, device=logits.device, dtype=torch.float32)
-        class_weight_per_sample = cw[targets]
+        class_weight_per_sample = self._compute_class_weights(targets, n_classes)
 
+        # Temporal proximity weighting is intentionally mild and additive-capped
+        # (max 4x) so it cannot compound with focal+class weighting into another
+        # bistable collapse mode.
         tau_clamped = tau_target.clamp(1.0, 21.0)
         temporal_weight = 1.0 + self.config.classification_temporal_boost * torch.exp(
             -tau_clamped / max(self.config.temporal_focus_tau_min, 1e-6)
@@ -153,13 +193,16 @@ class CompositeLoss(nn.Module):
             reduction="mean",
         ) * 0.8
 
-    def _dynamics_loss(self, residual: torch.Tensor, h_current: torch.Tensor, h_prev: Optional[torch.Tensor] = None) -> torch.Tensor:
-        residual_norm = residual.pow(2).mean()
-        smooth_penalty = torch.tensor(0.0, device=residual.device)
-        if h_prev is not None and isinstance(h_current, torch.Tensor):
-            if h_current.shape == h_prev.shape:
-                smooth_penalty = (h_current - h_prev).pow(2).mean()
-        return residual_norm + 0.1 * smooth_penalty
+    def _dynamics_loss(self, residual: torch.Tensor) -> torch.Tensor:
+        """Regularizes the state-transition residual magnitude.
+
+        NOTE: previously accepted an `h_prev` smoothness term that was always
+        called with a dummy zero tensor and therefore dead code (shape
+        mismatch guard always failed). Removed rather than fixed silently —
+        if a real hidden-state-delta smoothness penalty is wanted later, wire
+        actual consecutive-batch hidden states through here explicitly.
+        """
+        return residual.pow(2).mean()
 
     def _uncertainty_loss(self, mu: torch.Tensor, sigma: torch.Tensor, forecast: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         mu_a = mu.squeeze(-1) if mu.dim() > 1 else mu
@@ -198,7 +241,7 @@ class CompositeLoss(nn.Module):
         losses["regression"] = weights["fut"] * self._regression_loss(future_forecast, tau_target)
         losses["distance"] = weights["dist"] * self._distance_loss(future_forecast, tau_target)
         losses["coherence"] = weights["coh"] * self._coherence_loss(past_probs, future_forecast, event_targets)
-        losses["dynamics"] = weights["dyn"] * self._dynamics_loss(dynamics_residual, torch.zeros(1, device=dynamics_residual.device))
+        losses["dynamics"] = weights["dyn"] * self._dynamics_loss(dynamics_residual)
 
         target_ret = targets.get("target_21d", torch.zeros_like(tau_target))
         losses["direction"] = weights["dir"] * self._direction_loss(future_forecast, target_ret)

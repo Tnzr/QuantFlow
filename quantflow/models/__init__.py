@@ -7,7 +7,7 @@ from .architectures import (
     MODELS,
 )
 from .losses import CompositeLoss, LossConfig
-from .dataset import FinancialTimeSeriesDataset, build_dataset, prepare_dataloaders
+from .dataset import FinancialTimeSeriesDataset, build_dataset, prepare_dataloaders, TickerBatchSampler
 from .trainer import Trainer, TrainingConfig
 from .backtest_engine import AIBacktestEngine, BacktestResult
 from .visualization import (
@@ -33,6 +33,7 @@ __all__ = [
     "FinancialTimeSeriesDataset",
     "build_dataset",
     "prepare_dataloaders",
+    "TickerBatchSampler",
     "Trainer",
     "TrainingConfig",
     "AIBacktestEngine",
