@@ -55,6 +55,9 @@ def main():
     parser.add_argument("--static-class-weights", type=float, nargs=3, default=None,
                          metavar=("INTER", "PRE", "ONSET"),
                          help="Only used when --class-weight-mode static.")
+    parser.add_argument("--no-coherent-heads", action="store_true",
+                         help="Disable use_coherent_heads (decouples classification logits from the "
+                              "forecast head's input) for ablation testing collapse root cause.")
     parser.add_argument("--max-rows", type=int, default=0)
     args = parser.parse_args()
 
@@ -76,6 +79,7 @@ def main():
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         checkpoint_dir=args.checkpoint_dir,
+        use_coherent_heads=not args.no_coherent_heads,
     )
 
     loss_overrides = {}
