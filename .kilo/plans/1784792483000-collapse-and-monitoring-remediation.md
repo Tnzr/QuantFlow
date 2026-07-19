@@ -129,3 +129,69 @@ Two-phase curriculum candidate: Phase A pretrains the encoder + classification h
 chronologically per methodology, ideally preserving the learned decision boundary. Not yet implemented —
 requires deciding whether to formalize this as a permanent training phase in `TrainingConfig`/`Trainer`
 before writing it, since it's a real methodology-level design change, not a config tweak.
+
+---
+
+## NEXT STEPS FOR NEW SESSION (handoff, 2026-07-18)
+
+### Immediate priority: resolve the chronological-vs-shuffled tension
+1. **Confirm the hypothesis first** (cheap, ~10 min): run a quick ablation that temporarily allows
+   shuffling (`shuffle=True` in `prepare_dataloaders`, bypass `TickerBatchSampler`, `stateful=False`,
+   `h_prev=None` always) for 10 epochs on `data/daily_20_tickers.parquet`. If classification recall for
+   inter/onset becomes non-zero (matching the RF result: ~93%/81% recall), the hypothesis is confirmed
+   and it's safe to invest in a real fix. If it ALSO collapses, the hypothesis is wrong and the
+   investigation must go back to model capacity, LR, or optimizer settings instead.
+2. **If confirmed**, implement a two-phase curriculum in `Trainer`/`TrainingConfig`:
+   - Phase A: shuffled, non-stateful pretraining of `_encode` + `multi_scale` + `past_pool` + `past_head`
+     only (freeze/skip future/uncertainty/dynamics heads or just don't backprop through them) until
+     classification recall stabilizes across all 3 classes.
+   - Phase B: unfreeze everything, switch to `TickerBatchSampler` + stateful chronological order per
+     methodology §4.3/§8.2, fine-tune all heads jointly. Watch whether Phase A's learned separability
+     survives the switch to correlated chronological batches — it may re-collapse, which would be
+     important new information.
+   - Methodology doc (`ML_DL_Architecture_Methodology.md`) may need a new curriculum section documenting
+     this as "Phase A2: classification pretraining" distinct from the existing Phase A/B split — check
+     what's already there under §8 before adding, since Phase A/B terminology is already used for
+     something else (pretrained-weights-then-composite-loss).
+3. **If the shuffle ablation doesn't confirm the hypothesis**, next things to check in order of
+   cheapness: (a) increase epochs to 30-50 on the existing daily-resolution run to rule out simple
+   undertraining, (b) inspect `AdamW` learning rate — 1e-4 may be too low or too high for this
+   specific head given weight_decay=1e-5, (c) check weight initialization of `past_head`/`past_pool` —
+   verify they aren't starting in a degenerate region, (d) try a much smaller/simpler classification-only
+   model (e.g. single linear layer on frozen encoder features) to isolate whether the multi_scale GRU
+   cascade encoder itself is the bottleneck rather than the head.
+
+### Also still pending from the original monitoring/collapse remediation work (lower priority)
+- Alpaca data provider migration (§9 of this doc) — not started, only planned.
+- 5-min intraday yfinance test dataset — not built yet.
+- True price-forecast head (model currently forecasts tau/days-to-event, not price level) — deferred,
+  would need a new regression head or derived price-path reconstruction.
+- Full 140-ticker daily dataset rebuild — deferred until collapse is resolved on the 20-ticker subset.
+- Balanced-sampler wiring in `dataset.py` (`get_balanced_sampler`) — intentionally left disabled/dead
+  since it conflicts with chronological ordering; may become directly relevant if Phase A shuffled
+  pretraining is implemented (it could be reused there).
+
+### Key files touched this session (all committed to `chore/repo-direction-4-3-2-1`)
+- `quantflow/models/losses.py` — dynamic per-batch class weighting, focal_gamma=2.0, fixed dead
+  `_dynamics_loss` code path.
+- `quantflow/models/dataset.py` — `TickerBatchSampler` (no batch spans a ticker boundary), `date_ordinal`
+  preserved through `__getitem__`.
+- `quantflow/models/trainer.py` — fixed `forecast_dir_acc`, fixed wandb step misalignment, added
+  `pred_class_dominance`/per-class prediction fractions + per-epoch confusion matrix, rewrote
+  `_generate_epoch_inference_viz` (spread windows, real dates, confusion-matrix + anomaly-flag panel).
+- `quantflow/models/trainer_ddp.py` — same `TickerBatchSampler` fix applied.
+- `quantflow/models/architectures.py` — `AttentionPool` module, replaces mean-pool for classification
+  head input (kept even though it didn't fix collapse — it's still a legitimate improvement over static
+  mean-pool and doesn't hurt).
+- `scripts/train_full_universe.py` — `--focal-gamma`, `--class-weight-mode`, `--static-class-weights`,
+  `--no-coherent-heads` CLI flags added (previously these required hand-editing dataclass defaults).
+- Environment: `torch==2.6.0+cu124` and `wandb==0.28.1` installed into the `quantflow` conda env
+  (`/root/miniforge3/envs/quantflow`) — were missing at session start, not yet added to
+  `environment.yml`/`requirements.txt` (should be added if this becomes the standard training env).
+
+### Test artifacts (wandb runs, all under project `quantflow`, entity `tnzr-pioneer-innovations-collective`)
+- `0woxrjrm` (`bilstm-daily-v3-dynamic-weights-test`) — dynamic weighting only.
+- `bilstm-daily-v4-attnpool-test` — + attention pool.
+- `bilstm-daily-v5-no-coherent-test` — + decoupled coherent heads.
+- Classification-only probe was run WITHOUT wandb (`/tmp/kilo/probe_cls_only.py`, not saved to repo —
+  recreate from this doc's Update section if needed).
