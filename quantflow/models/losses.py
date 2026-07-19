@@ -10,19 +10,19 @@ import torch.nn.functional as F
 
 @dataclass
 class LossConfig:
-    classification_weight: float = 0.40
-    regression_weight: float = 0.25
+    classification_weight: float = 0.50
+    regression_weight: float = 0.20
     distance_weight: float = 0.10
     coherence_weight: float = 0.05
     dynamics_weight: float = 0.02
-    uncertainty_weight: float = 0.08
+    uncertainty_weight: float = 0.05
     direction_weight: float = 0.05
-    ranking_weight: float = 0.05
+    ranking_weight: float = 0.03
 
     classification_loss_type: str = "focal"
     regression_loss: str = "smoothl1"
     focal_alpha: float = 0.25
-    focal_gamma: float = 2.0
+    focal_gamma: float = 5.0
     label_smoothing: float = 0.05
 
     classification_temporal_boost: float = 0.5
@@ -31,7 +31,7 @@ class LossConfig:
     classification_temporal_max_multiplier: float = 4.0
     regression_temporal_max_multiplier: float = 3.0
 
-    class_weights: tuple = (1.0, 1.5, 2.0)
+    class_weights: tuple = (5.0, 0.25, 3.0)
 
     def normalize_weights(self) -> Dict[str, float]:
         raw = {

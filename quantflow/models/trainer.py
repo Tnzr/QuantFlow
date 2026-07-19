@@ -255,13 +255,12 @@ class Trainer:
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 pbar.set_postfix(loss=f"{batch_loss:.2f}", lr=f"{current_lr:.2e}")
 
-                global_step = epoch * len(train_loader) + batch_idx
-                if _wandb_available and wandb.run and batch_idx % 10 == 0:
+                if _wandb_available and wandb.run and batch_idx % 20 == 0:
                     wandb.log({
                         "batch/loss": batch_loss,
                         "batch/grad_norm": grad_norm,
                         "batch/lr": current_lr,
-                    }, step=global_step, commit=False)
+                    }, commit=False)
 
                 scheduler.step()
 
@@ -294,7 +293,6 @@ class Trainer:
             )
 
             if _wandb_available and wandb.run:
-                epoch_last_step = epoch * len(train_loader) + max(batch_idx, 0)
                 wandb.log({
                     "epoch": epoch + 1,
                     "train/loss": train_metrics.get("total", 0),
@@ -312,11 +310,10 @@ class Trainer:
                     "val/forecast_mae": val_metrics.get("forecast_mae", 0),
                     "val/forecast_mae_temporal": val_metrics.get("forecast_mae_temporal", 0),
                     "val/forecast_dir_acc": val_metrics.get("forecast_dir_acc", 0),
-                }, step=epoch_last_step, commit=True)
-                if True:
-                    viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
-                    if viz_img is not None:
-                        wandb.log({"viz/epoch_forecast_overview": viz_img}, step=epoch_last_step, commit=False)
+                }, commit=True)
+                viz_img = self._generate_epoch_inference_viz(val_loader, epoch + 1)
+                if viz_img is not None:
+                    wandb.log({"viz/epoch_forecast_overview": viz_img}, commit=False)
 
             if not self.config.keep_hidden_across_epochs:
                 hidden_states = {}
