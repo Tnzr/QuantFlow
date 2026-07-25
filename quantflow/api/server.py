@@ -9,6 +9,12 @@ import hashlib
 import base64
 import json
 import html
+import time
+import secrets
+import hashlib
+import base64
+import json
+import html
 from threading import Lock, Thread
 from datetime import datetime, timezone
 import multiprocessing as mp
@@ -23,6 +29,8 @@ import os
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from urllib import request as urlrequest, error as urlerror, parse as urlparse
 from fastapi.responses import HTMLResponse
 from urllib import request as urlrequest, error as urlerror, parse as urlparse
 
@@ -54,7 +62,11 @@ from ..features.training import build_training_frame
 from ..features.indicators import fetch_ohlcv, compute_indicators
 from ..features.seasonality import seasonality_by_doy
 from ..backtest.signal_backtest import backtest_short_term
+from ..backtest.portfolio_backtest import PortfolioBacktester, BacktestConfig, Signal
+from ..backtest.strategy_config import StrategyEvaluator, trend_following_strategy
+from ..portfolio.allocator import PortfolioAllocator, AllocationConstraints, estimate_returns_from_signals, estimate_risk_from_history
 from ..ops.reporting import default_json_report_path, read_json_report
+from ..broker.alpaca_paper import AlpacaPaperTrading
 
 
 app = FastAPI(title="QuantFlow API", version="0.1.0")
@@ -68,6 +80,9 @@ def _safe_records(df: "pd.DataFrame") -> list[dict]:
 
 _SCAN_JOBS: dict[str, dict] = {}
 _SCAN_JOBS_LOCK = Lock()
+
+_MCP_OAUTH_FLOWS: dict[str, dict] = {}
+_MCP_OAUTH_LOCK = Lock()
 
 _MCP_OAUTH_FLOWS: dict[str, dict] = {}
 _MCP_OAUTH_LOCK = Lock()
@@ -397,6 +412,24 @@ class MCPOAuthStartRequest(BaseModel):
     scope: Optional[str] = None
 
 
+class MCPOAuthStartRequest(BaseModel):
+    redirect_uri: Optional[str] = None
+    continue_url: Optional[str] = None
+    scope: Optional[str] = None
+
+
+class AllocatePortfolioRequest(BaseModel):
+    """Request portfolio allocation across multiple tickers."""
+    tickers: list[str] = Field(min_items=2, max_items=50)
+    method: str = Field(default="mean_variance", description="mean_variance, hrp, equal_weight, volatility_scaled")
+    max_weight: float = Field(default=0.15, ge=0.02, le=0.5)
+    min_weight: float = Field(default=0.0, ge=0.0, le=0.2)
+    target_volatility: Optional[float] = Field(default=0.12, ge=0.05, le=0.5)
+    risk_free_rate: float = Field(default=0.03, ge=0.0, le=0.1)
+    lookback_days: int = Field(default=252, ge=60, le=1000)
+    include_attribution: bool = Field(default=False)
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -607,7 +640,7 @@ def scanner_latest_universe(db: str = "sqlite:///quantflow.db"):
         df = latest_universe(db_path=db)
         if df.empty:
             return {"count": 0, "items": []}
-        return {"count": len(df), "items": _safe_records(df)}
+        return {"count": len(df), "items": df.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -618,7 +651,7 @@ def recommend_latest(db: str = "sqlite:///quantflow.db"):
         df = latest_recommendations_per_ticker(db_path=db)
         if df.empty:
             return {"count": 0, "items": []}
-        return {"count": len(df), "items": _safe_records(df)}
+        return {"count": len(df), "items": df.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -672,7 +705,7 @@ def analytics_leaderboard_latest(db: str = "sqlite:///quantflow.db"):
         return {
             "count": len(df),
             "batch_id": df.iloc[0]["batch_id"],
-            "items": _safe_records(df),
+            "items": df.to_dict(orient="records"),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -710,7 +743,7 @@ def signals_generate(
     ema_span: int = 21,
     trend_span: int = 50,
 ):
-    """Generate live trading signals for a ticker.
+    """Generate live trading signals for a ticker using technical rule detectors.
 
     Uses Alpaca real-time bars if ALPACA_API_KEY + ALPACA_SECRET_KEY are set,
     otherwise falls back to yfinance delayed data.
@@ -796,7 +829,7 @@ def news_articles(
         df = recent_news_articles(days=days, db_path=db, ticker=ticker.upper() if ticker else None, limit=limit)
         if df.empty:
             return {"count": 0, "items": []}
-        return {"count": len(df), "items": _safe_records(df)}
+        return {"count": len(df), "items": df.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -873,7 +906,7 @@ def training_features_post(req: TrainingFeaturesRequest, _auth: dict = Depends(r
             lookback_days=req.lookback_days,
             forecast_horizon=req.forecast_horizon,
         )
-        return {"count": len(frame), "items": _safe_records(frame)}
+        return {"count": len(frame), "items": frame.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -900,7 +933,7 @@ def training_features_get(
             lookback_days=lookback_days,
             forecast_horizon=forecast_horizon,
         )
-        return {"count": len(frame), "items": _safe_records(frame)}
+        return {"count": len(frame), "items": frame.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -941,6 +974,7 @@ def broker_mcp_status():
             status["endpoint"] = getattr(getattr(broker, "client"), "config", {}).endpoint if hasattr(getattr(broker, "client"), "config") else None
             if hasattr(getattr(broker, "client"), "auth_summary"):
                 status["auth"] = getattr(broker, "client").auth_summary()
+                status["auth_summary"] = status["auth"]
     except Exception as e:
         status["error"] = str(e)
         return status
@@ -952,6 +986,7 @@ def broker_mcp_status():
         status["connect_error"] = str(e)
 
     try:
+        status["runtime_auth_override"] = get_runtime_mcp_auth_config_summary()
         acct = broker.account()
         status["authenticated"] = True
         status["account_available"] = True
@@ -976,12 +1011,49 @@ def broker_mcp_status():
 def _mcp_client_login_steps() -> list[dict]:
     endpoint = "https://agent.robinhood.com/mcp/trading"
     return [
-        {"client": "Claude Code", "steps": [f"Run: claude mcp add robinhood-trading --transport http {endpoint}", "Run /mcp, select robinhood-trading, then complete Robinhood auth."]},
-        {"client": "Claude Desktop", "steps": ["Open Settings -> Connectors -> Add custom connector.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
-        {"client": "ChatGPT", "steps": ["Enable Developer Mode.", "Open Settings -> Apps -> Create app.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
-        {"client": "Codex", "steps": ["Open Settings -> MCP servers -> Streamable HTTP.", f"Add MCP URL: {endpoint} and complete Robinhood auth."]},
-        {"client": "Codex CLI", "steps": [f"Run: codex mcp add robinhood-trading --url {endpoint}", "Run /mcp, select robinhood-trading, then complete Robinhood auth."]},
-        {"client": "Cursor", "steps": [f"Provide MCP URL to the agent: {endpoint}", "Open Settings -> Cursor Settings -> Tools & MCPs -> Connect and complete auth."]},
+        {
+            "client": "Claude Code",
+            "steps": [
+                f"Run: claude mcp add robinhood-trading --transport http {endpoint}",
+                "Run /mcp, select robinhood-trading, then complete Robinhood auth.",
+            ],
+        },
+        {
+            "client": "Claude Desktop",
+            "steps": [
+                "Open Settings -> Connectors -> Add custom connector.",
+                f"Add MCP URL: {endpoint} and complete Robinhood auth.",
+            ],
+        },
+        {
+            "client": "ChatGPT",
+            "steps": [
+                "Enable Developer Mode.",
+                "Open Settings -> Apps -> Create app.",
+                f"Add MCP URL: {endpoint} and complete Robinhood auth.",
+            ],
+        },
+        {
+            "client": "Codex",
+            "steps": [
+                "Open Settings -> MCP servers -> Streamable HTTP.",
+                f"Add MCP URL: {endpoint} and complete Robinhood auth.",
+            ],
+        },
+        {
+            "client": "Codex CLI",
+            "steps": [
+                f"Run: codex mcp add robinhood-trading --url {endpoint}",
+                "Run /mcp, select robinhood-trading, then complete Robinhood auth.",
+            ],
+        },
+        {
+            "client": "Cursor",
+            "steps": [
+                f"Provide MCP URL to the agent: {endpoint}",
+                "Open Settings -> Cursor Settings -> Tools & MCPs -> Connect and complete auth.",
+            ],
+        },
     ]
 
 
@@ -1078,7 +1150,10 @@ def broker_mcp_oauth_metadata(_auth: dict = Depends(require_write_auth)):
 def broker_mcp_oauth_start(req: MCPOAuthStartRequest, _auth: dict = Depends(require_write_auth)):
     client_id = _mcp_oauth_client_id()
     if not client_id:
-        raise HTTPException(status_code=400, detail="QF_MCP_OAUTH_CLIENT_ID is required for backend OAuth flow.")
+        raise HTTPException(
+            status_code=400,
+            detail="QF_MCP_OAUTH_CLIENT_ID is required for backend OAuth flow.",
+        )
 
     meta = _mcp_oauth_metadata_summary()
     auth_endpoint = str((meta.get("authorization") or {}).get("authorization_endpoint") or "").strip()
@@ -1162,7 +1237,7 @@ def broker_mcp_oauth_callback(code: Optional[str] = None, state: Optional[str] =
         token_payload["client_secret"] = client_secret
 
     token_body = urlparse.urlencode(token_payload).encode("utf-8")
-    token_req = urlrequest.Request(
+    req = urlrequest.Request(
         str(flow.get("token_endpoint") or ""),
         data=token_body,
         headers={
@@ -1173,7 +1248,7 @@ def broker_mcp_oauth_callback(code: Optional[str] = None, state: Optional[str] =
     )
 
     try:
-        with urlrequest.urlopen(token_req, timeout=15) as resp:
+        with urlrequest.urlopen(req, timeout=15) as resp:
             raw = resp.read().decode("utf-8")
             token_data = json.loads(raw) if raw else {}
     except urlerror.HTTPError as e:
@@ -1187,31 +1262,30 @@ def broker_mcp_oauth_callback(code: Optional[str] = None, state: Optional[str] =
             msg = f"{msg} | {detail}"
         return HTMLResponse(f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{html.escape(msg)}</p></body></html>", status_code=400)
     except Exception as e:
-        return HTMLResponse(
-            f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{html.escape(f'Token exchange failed: {e}')}</p></body></html>",
-            status_code=400,
-        )
+        return HTMLResponse(f"<html><body><h2>Robinhood MCP OAuth failed</h2><p>{html.escape(f'Token exchange failed: {e}')}</p></body></html>", status_code=400)
 
     access_token = str((token_data or {}).get("access_token") or "").strip()
     token_type = str((token_data or {}).get("token_type") or "Bearer").strip() or "Bearer"
     if not access_token:
         return HTMLResponse("<html><body><h2>Robinhood MCP OAuth failed</h2><p>No access_token returned by token endpoint.</p></body></html>", status_code=400)
 
-    set_runtime_mcp_auth_config({
-        "auth_header": "Authorization",
-        "bearer_token": f"{token_type} {access_token}".strip(),
-    })
+    set_runtime_mcp_auth_config(
+        {
+            "auth_header": "Authorization",
+            "bearer_token": f"{token_type} {access_token}".strip(),
+        }
+    )
 
     continue_url = str(flow.get("continue_url") or "").strip()
     if continue_url:
         sep = "&" if "?" in continue_url else "?"
         safe_continue = f"{continue_url}{sep}mcp_oauth=success".replace("'", "%27")
-        html_body = (
+        html = (
             "<html><body><h2>Robinhood MCP OAuth complete</h2>"
             f"<p>Backend token configured. Returning to app...</p><script>window.location.href='{safe_continue}';</script>"
             f"<p><a href='{safe_continue}'>Continue</a></p></body></html>"
         )
-        return HTMLResponse(html_body, status_code=200)
+        return HTMLResponse(html, status_code=200)
 
     return HTMLResponse(
         "<html><body><h2>Robinhood MCP OAuth complete</h2><p>Backend token configured. You can close this tab and refresh MCP status in QuantFlow.</p></body></html>",
@@ -1385,8 +1459,8 @@ def broker_mcp_readiness():
 def assistant_query(req: AssistantQueryRequest):
     text = req.message.strip()
     low = text.lower()
-    normalized = re.sub(r"[^a-z0-9\s]+", " ", low)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", low)  # Normalize to remove special characters
+    normalized = re.sub(r"\s+", " ", normalized).strip()  # Normalize whitespace
 
     try:
         recs = latest_recommendations_per_ticker(db_path=req.db)
@@ -1449,7 +1523,7 @@ def assistant_query(req: AssistantQueryRequest):
             "answer": (
                 "I can work with local QuantFlow data for rankings, scanner and universe status, earnings temporal analysis, "
                 "technical and seasonality workflows, sentiment timelines, execution intents, and MCP readiness. "
-                "Try: top high conviction ideas, technical plus sentiment on AAPL, scanner status, or MCP readiness."
+                "Try: 'top high-conviction ideas', 'technical + sentiment on AAPL', 'scanner status', or 'MCP readiness'."
             ),
             "summary": summary,
             "suggested_tool_calls": [],
@@ -1562,7 +1636,7 @@ def assistant_query(req: AssistantQueryRequest):
 
     if any(k in low for k in ["earnings", "quarter", "quarterly", "operations report", "ops report"]):
         focus = ""
-        match = re.search(r"([A-Z]{1,5})", req.message)
+        match = re.search(r"\b([A-Z]{1,5})\b", req.message)
         if match:
             focus = match.group(1).upper()
         if not focus:
@@ -1668,15 +1742,17 @@ def assistant_query(req: AssistantQueryRequest):
         answer = "Scanner data is available. You can run a fresh scan or inspect the latest cached universe rows."
         return {"answer": answer, "summary": summary, "suggested_tool_calls": []}
 
-    # Only surface top ideas when the message contains a financial keyword.
-    # Nonsense, conversational, or off-topic input gets a neutral guidance reply.
-    _FINANCE_RE = re.compile(
+    # Only offer top ideas if the message contains at least one financial keyword.
+    # Unrecognised, conversational, or nonsense input falls through to a neutral reply.
+    _FINANCE_KEYWORDS = re.compile(
         r"\b(ticker|stock|trade|trading|signal|rank|buy|sell|long|short|portfolio|"
         r"market|price|chart|analysis|analyse|analyze|forecast|recommend|setup|"
         r"alpha|backtest|option|put|call|spread|trend|momentum|indicator|rsi|macd|"
         r"earnings|revenue|eps|idea|ideas|opportunity|opportunities)\b"
     )
-    if _FINANCE_RE.search(low):
+    has_finance_intent = bool(_FINANCE_KEYWORDS.search(low))
+
+    if has_finance_intent:
         top = _top_opportunities(limit=3)
         if top:
             preview = ", ".join([f"{row['ticker']} ({row['bias']}, {row['confidence']:.2f})" for row in top])
@@ -1687,7 +1763,7 @@ def assistant_query(req: AssistantQueryRequest):
             return {"answer": answer, "summary": summary, "suggested_tool_calls": []}
 
     answer = (
-        "I didn't catch a specific request. You can ask for: high-conviction rankings, "
+        "I didn't catch a specific request there. You can ask for: high-conviction rankings, "
         "technical/seasonality/sentiment analysis for a ticker, earnings temporal cadence, "
         "scanner or universe status, execution intents, or MCP readiness."
     )
@@ -1740,7 +1816,102 @@ def execution_intents(limit: int = 100, db: str = "sqlite:///quantflow.db"):
         df = recent_execution_intents(limit=limit, db_path=db)
         if df.empty:
             return {"count": 0, "items": []}
-        return {"count": len(df), "items": _safe_records(df)}
+        return {"count": len(df), "items": df.to_dict(orient="records")}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/portfolio/positions")
+def portfolio_positions():
+    try:
+        alpaca = AlpacaPaperTrading()
+        acct = alpaca.get_account()
+        positions = alpaca.get_positions()
+        equity_curve = []
+        if hasattr(alpaca, "get_portfolio_history"):
+            hist = alpaca.get_portfolio_history()
+            if hist:
+                equity_curve = hist
+        return {
+            "positions": [p.__dict__ if hasattr(p, "__dict__") else p for p in positions],
+            "account": acct.__dict__ if hasattr(acct, "__dict__") else acct,
+            "equity_curve": equity_curve,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class PaperTradeRequest(BaseModel):
+    ticker: str
+    action: str
+    qty: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+@app.post("/trade/paper")
+def trade_paper(req: PaperTradeRequest, _auth: dict = Depends(require_write_auth)):
+    try:
+        alpaca = AlpacaPaperTrading()
+        result = alpaca.place_order(
+            ticker=req.ticker.upper(),
+            side=req.action,
+            qty=req.qty,
+            order_type="market",
+            stop_loss_pct=req.stop_loss if req.stop_loss is not None else 0,
+            take_profit_pct=req.take_profit if req.take_profit is not None else 0,
+        )
+        return {"ok": True, "order": result.__dict__ if hasattr(result, "__dict__") else result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class TestAlpacaRequest(BaseModel):
+    key: str = Field(exclude=True)
+    secret: str = Field(exclude=True)
+
+
+@app.post("/settings/test-alpaca")
+def settings_test_alpaca(req: TestAlpacaRequest):
+    import httpx as _httpx
+    try:
+        with _httpx.Client(timeout=10) as client:
+            resp = client.get(
+                "https://paper-api.alpaca.markets/v2/account",
+                headers={"APCA-API-KEY-ID": req.key, "APCA-API-SECRET-KEY": req.secret},
+            )
+            resp.raise_for_status()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class SaveSettingsRequest(BaseModel):
+    risk_stop_loss_pct: Optional[float] = None
+    risk_max_position_pct: Optional[float] = None
+    daily_loss_limit: Optional[float] = None
+    llm_key: Optional[str] = None
+    llm_endpoint: Optional[str] = None
+    alpaca_key: Optional[str] = None
+    alpaca_secret: Optional[str] = None
+
+
+@app.put("/settings/save")
+def settings_save(req: SaveSettingsRequest, _auth: dict = Depends(require_write_auth)):
+    try:
+        saved = {}
+        for field, value in req.model_dump(exclude_none=True).items():
+            saved[field] = value
+        settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "configs", "user_settings.json")
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        existing = {}
+        if os.path.exists(settings_path):
+            with open(settings_path) as f:
+                existing = json.load(f)
+        existing.update(saved)
+        with open(settings_path, "w") as f:
+            json.dump(existing, f, indent=2)
+        return {"ok": True, "saved": saved}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -2029,7 +2200,7 @@ def charts_seasonality_compare(
             "years": years,
             "metrics": metrics,
             "count": len(merged),
-            "items": _safe_records(merged),
+            "items": merged.to_dict(orient="records"),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2057,7 +2228,7 @@ def charts_indicators(ticker: str, period: str = "6mo", interval: str = "1d"):
         use_cols = [c for c in chart_cols if c in df.columns]
         out = df[use_cols].reset_index().copy()
         out["date"] = out["date"].astype(str)
-        return {"count": len(out), "items": _safe_records(out)}
+        return {"count": len(out), "items": out.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -2066,7 +2237,7 @@ def charts_indicators(ticker: str, period: str = "6mo", interval: str = "1d"):
 def charts_seasonality(ticker: str, years: int = 10):
     try:
         df = seasonality_by_doy(ticker.upper(), years=years)
-        return {"count": len(df), "items": _safe_records(df)}
+        return {"count": len(df), "items": df.to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -2131,9 +2302,9 @@ def backtest_short_term_api(
             entry_rsi_threshold=entry_rsi_threshold,
             max_hold_days=max_hold_days,
             stop_loss_pct=stop_loss_pct,
+            ma_filter=ma_selected,
             take_profit_pct=take_profit_pct,
             ma_trend_filter=ma_trend,
-            ma_filter=ma_selected,
         )
         eq = rpt.equity_curve.reset_index()
         eq.columns = ["date", "equity"]
@@ -2159,7 +2330,91 @@ def backtest_short_term_api(
                     "ma_trend_filter": ma_trend,
                 },
             },
-            "equity": _safe_records(eq),
+            "equity": eq.to_dict(orient="records"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/portfolio/allocate")
+def portfolio_allocate(req: AllocatePortfolioRequest):
+    """Optimize portfolio allocation across tickers.
+    
+    Returns target weights, expected risk/return, and allocation rationale.
+    """
+    try:
+        # Load OHLCV data for all tickers
+        ohlcv_dict = {}
+        for ticker in req.tickers:
+            try:
+                df = fetch_ohlcv(ticker.upper(), period="max")
+                if not df.empty:
+                    ohlcv_dict[ticker.upper()] = df
+            except Exception:
+                pass
+
+        if len(ohlcv_dict) < 2:
+            raise ValueError(f"Need at least 2 valid tickers; got {len(ohlcv_dict)}")
+
+        # Estimate risk metrics from history
+        risk_metrics = estimate_risk_from_history(ohlcv_dict, lookback_days=req.lookback_days)
+
+        # Initialize allocator
+        constraints = AllocationConstraints(
+            max_weight=req.max_weight,
+            min_weight=req.min_weight,
+            target_volatility=req.target_volatility,
+        )
+        allocator = PortfolioAllocator(constraints=constraints)
+
+        # Optimize based on method
+        if req.method == "mean_variance":
+            # Estimate returns using recent signals + forecast
+            signals_dict = {}
+            forecasts_dict = {}
+            historical_means = {}
+            
+            for ticker in ohlcv_dict.keys():
+                df = ohlcv_dict[ticker]
+                # Recent return as proxy for signal
+                recent_ret = (df["close"].iloc[-1] / df["close"].iloc[-20] - 1) if len(df) >= 20 else 0
+                signals_dict[ticker] = max(0, min(recent_ret / 0.1, 1.0))  # normalize to 0-1
+                
+                # Forecast: mean reversion assumption
+                forecasts_dict[ticker] = -0.01 if recent_ret > 0.15 else 0.02
+                
+                # Historical mean
+                all_rets = df["close"].pct_change().dropna()
+                historical_means[ticker] = all_rets.mean() * 252 if len(all_rets) > 0 else 0.05
+
+            expected_returns = estimate_returns_from_signals(signals_dict, forecasts_dict, historical_means)
+            result = allocator.optimize_mean_variance(expected_returns, risk_metrics, risk_free_rate=req.risk_free_rate)
+
+        elif req.method == "hrp":
+            result = allocator.optimize_hrp(risk_metrics)
+        elif req.method == "volatility_scaled":
+            result = allocator.optimize_volatility_scaled(risk_metrics)
+        else:  # equal_weight
+            result = allocator.optimize_equal_weight(list(ohlcv_dict.keys()))
+
+        # Validate weights sum to 1
+        weight_sum = sum(result.weights.values())
+        if abs(weight_sum - 1.0) > 0.01:
+            result.weights = {t: w / weight_sum for t, w in result.weights.items()}
+
+        return {
+            "tickers": list(result.weights.keys()),
+            "weights": result.weights,
+            "expected_return": float(result.expected_return),
+            "expected_volatility": float(result.expected_volatility),
+            "sharpe_ratio": float(result.sharpe_ratio),
+            "method": result.method,
+            "rationale": result.rationale,
+            "constraints": {
+                "max_weight": constraints.max_weight,
+                "min_weight": constraints.min_weight,
+                "target_volatility": constraints.target_volatility,
+            },
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2207,7 +2462,7 @@ def market_series_cache(
             "interval": interval,
             "count": len(out),
             "path": file_path,
-            "items": _safe_records(items_df),
+            "items": items_df.to_dict(orient="records"),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

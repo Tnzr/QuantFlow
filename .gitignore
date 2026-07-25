@@ -87,3 +87,9 @@ secrets.*
 
 # Ignore OS files
 Icon?
+
+# ML model checkpoints and binaries
+checkpoints/
+*.pt
+*.pth
+*.ckpt

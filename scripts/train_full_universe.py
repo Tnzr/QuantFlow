@@ -58,6 +58,22 @@ def main():
     parser.add_argument("--no-coherent-heads", action="store_true",
                          help="Disable use_coherent_heads (decouples classification logits from the "
                               "forecast head's input) for ablation testing collapse root cause.")
+    parser.add_argument("--curriculum", action="store_true",
+                         help="Enable two-phase curriculum: Phase A = shuffled pretraining (learn separable "
+                              "features from diverse batches), Phase B = chronological stateful fine-tuning "
+                              "per methodology §4.3/§8.2. Resolves classification collapse caused by "
+                              "autocorrelated chronological batches overwhelming class weighting.")
+    parser.add_argument("--curriculum-phase-a-epochs", type=int, default=15,
+                         help="Number of epochs for Phase A shuffled pretraining (default: 15)")
+    parser.add_argument("--curriculum-phase-a-lr", type=float, default=None,
+                         help="Learning rate for Phase A (default: use config lr)")
+    parser.add_argument("--curriculum-no-freeze", action="store_true",
+                         help="Don't freeze future/uncertainty/dynamics heads during Phase A "
+                              "(train all heads from the start)")
+    parser.add_argument("--shuffle", action="store_true",
+                         help="Shuffle training batches (breaks stateful carry, but enables "
+                              "learning from diverse batch composition). Use for ablation or "
+                              "when classification collapse is the primary blocker.")
     parser.add_argument("--max-rows", type=int, default=0)
     args = parser.parse_args()
 
@@ -80,7 +96,13 @@ def main():
         dropout=args.dropout,
         checkpoint_dir=args.checkpoint_dir,
         use_coherent_heads=not args.no_coherent_heads,
+        curriculum=args.curriculum,
+        curriculum_phase_a_epochs=args.curriculum_phase_a_epochs,
+        curriculum_freeze_heads_during_phase_a=not args.curriculum_no_freeze,
+        shuffle_train=args.shuffle,
     )
+    if args.curriculum_phase_a_lr is not None:
+        config.curriculum_phase_a_lr = args.curriculum_phase_a_lr
 
     loss_overrides = {}
     if args.cls_weight is not None:
@@ -120,6 +142,7 @@ def main():
                 "dataset_tickers": df['ticker'].nunique(),
                 "class_distribution": df['event_state_code'].value_counts().to_dict(),
             },
+            settings=wandb.Settings(init_timeout=180),
         )
 
     print(f"Training {args.arch} (hidden_dim={args.hidden_dim}, epochs={args.epochs})...")

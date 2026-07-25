@@ -105,3 +105,29 @@ def require_write_auth(
         raise HTTPException(status_code=403, detail="Forbidden: missing write role/claim")
 
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_firebase_user(
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Require a valid Firebase bearer token and return user claims.
+
+    This dependency intentionally enforces Google/Firebase auth only and does not
+    allow API key fallback, making it suitable for per-user settings endpoints.
+    """
+    if not _firebase_enabled():
+        raise HTTPException(status_code=503, detail="Firebase auth is disabled on this server")
+
+    claims = _firebase_claims(authorization=authorization)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Unauthorized: valid Firebase bearer token required")
+
+    uid = str(claims.get("uid") or claims.get("user_id") or claims.get("sub") or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized: Firebase token is missing user identity")
+
+    return {
+        "mode": "firebase",
+        "uid": uid,
+        "claims": claims,
+    }

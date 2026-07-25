@@ -9,9 +9,9 @@ function resolveApiBase() {
   if (typeof window !== "undefined") {
     const protocol = window.location.protocol || "http:";
     const host = window.location.hostname || "127.0.0.1";
-    return `${protocol}//${host}:8100`;
+    return `${protocol}//${host}:3000`;
   }
-  return "http://127.0.0.1:8100";
+  return "http://127.0.0.1:3000";
 }
 
 const API_BASE = resolveApiBase();
@@ -25,7 +25,7 @@ const FIREBASE_WEB_CONFIG = {
 };
 
 const SURFACES = ["Public", "Workspace"];
-const SCREENS = ["Overview", "Scanner", "Recommend", "Analytics", "Charts", "Options", "Backtest", "Execution", "Assistant", "Presets", "Auth"];
+const SCREENS = ["Overview", "Portfolio", "Trade", "Scanner", "Recommend", "Analytics", "Charts", "Options", "Backtest", "Market", "Execution", "Assistant", "Presets", "Auth", "Settings"];
 
 const THEME = {
   bg: "#f3efe5",
@@ -39,6 +39,15 @@ const THEME = {
   warn: "#9a3412",
   ok: "#166534",
 };
+
+const ASSISTANT_SUGGESTED_PROMPTS = [
+  "What's my best performer?",
+  "Run a backtest on AAPL",
+  "Show my portfolio positions",
+  "Explain this signal",
+  "Analyze MSFT seasonality",
+  "Check MCP connection status",
+];
 
 function compactJson(value, cap = 600) {
   try {
@@ -248,9 +257,7 @@ function MiniSeriesChart({ series, height = 120, xLabels = [] }) {
 
 function HorizontalDistribution({ items, color = THEME.accent }) {
   const rows = (items || []).slice(0, 16);
-  if (!rows.length) {
-    return <Text style={styles.item}>No distribution loaded.</Text>;
-  }
+  if (!rows.length) return <Text style={styles.item}>No distribution loaded.</Text>;
   const maxWeight = Math.max(...rows.map((row) => Number(row.weighted_density || row.density || 0)), 0.0001);
   return (
     <View style={styles.distributionList}>
@@ -272,9 +279,7 @@ function HorizontalDistribution({ items, color = THEME.accent }) {
 
 function ScoreBars({ breakdown }) {
   const entries = Object.entries(breakdown || {});
-  if (!entries.length) {
-    return <Text style={styles.item}>No score breakdown loaded.</Text>;
-  }
+  if (!entries.length) return <Text style={styles.item}>No score breakdown loaded.</Text>;
   return (
     <View style={styles.scoreList}>
       {entries.map(([label, value]) => (
@@ -293,10 +298,7 @@ function ScoreBars({ breakdown }) {
 function NewsTimelineChart({ timeline }) {
   const priceRows = timeline?.price || [];
   const markers = timeline?.markers || [];
-  if (!priceRows.length) {
-    return <Text style={styles.item}>No timeline data loaded.</Text>;
-  }
-
+  if (!priceRows.length) return <Text style={styles.item}>No timeline data loaded.</Text>;
   const priceValues = priceRows.map((row) => Number(row.close ?? row["adj close"] ?? row.price ?? 0));
   const priceDates = priceRows.map((row) => String(row.date || ""));
   const maxLen = Math.max(priceValues.length, 1);
@@ -304,77 +306,42 @@ function NewsTimelineChart({ timeline }) {
   const min = Math.min(...flat);
   const max = Math.max(...flat);
   const span = max - min || 1;
-
   const markerColor = (label) => {
     if (label === "bullish") return "#166534";
     if (label === "bearish") return "#b91c1c";
     return "#a16207";
   };
-
   const findMarkerIndex = (date) => {
     const idx = priceDates.indexOf(String(date));
     if (idx >= 0) return idx;
-    let best = 0;
-    let bestDistance = Number.POSITIVE_INFINITY;
+    let best = 0, bestDistance = Number.POSITIVE_INFINITY;
     const target = new Date(String(date)).getTime();
     priceDates.forEach((d, index) => {
-      const current = new Date(d).getTime();
-      const distance = Math.abs(current - target);
-      if (Number.isFinite(distance) && distance < bestDistance) {
-        bestDistance = distance;
-        best = index;
-      }
+      const distance = Math.abs(new Date(d).getTime() - target);
+      if (Number.isFinite(distance) && distance < bestDistance) { bestDistance = distance; best = index; }
     });
     return best;
   };
-
   return (
     <View style={styles.timelineFrame}>
       <View style={styles.timelineChartWrap}>
         {(() => {
-          const width = 1000;
-          const height = 126;
-          const points = priceValues
-            .map((value, idx) => {
-              if (!Number.isFinite(value)) return null;
-              const x = maxLen > 1 ? (idx / (maxLen - 1)) * width : 0;
-              const y = height - ((value - min) / span) * height;
-              return { x, y };
-            })
-            .filter(Boolean);
-          const cloud = buildLinePointCloud(points, 4);
-          return cloud.map((pt, idx) => (
-            <View
-              key={`timeline-line-${String(idx)}`}
-              style={[
-                styles.chartLineDot,
-                {
-                  left: `${(pt.x / width) * 100}%`,
-                  top: pt.y,
-                  width: 2,
-                  height: 2,
-                  borderRadius: 2,
-                  backgroundColor: THEME.text,
-                  opacity: 0.95,
-                },
-              ]}
-            />
+          const width = 1000, height = 126;
+          const points = priceValues.map((value, idx) => {
+            if (!Number.isFinite(value)) return null;
+            const x = maxLen > 1 ? (idx / (maxLen - 1)) * width : 0;
+            const y = height - ((value - min) / span) * height;
+            return { x, y };
+          }).filter(Boolean);
+          return buildLinePointCloud(points, 4).map((pt, idx) => (
+            <View key={`tl-${idx}`} style={[styles.chartLineDot, { left: `${(pt.x / width) * 100}%`, top: pt.y, width: 2, height: 2, borderRadius: 2, backgroundColor: THEME.text, opacity: 0.95 }]} />
           ));
         })()}
         {markers.slice(0, 18).map((marker, idx) => {
-          const markerIndex = findMarkerIndex(marker.date);
-          const left = maxLen > 1 ? `${(markerIndex / (maxLen - 1)) * 100}%` : "0%";
+          const left = maxLen > 1 ? `${(findMarkerIndex(marker.date) / (maxLen - 1)) * 100}%` : "0%";
           const color = markerColor(marker.sentiment_label);
-          return (
-            <View key={`marker-${String(idx)}-${marker.date}`} style={[styles.timelineMarker, { left }]}> 
-              <View style={[styles.timelineDot, { backgroundColor: color }]} />
-              <Text style={[styles.timelineMarkerText, { color }]}>{marker.sentiment_label?.slice(0, 1)?.toUpperCase() || "N"}</Text>
-            </View>
-          );
+          return <View key={`mk-${idx}`} style={[styles.timelineMarker, { left }]}><View style={[styles.timelineDot, { backgroundColor: color }]} /><Text style={[styles.timelineMarkerText, { color }]}>{marker.sentiment_label?.slice(0, 1)?.toUpperCase() || "N"}</Text></View>;
         })}
-      </View>
-      <View style={styles.timelineLegendRow}>
-        <Text style={styles.item}>Price line with news markers: B bullish, N neutral, R bearish.</Text>
       </View>
     </View>
   );
@@ -382,19 +349,8 @@ function NewsTimelineChart({ timeline }) {
 
 function NewsSummaryList({ summary }) {
   const groups = summary?.items || [];
-  if (!groups.length) {
-    return <Text style={styles.item}>No article summary loaded.</Text>;
-  }
-  return (
-    <View style={styles.newsSummaryList}>
-      {groups.map((group) => (
-        <View key={group.date} style={styles.newsSummaryCard}>
-          <Text style={styles.analyticsHeadline}>{group.date} | {group.count} articles | avg sentiment {fmtNumber(group.avg_sentiment)}</Text>
-          <Text style={styles.item}>{group.summary || "No summary text available."}</Text>
-        </View>
-      ))}
-    </View>
-  );
+  if (!groups.length) return <Text style={styles.item}>No article summary loaded.</Text>;
+  return <View style={styles.newsSummaryList}>{groups.map((group) => <View key={group.date} style={styles.newsSummaryCard}><Text style={styles.analyticsHeadline}>{group.date} | {group.count} articles | avg sentiment {fmtNumber(group.avg_sentiment)}</Text><Text style={styles.item}>{group.summary || "No summary text available."}</Text></View>)}</View>;
 }
 
 function ProgressBar({ progress, label, compact = false }) {
@@ -402,9 +358,7 @@ function ProgressBar({ progress, label, compact = false }) {
   return (
     <View style={compact ? styles.progressCompactWrap : styles.progressWrap}>
       {!!label && <Text style={styles.progressLabel}>{label}</Text>}
-      <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${pct}%` }]} />
-      </View>
+      <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${pct}%` }]} /></View>
       <Text style={styles.progressValue}>{Math.round(pct)}%</Text>
     </View>
   );
@@ -420,23 +374,14 @@ function authHeaders({ apiKey, bearerToken }) {
 async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
   let lastError;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (e) {
+    try { return await fn(); } catch (e) {
       lastError = e;
-      const message = String(e?.message || "");
-      const isNetworkError = message.includes("Failed to fetch") || message.includes("Network request failed");
-      const isRetryable = e.status >= 500 || message.includes("aborted") || isNetworkError;
-      if (!isRetryable || attempt === maxRetries - 1) {
-        if (isNetworkError) {
-          const err = new Error(`Failed to fetch from ${API_BASE}. Ensure the API is running and EXPO_PUBLIC_API_BASE_URL is correct.`);
-          err.status = e.status;
-          throw err;
-        }
+      const msg = String(e?.message || "");
+      if ((e.status < 500 && !msg.includes("Failed to fetch") && !msg.includes("Network request failed")) || attempt === maxRetries - 1) {
+        if (msg.includes("Failed to fetch")) { const err = new Error(`Failed to fetch from ${API_BASE}. Ensure the API is running and EXPO_PUBLIC_API_BASE_URL is correct.`); err.status = e.status; throw err; }
         throw e;
       }
-      const delayMs = baseDelayMs * Math.pow(2, attempt) + Math.random() * 100;
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      await new Promise(resolve => setTimeout(resolve, baseDelayMs * Math.pow(2, attempt) + Math.random() * 100));
     }
   }
   throw lastError;
@@ -445,66 +390,37 @@ async function withRetry(fn, maxRetries = 3, baseDelayMs = 500) {
 async function apiGet(path, auth, options = {}) {
   return withRetry(async () => {
     const res = await fetch(`${API_BASE}${path}`, { headers: { ...authHeaders(auth) }, signal: options.signal });
-    if (!res.ok) {
-      const err = new Error(`HTTP ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
+    if (!res.ok) { const err = new Error(`HTTP ${res.status}`); err.status = res.status; throw err; }
     return res.json();
   });
 }
 
 async function apiPost(path, payload, auth, options = {}) {
   return withRetry(async () => {
-    const res = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders(auth) },
-      body: JSON.stringify(payload),
-      signal: options.signal,
-    });
-    if (!res.ok) {
-      const err = new Error(`HTTP ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
+    const res = await fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...authHeaders(auth) }, body: JSON.stringify(payload), signal: options.signal });
+    if (!res.ok) { const err = new Error(`HTTP ${res.status}`); err.status = res.status; throw err; }
     return res.json();
   });
 }
 
 async function apiPut(path, payload, auth, options = {}) {
   return withRetry(async () => {
-    const res = await fetch(`${API_BASE}${path}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders(auth) },
-      body: JSON.stringify(payload),
-      signal: options.signal,
-    });
-    if (!res.ok) {
-      const err = new Error(`HTTP ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
+    const res = await fetch(`${API_BASE}${path}`, { method: "PUT", headers: { "Content-Type": "application/json", ...authHeaders(auth) }, body: JSON.stringify(payload), signal: options.signal });
+    if (!res.ok) { const err = new Error(`HTTP ${res.status}`); err.status = res.status; throw err; }
     return res.json();
   });
 }
 
 async function apiDelete(path, auth, options = {}) {
   return withRetry(async () => {
-    const res = await fetch(`${API_BASE}${path}`, {
-      method: "DELETE",
-      headers: { ...authHeaders(auth) },
-      signal: options.signal,
-    });
-    if (!res.ok) {
-      const err = new Error(`HTTP ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
+    const res = await fetch(`${API_BASE}${path}`, { method: "DELETE", headers: { ...authHeaders(auth) }, signal: options.signal });
+    if (!res.ok) { const err = new Error(`HTTP ${res.status}`); err.status = res.status; throw err; }
     return res.json();
   });
 }
 
 export default function App() {
+  // ---- Core state ----
   const [surface, setSurface] = useState("Public");
   const [workspaceUnlocked, setWorkspaceUnlocked] = useState(false);
   const [screen, setScreen] = useState("Overview");
@@ -554,6 +470,7 @@ export default function App() {
   const [horizon, setHorizon] = useState("1m");
   const [dbPath, setDbPath] = useState("sqlite:///quantflow.db");
 
+  // ---- Scanner state ----
   const [scanParallel, setScanParallel] = useState(true);
   const [scanWorkers, setScanWorkers] = useState("4");
   const [scanResult, setScanResult] = useState(null);
@@ -577,7 +494,6 @@ export default function App() {
   const [presetSearch, setPresetSearch] = useState("");
   const [universePresetFilter, setUniversePresetFilter] = useState("");
   const [universeLimit, setUniverseLimit] = useState("24");
-  
   const [presetEditName, setPresetEditName] = useState("");
   const [presetEditContent, setPresetEditContent] = useState("");
   const [presetSaveStatus, setPresetSaveStatus] = useState("idle");
@@ -586,11 +502,11 @@ export default function App() {
   const [recommendTickersText, setRecommendTickersText] = useState("AAPL,MSFT");
   const [recommendSave, setRecommendSave] = useState(true);
   const [recommendResult, setRecommendResult] = useState(null);
-
   const [optionsBias, setOptionsBias] = useState("long");
   const [optionsBudget, setOptionsBudget] = useState("300");
   const [optionsResultMeta, setOptionsResultMeta] = useState(null);
 
+  // ---- Backtest state ----
   const [backtestStart, setBacktestStart] = useState("2020-01-01");
   const [backtestEnd, setBacktestEnd] = useState("");
   const [backtestEntryRsi, setBacktestEntryRsi] = useState("50");
@@ -599,7 +515,9 @@ export default function App() {
   const [backtestMaFilter, setBacktestMaFilter] = useState("sma20");
   const [backtestTakeProfitPct, setBacktestTakeProfitPct] = useState("0");
   const [backtestMaTrendFilter, setBacktestMaTrendFilter] = useState("none");
+  const [backtestStep, setBacktestStep] = useState(-1);
 
+  // ---- Analytics state ----
   const [analyticsTickersText, setAnalyticsTickersText] = useState("AAPL,MSFT,NVDA,AMZN");
   const [analyticsPeriod, setAnalyticsPeriod] = useState("1y");
   const [analyticsInterval, setAnalyticsInterval] = useState("1d");
@@ -629,6 +547,7 @@ export default function App() {
   const [seasonalityCompareChart, setSeasonalityCompareChart] = useState(null);
   const [marketSeriesCache, setMarketSeriesCache] = useState(null);
 
+  // ---- Execution state ----
   const [executionAction, setExecutionAction] = useState("buy");
   const [executionQty, setExecutionQty] = useState("1");
   const [executionOrdersToday, setExecutionOrdersToday] = useState("0");
@@ -639,64 +558,72 @@ export default function App() {
   const [executionMaxOrders, setExecutionMaxOrders] = useState("20");
   const [executionMaxPosition, setExecutionMaxPosition] = useState("2000");
   const [executionResult, setExecutionResult] = useState(null);
+
+  // ---- Portfolio tab ----
+  const [portfolioPositions, setPortfolioPositions] = useState([]);
+  const [portfolioEquity, setPortfolioEquity] = useState([]);
+  const [portfolioAccount, setPortfolioAccount] = useState(null);
+  const [portfolioMetrics, setPortfolioMetrics] = useState(null);
+
+  // ---- Trade tab ----
+  const [tradeTicker, setTradeTicker] = useState("AAPL");
+  const [tradeAction, setTradeAction] = useState("buy");
+  const [tradeQty, setTradeQty] = useState("10");
+  const [tradeStopLoss, setTradeStopLoss] = useState("");
+  const [tradeTakeProfit, setTradeTakeProfit] = useState("");
+  const [tradeOrderHistory, setTradeOrderHistory] = useState([]);
+  const [tradeActivePositions, setTradeActivePositions] = useState([]);
+
+  // ---- Market tab ----
+  const [marketTicker, setMarketTicker] = useState("AAPL");
+  const [marketTimeframe, setMarketTimeframe] = useState("1d");
+  const [marketIndicators, setMarketIndicators] = useState([]);
+  const [marketForecast, setMarketForecast] = useState(null);
+
+  // ---- Settings tab ----
+  const [settingsAlpacaKey, setSettingsAlpacaKey] = useState("");
+  const [settingsAlpacaSecret, setSettingsAlpacaSecret] = useState("");
+  const [settingsAlpacaStatus, setSettingsAlpacaStatus] = useState("idle");
+  const [settingsLlmKey, setSettingsLlmKey] = useState("");
+  const [settingsLlmEndpoint, setSettingsLlmEndpoint] = useState("");
+  const [settingsRiskStopLoss, setSettingsRiskStopLoss] = useState("5");
+  const [settingsRiskMaxPos, setSettingsRiskMaxPos] = useState("20");
+  const [settingsDailyLossLimit, setSettingsDailyLossLimit] = useState("2000");
+  const [settingsSaveMsg, setSettingsSaveMsg] = useState("");
+
+  // ---- Assistant ----
+  const [assistantPromptsExpanded, setAssistantPromptsExpanded] = useState(false);
+
   const [inFlightOps, setInFlightOps] = useState(0);
   const [activeTaskLabel, setActiveTaskLabel] = useState("");
   const [progressTick, setProgressTick] = useState(Date.now());
 
-  const authState = useMemo(
-    () => ({ apiKey: apiKeyInput.trim(), bearerToken: bearerToken.trim() }),
-    [apiKeyInput, bearerToken]
-  );
-
+  const authState = useMemo(() => ({ apiKey: apiKeyInput.trim(), bearerToken: bearerToken.trim() }), [apiKeyInput, bearerToken]);
   const baseLabel = useMemo(() => `API: ${API_BASE}`, []);
-
   const selectedPresets = useMemo(() => parseCsv(selectedPresetsText), [selectedPresetsText]);
-
   const availablePresets = useMemo(() => {
     const items = presetDetails?.items || presets || [];
     const q = presetSearch.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((name) => String(name).toLowerCase().includes(q));
+    return q ? items.filter((name) => String(name).toLowerCase().includes(q)) : items;
   }, [presetDetails, presets, presetSearch]);
-
   const filteredUniverse = useMemo(() => {
     const q = universePresetFilter.trim().toLowerCase();
     const lim = Math.max(1, Math.min(200, parseNumber(universeLimit, 24)));
-    const rows = q
-      ? (latestUniverse || []).filter((r) => String(r.preset || "").toLowerCase().includes(q))
-      : (latestUniverse || []);
-
-    const sorted = [...rows].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-    return sorted.slice(0, lim);
+    const rows = q ? (latestUniverse || []).filter((r) => String(r.preset || "").toLowerCase().includes(q)) : (latestUniverse || []);
+    return [...rows].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))).slice(0, lim);
   }, [latestUniverse, universePresetFilter, universeLimit]);
-
   const indicatorTail = useMemo(() => (indicatorChart || []).slice(-90), [indicatorChart]);
   const forecastHistory = useMemo(() => (forecastChart?.history || []).slice(-30), [forecastChart]);
   const forecastForward = useMemo(() => forecastChart?.forecast || [], [forecastChart]);
   const seasonalityTail = useMemo(() => {
     const rows = (seasonalityChart || []).map((row, idx) => ({ ...row, _idx: idx }));
-    rows.sort((a, b) => {
-      const ad = Number(a?.doy ?? a?.day_of_year ?? NaN);
-      const bd = Number(b?.doy ?? b?.day_of_year ?? NaN);
-      if (Number.isFinite(ad) && Number.isFinite(bd)) return ad - bd;
-      if (Number.isFinite(ad)) return -1;
-      if (Number.isFinite(bd)) return 1;
-      return Number(a._idx || 0) - Number(b._idx || 0);
-    });
+    rows.sort((a, b) => { const ad = Number(a?.doy ?? a?.day_of_year ?? NaN); const bd = Number(b?.doy ?? b?.day_of_year ?? NaN); if (Number.isFinite(ad) && Number.isFinite(bd)) return ad - bd; if (Number.isFinite(ad)) return -1; if (Number.isFinite(bd)) return 1; return Number(a._idx || 0) - Number(b._idx || 0); });
     return rows;
   }, [seasonalityChart]);
-  const scanHistoryRowsSeries = useMemo(
-    () => (scanHistory || []).slice(0, 20).map((row) => Number(row.rows_saved || 0)).reverse(),
-    [scanHistory]
-  );
-  const scanHistoryDurationSeries = useMemo(
-    () => (scanHistory || []).slice(0, 20).map((row) => Number(row.elapsed_seconds || 0)).reverse(),
-    [scanHistory]
-  );
+  const scanHistoryRowsSeries = useMemo(() => (scanHistory || []).slice(0, 20).map((row) => Number(row.rows_saved || 0)).reverse(), [scanHistory]);
+  const scanHistoryDurationSeries = useMemo(() => (scanHistory || []).slice(0, 20).map((row) => Number(row.elapsed_seconds || 0)).reverse(), [scanHistory]);
   const scanHistoryFiltered = useMemo(() => {
-    const rows = scanHistory || [];
-    if (scanHistoryFilter === "all") return rows;
-    return rows.filter((row) => String(row.status || "").toLowerCase() === scanHistoryFilter);
+    return scanHistoryFilter === "all" ? (scanHistory || []) : (scanHistory || []).filter((row) => String(row.status || "").toLowerCase() === scanHistoryFilter);
   }, [scanHistory, scanHistoryFilter]);
 
   const isWeb = typeof window !== "undefined";
@@ -704,80 +631,10 @@ export default function App() {
   const progressStartedAtRef = useRef(0);
   const assistantRunRef = useRef(0);
 
-  useEffect(() => {
-    if (inFlightOps > 0 && !progressStartedAtRef.current) {
-      progressStartedAtRef.current = Date.now();
-    }
-    if (!inFlightOps) {
-      progressStartedAtRef.current = 0;
-    }
-  }, [inFlightOps]);
-
-  useEffect(() => {
-    if (!inFlightOps) return;
-    const id = setInterval(() => setProgressTick(Date.now()), 250);
-    return () => clearInterval(id);
-  }, [inFlightOps]);
-
-  const loadStoredCredentials = async () => {
-    try {
-      const stored = await AsyncStorage.getItem("quantflow_credentials");
-      if (stored) {
-        const { apiKey, bearerToken: token, rememberMe } = JSON.parse(stored);
-        if (apiKey) setApiKeyInput(apiKey);
-        if (token) setBearerToken(token);
-        setRememberCredentials(rememberMe || false);
-      }
-    } catch (e) {
-      console.error("Failed to load stored credentials:", e);
-    }
-  };
-
-  const saveCredentials = async () => {
-    try {
-      if (rememberCredentials) {
-        await AsyncStorage.setItem("quantflow_credentials", JSON.stringify({
-          apiKey: apiKeyInput.trim(),
-          bearerToken: bearerToken.trim(),
-          rememberMe: true,
-        }));
-      } else {
-        await AsyncStorage.removeItem("quantflow_credentials");
-      }
-    } catch (e) {
-      console.error("Failed to save credentials:", e);
-    }
-  };
-
-  const logoutWorkspace = async () => {
-    await AsyncStorage.removeItem("quantflow_credentials");
-    setApiKeyInput(API_KEY);
-    setBearerToken("");
-    setRememberCredentials(false);
-    setWorkspaceUnlocked(false);
-    setFirebaseAuthCheck(null);
-    setSurface("Public");
-    setScreen("Overview");
-    setStatus("logged out");
-  };
-
-  const progressValue = useMemo(() => {
-    if (!inFlightOps) return 0;
-    const start = progressStartedAtRef.current || progressTick;
-    const elapsedMs = Math.max(0, progressTick - start);
-    const asymptoticPct = 12 + 80 * (1 - Math.exp(-elapsedMs / 2200));
-    return Math.min(92, asymptoticPct);
-  }, [inFlightOps, progressTick]);
-
-  const withProgress = async (label, action) => {
-    setActiveTaskLabel(label);
-    setInFlightOps((value) => value + 1);
-    try {
-      return await action();
-    } finally {
-      setInFlightOps((value) => Math.max(0, value - 1));
-    }
-  };
+  // ---- Progress tracking ----
+  useEffect(() => { if (inFlightOps > 0 && !progressStartedAtRef.current) progressStartedAtRef.current = Date.now(); if (!inFlightOps) progressStartedAtRef.current = 0; }, [inFlightOps]);
+  useEffect(() => { if (!inFlightOps) return; const id = setInterval(() => setProgressTick(Date.now()), 250); return () => clearInterval(id); }, [inFlightOps]);
+  const progressValue = useMemo(() => { if (!inFlightOps) return 0; const elapsedMs = Math.max(0, progressTick - (progressStartedAtRef.current || progressTick)); return Math.min(92, 12 + 80 * (1 - Math.exp(-elapsedMs / 2200))); }, [inFlightOps, progressTick]);
 
   const scannerBusy = inFlightOps > 0 && status.includes("scan");
   const recommendBusy = inFlightOps > 0 && status.includes("recommend");
@@ -789,1454 +646,374 @@ export default function App() {
   const authBusy = inFlightOps > 0 && (settingsSaveStatus === "loading" || settingsSaveStatus === "saving" || status.includes("auth") || status.includes("identity"));
   const scanIsActive = ["queued", "running", "cancel_requested"].includes(scanJobStatus);
 
-  const stopScanPolling = () => {
-    if (scanPollRef.current) {
-      clearInterval(scanPollRef.current);
-      scanPollRef.current = null;
-    }
-  };
+  const withProgress = async (label, action) => { setActiveTaskLabel(label); setInFlightOps((v) => v + 1); try { return await action(); } finally { setInFlightOps((v) => Math.max(0, v - 1)); } };
+
+  const stopScanPolling = () => { if (scanPollRef.current) { clearInterval(scanPollRef.current); scanPollRef.current = null; } };
 
   const applyScanStatus = (snapshot) => {
     if (!snapshot) return;
-    setScanJobId(snapshot.job_id || "");
-    setScanJobStatus(String(snapshot.status || "idle"));
-    setScanProgressPct(Number(snapshot.progress_pct || 0));
-    setScanEtaSeconds(snapshot.eta_seconds);
-    setScanElapsedSeconds(snapshot.elapsed_seconds);
-    setScanCurrentPreset(snapshot.current_preset || "");
-    setScanFailedPresets(snapshot.failed_presets || []);
-    setScanPresetsCompleted(Number(snapshot.presets_completed || 0));
-    setScanPresetCount(Number(snapshot.preset_count || 0));
-    setScanStartedAt(snapshot.started_at || "");
-    setScanFinishedAt(snapshot.finished_at || "");
-    setScanLastMessage(snapshot.message || "");
-
-    const terminalStates = ["completed", "failed", "canceled"];
-    if (terminalStates.includes(String(snapshot.status || ""))) {
-      stopScanPolling();
-      if (snapshot.status === "completed" || snapshot.status === "canceled") {
-        loadOverview();
-      }
-      loadScanHistory(scanHistoryFilter);
-      if (snapshot.status === "completed") {
-        setStatus("scan completed");
-        setScanResult({
-          selected_presets: snapshot.selected_presets || [],
-          preset_count: Number(snapshot.preset_count || 0),
-          rows_saved: Number(snapshot.rows_saved || 0),
-          failed_presets: snapshot.failed_presets || [],
-        });
-      } else if (snapshot.status === "canceled") {
-        setStatus("scan canceled");
-      } else {
-        setStatus("scan failed");
-      }
-    }
+    setScanJobId(snapshot.job_id || ""); setScanJobStatus(String(snapshot.status || "idle")); setScanProgressPct(Number(snapshot.progress_pct || 0));
+    setScanEtaSeconds(snapshot.eta_seconds); setScanElapsedSeconds(snapshot.elapsed_seconds); setScanCurrentPreset(snapshot.current_preset || "");
+    setScanFailedPresets(snapshot.failed_presets || []); setScanPresetsCompleted(Number(snapshot.presets_completed || 0)); setScanPresetCount(Number(snapshot.preset_count || 0));
+    setScanStartedAt(snapshot.started_at || ""); setScanFinishedAt(snapshot.finished_at || ""); setScanLastMessage(snapshot.message || "");
+    if (["completed", "failed", "canceled"].includes(String(snapshot.status || ""))) { stopScanPolling(); if (snapshot.status === "completed" || snapshot.status === "canceled") loadOverview(); loadScanHistory(scanHistoryFilter);
+      if (snapshot.status === "completed") { setStatus("scan completed"); setScanResult({ selected_presets: snapshot.selected_presets || [], preset_count: Number(snapshot.preset_count || 0), rows_saved: Number(snapshot.rows_saved || 0), failed_presets: snapshot.failed_presets || [] }); }
+      else if (snapshot.status === "canceled") setStatus("scan canceled"); else setStatus("scan failed"); }
   };
 
-  const startScanPolling = (jobId) => {
-    stopScanPolling();
-    scanPollRef.current = setInterval(async () => {
-      try {
-        const snap = await apiGet(`/pipeline/scan/status/${encodeURIComponent(jobId)}`, authState);
-        applyScanStatus(snap);
-      } catch (e) {
-        setScanLastMessage(`Status polling error: ${e.message}`);
-      }
-    }, 1200);
-  };
+  const startScanPolling = (jobId) => { stopScanPolling(); scanPollRef.current = setInterval(async () => { try { applyScanStatus(await apiGet(`/pipeline/scan/status/${encodeURIComponent(jobId)}`, authState)); } catch (e) { setScanLastMessage(`Status polling error: ${e.message}`); } }, 1200); };
 
-  const parseUrlState = () => {
-    if (!isWeb) return;
-    try {
-      const params = new URLSearchParams(window.location.search || "");
-      const view = params.get("view");
-      const tab = params.get("tab");
-      const oauthResult = params.get("mcp_oauth");
-
-      if (view === "public") {
-        setSurface("Public");
-      } else if (view === "workspace") {
-        setSurface("Workspace");
-      }
-
-      if (tab && SCREENS.includes(tab)) {
-        setScreen(tab);
-      }
-
-      if (oauthResult === "success") {
-        setMcpOAuthStatus("completed");
-        setStatus("mcp oauth completed");
-        loadMcpStatus();
-        params.delete("mcp_oauth");
-        const qs = params.toString();
-        const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
-        window.history.replaceState({}, "", nextUrl);
-      }
-    } catch (e) {
-      // Ignore malformed URL state and continue with defaults.
-    }
-  };
-
-  const syncUrlState = (nextSurface, nextScreen) => {
-    if (!isWeb) return;
-    try {
-      const params = new URLSearchParams(window.location.search || "");
-      params.set("view", String(nextSurface).toLowerCase());
-      if (nextSurface === "Workspace") {
-        params.set("tab", String(nextScreen));
-      } else {
-        params.delete("tab");
-      }
-      const qs = params.toString();
-      const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
-      window.history.replaceState({}, "", nextUrl);
-    } catch (e) {
-      // URL sync is best-effort for web demo deep linking.
-    }
-  };
+  // ---- URL / localStorage sync ----
+  const syncUrlState = (nextSurface, nextScreen) => { if (!isWeb) return; try { const params = new URLSearchParams(window.location.search || ""); params.set("view", String(nextSurface).toLowerCase()); if (nextSurface === "Workspace") params.set("tab", String(nextScreen)); else params.delete("tab"); window.history.replaceState({}, "", `${window.location.pathname}${params.toString() ? `?${params}` : ""}`); } catch (e) {} };
 
   useEffect(() => {
-    parseUrlState();
-    loadStoredCredentials();
+    if (isWeb) { try { const params = new URLSearchParams(window.location.search || ""); const view = params.get("view"), tab = params.get("tab"), oauthResult = params.get("mcp_oauth"); if (view === "public") setSurface("Public"); else if (view === "workspace") setSurface("Workspace"); if (tab && SCREENS.includes(tab)) setScreen(tab); if (oauthResult === "success") { setMcpOAuthStatus("completed"); setStatus("mcp oauth completed"); loadMcpStatus(); params.delete("mcp_oauth"); window.history.replaceState({}, "", `${window.location.pathname}${params.toString() ? `?${params}` : ""}`); } } catch (e) {} }
+    (async () => {
+      try { const stored = await AsyncStorage.getItem("quantflow_credentials"); if (stored) { const { apiKey, bearerToken: token, rememberMe } = JSON.parse(stored); if (apiKey) setApiKeyInput(apiKey); if (token) setBearerToken(token); setRememberCredentials(rememberMe || false); } } catch (e) {}
+      // Restore assistant conversation from localStorage
+      try { const savedChat = await AsyncStorage.getItem("quantflow_chat"); if (savedChat) { const parsed = JSON.parse(savedChat); setAssistantConversation(Array.isArray(parsed) ? parsed.slice(-20) : []); } } catch (e) {}
+    })();
     loadOverview();
-    return () => {
-      stopScanPolling();
-    };
+    return () => stopScanPolling();
   }, []);
 
+  useEffect(() => { syncUrlState(surface, screen); }, [surface, screen]);
+  useEffect(() => { loadScanHistory(scanHistoryFilter); }, [scanHistoryFilter]);
+
+  // Persist assistant conversation to localStorage when it changes
   useEffect(() => {
-    syncUrlState(surface, screen);
-  }, [surface, screen]);
+    try { AsyncStorage.setItem("quantflow_chat", JSON.stringify(assistantConversation.slice(-20))); } catch (e) {}
+  }, [assistantConversation]);
 
-  useEffect(() => {
-    loadScanHistory(scanHistoryFilter);
-  }, [scanHistoryFilter]);
+  const saveCredentials = async () => { try { if (rememberCredentials) await AsyncStorage.setItem("quantflow_credentials", JSON.stringify({ apiKey: apiKeyInput.trim(), bearerToken: bearerToken.trim(), rememberMe: true })); else await AsyncStorage.removeItem("quantflow_credentials"); } catch (e) {} };
+  const logoutWorkspace = async () => { await AsyncStorage.removeItem("quantflow_credentials"); setApiKeyInput(API_KEY); setBearerToken(""); setRememberCredentials(false); setWorkspaceUnlocked(false); setFirebaseAuthCheck(null); setSurface("Public"); setScreen("Overview"); setStatus("logged out"); };
 
-  const loadMcpStatus = async (options = {}) => {
-    await withProgress("Checking MCP", async () => {
-      try {
-        const [data, readiness, signals] = await Promise.all([
-          apiGet("/broker/mcp/status", authState, options),
-          apiGet("/broker/mcp/readiness", authState, options),
-          apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState, options).catch((e) => ({ error: e.message })),
-        ]);
-        setMcpStatus(data || null);
-        setMcpReadiness(readiness || null);
-        if (signals?.error) {
-          setMcpSignals(null);
-          setMcpSignalsError(String(signals.error));
-        } else {
-          setMcpSignals(signals || null);
-          setMcpSignalsError("");
-        }
-      } catch (e) {
-        setMcpStatus({ connected: false, authenticated: false, error: e.message });
-        setMcpReadiness(null);
-        setMcpSignals(null);
-        setMcpSignalsError(String(e.message));
-      }
-    });
-  };
+  // ====== API CALLS (existing, kept intact) ======
 
-  const connectMcp = async () => {
-    setStatus("connecting mcp");
-    await withProgress("Connecting Robinhood MCP", async () => {
-      try {
-        const [statusData, readinessData, signalsData] = await Promise.all([
-          apiGet("/broker/mcp/status", authState),
-          apiGet("/broker/mcp/readiness", authState),
-          apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState).catch((e) => ({ error: e.message })),
-        ]);
-        setMcpStatus(statusData || null);
-        setMcpReadiness(readinessData || null);
-        if (signalsData?.error) {
-          setMcpSignals(null);
-          setMcpSignalsError(String(signalsData.error));
-        } else {
-          setMcpSignals(signalsData || null);
-          setMcpSignalsError("");
-        }
-        setMcpLoginResult({
-          ok: Boolean(statusData?.authenticated),
-          message: statusData?.authenticated
-            ? "Connected. Robinhood MCP account data is available to QuantFlow."
-            : statusData?.connected
-              ? "Transport is reachable. Complete Robinhood account auth in your MCP client, then re-check."
-              : "MCP transport is not reachable yet. Check endpoint/config and retry.",
-        });
-        setStatus("ready");
-      } catch (e) {
-        setMcpLoginResult({ ok: false, error: e.message });
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const loadMcpStatus = async (options = {}) => { await withProgress("Checking MCP", async () => { try { const [data, readiness, signals] = await Promise.all([apiGet("/broker/mcp/status", authState, options), apiGet("/broker/mcp/readiness", authState, options), apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState, options).catch((e) => ({ error: e.message }))]); setMcpStatus(data || null); setMcpReadiness(readiness || null); if (signals?.error) { setMcpSignals(null); setMcpSignalsError(String(signals.error)); } else { setMcpSignals(signals || null); setMcpSignalsError(""); } } catch (e) { setMcpStatus({ connected: false, authenticated: false, error: e.message }); setMcpReadiness(null); setMcpSignals(null); setMcpSignalsError(String(e.message)); } }); };
 
-  const loadMcpRuntimeConfig = async () => {
-    setMcpConfigStatus("loading");
-    await withProgress("Loading MCP runtime config", async () => {
-      try {
-        const data = await apiGet("/broker/mcp/config", authState);
-        setMcpRuntimeConfig(data || null);
-        const hdr = String(data?.runtime?.auth_header || "Authorization");
-        setMcpHeaderInput(hdr);
-        setMcpConfigStatus("ready");
-      } catch (e) {
-        setMcpConfigStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const connectMcp = async () => { setStatus("connecting mcp"); await withProgress("Connecting Robinhood MCP", async () => { try { const [statusData, readinessData, signalsData] = await Promise.all([apiGet("/broker/mcp/status", authState), apiGet("/broker/mcp/readiness", authState), apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState).catch((e) => ({ error: e.message }))]); setMcpStatus(statusData || null); setMcpReadiness(readinessData || null); if (signalsData?.error) { setMcpSignals(null); setMcpSignalsError(String(signalsData.error)); } else { setMcpSignals(signalsData || null); setMcpSignalsError(""); } setMcpLoginResult({ ok: Boolean(statusData?.authenticated), message: statusData?.authenticated ? "Connected." : statusData?.connected ? "Transport reachable. Complete Robinhood auth." : "MCP not reachable." }); setStatus("ready"); } catch (e) { setMcpLoginResult({ ok: false, error: e.message }); setStatus(`error: ${e.message}`); } }); };
 
-  const saveMcpRuntimeConfig = async () => {
-    setMcpConfigStatus("saving");
-    await withProgress("Saving MCP runtime config", async () => {
-      try {
-        const tokenRaw = mcpBearerInput.trim();
-        if (!tokenRaw) {
-          throw new Error("MCP bearer token is required");
-        }
-        const bearer = tokenRaw.toLowerCase().startsWith("bearer ") ? tokenRaw : `Bearer ${tokenRaw}`;
-        const payload = {
-          auth_header: (mcpHeaderInput || "Authorization").trim() || "Authorization",
-          bearer_token: bearer,
-        };
-        const data = await apiPut("/broker/mcp/config", payload, authState);
-        setMcpRuntimeConfig(data || null);
-        setMcpConfigStatus("saved");
-        setMcpBearerInput("");
-        await loadMcpStatus();
-      } catch (e) {
-        setMcpConfigStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const loadMcpRuntimeConfig = async () => { setMcpConfigStatus("loading"); await withProgress("Loading MCP runtime config", async () => { try { const data = await apiGet("/broker/mcp/config", authState); setMcpRuntimeConfig(data || null); setMcpHeaderInput(String(data?.runtime?.auth_header || "Authorization")); setMcpConfigStatus("ready"); } catch (e) { setMcpConfigStatus(`error: ${e.message}`); } }); };
 
-  const clearMcpRuntimeConfig = async () => {
-    setMcpConfigStatus("clearing");
-    await withProgress("Clearing MCP runtime config", async () => {
-      try {
-        const data = await apiDelete("/broker/mcp/config", authState);
-        setMcpRuntimeConfig(data || null);
-        setMcpConfigStatus("cleared");
-        setMcpBearerInput("");
-        await loadMcpStatus();
-      } catch (e) {
-        setMcpConfigStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const saveMcpRuntimeConfig = async () => { setMcpConfigStatus("saving"); await withProgress("Saving MCP runtime config", async () => { try { const tokenRaw = mcpBearerInput.trim(); if (!tokenRaw) throw new Error("MCP bearer token is required"); const bearer = tokenRaw.toLowerCase().startsWith("bearer ") ? tokenRaw : `Bearer ${tokenRaw}`; await apiPut("/broker/mcp/config", { auth_header: (mcpHeaderInput || "Authorization").trim() || "Authorization", bearer_token: bearer }, authState); setMcpConfigStatus("saved"); setMcpBearerInput(""); await loadMcpStatus(); } catch (e) { setMcpConfigStatus(`error: ${e.message}`); } }); };
 
-  const startMcpBackendOAuth = async () => {
-    setMcpOAuthStatus("starting");
-    await withProgress("Starting backend MCP OAuth", async () => {
-      try {
-        const continueUrl = isWeb
-          ? `${window.location.origin}${window.location.pathname}?view=workspace&tab=Auth`
-          : "";
+  const clearMcpRuntimeConfig = async () => { setMcpConfigStatus("clearing"); await withProgress("Clearing MCP runtime config", async () => { try { await apiDelete("/broker/mcp/config", authState); setMcpRuntimeConfig(null); setMcpConfigStatus("cleared"); setMcpBearerInput(""); await loadMcpStatus(); } catch (e) { setMcpConfigStatus(`error: ${e.message}`); } }); };
 
-        const data = await apiPost(
-          "/broker/mcp/oauth/start",
-          {
-            continue_url: continueUrl,
-          },
-          authState
-        );
+  const startMcpBackendOAuth = async () => { setMcpOAuthStatus("starting"); await withProgress("Starting backend MCP OAuth", async () => { try { const continueUrl = isWeb ? `${window.location.origin}${window.location.pathname}?view=workspace&tab=Auth` : ""; const data = await apiPost("/broker/mcp/oauth/start", { continue_url: continueUrl }, authState); setMcpOAuthStartResult(data || null); setMcpOAuthStatus("ready"); const authUrl = String(data?.authorization_url || "").trim(); if (authUrl && isWeb) { window.open(authUrl, "_blank", "noopener,noreferrer"); setStatus("mcp oauth window opened"); } else if (authUrl) setStatus("open authorization_url from response to continue oauth"); } catch (e) { setMcpOAuthStatus(`error: ${e.message}`); } }); };
 
-        setMcpOAuthStartResult(data || null);
-        setMcpOAuthStatus("ready");
+  const loadScanHistory = async (statusFilter = "all") => { try { const q = statusFilter !== "all" ? `&status=${encodeURIComponent(statusFilter)}` : ""; setScanHistory((await apiGet(`/pipeline/scan/history?limit=24${q}`, authState)).items || []); } catch (e) { setScanLastMessage(`Scan history unavailable: ${e.message}`); } };
 
-        const authUrl = String(data?.authorization_url || "").trim();
-        if (authUrl && isWeb) {
-          window.open(authUrl, "_blank", "noopener,noreferrer");
-          setStatus("mcp oauth window opened");
-        } else if (authUrl) {
-          setStatus("open authorization_url from response to continue oauth");
-        }
-      } catch (e) {
-        setMcpOAuthStatus(`error: ${e.message}`);
-        setMcpOAuthStartResult(null);
-      }
-    });
-  };
+  const loadOverview = async (options = {}) => { setStatus("loading"); await withProgress("Loading overview", async () => { try { const [h, p, pd, i, u, r, o, envv, history] = await Promise.all([apiGet("/health", authState, options), apiGet("/scanner/presets", authState, options), apiGet("/scanner/presets/details", authState, options).catch(() => null), apiGet("/execution/intents?limit=10", authState, options), apiGet("/scanner/latest-universe", authState, options), apiGet("/recommend/latest", authState, options), apiGet("/ops/latest-report", authState, options).catch(() => null), apiGet("/ops/env/validate", authState, options).catch(() => null), apiGet(`/pipeline/scan/history?limit=24${scanHistoryFilter !== "all" ? `&status=${encodeURIComponent(scanHistoryFilter)}` : ""}`, authState, options).catch(() => ({ items: [] }))]); setHealth(h); setOpsReport(o); setEnvValidation(envv); setPresets(p.items || []); setPresetDetails(pd || null); setIntents(i.items || []); setLatestUniverse(u.items || []); setScanUniverseRefreshedAt(new Date().toISOString()); setLatestRecs(r.items || []); setScanHistory(history?.items || []); await loadMcpStatus(options); setStatus("ready"); } catch (e) { setStatus(isAbortError(e) ? "canceled" : `error: ${e.message}`); } }); };
 
-  const loadScanHistory = async (statusFilter = "all") => {
-    try {
-      const q = statusFilter && statusFilter !== "all" ? `&status=${encodeURIComponent(statusFilter)}` : "";
-      const data = await apiGet(`/pipeline/scan/history?limit=24${q}`, authState);
-      setScanHistory(data.items || []);
-    } catch (e) {
-      setScanLastMessage(`Scan history unavailable: ${e.message}`);
-    }
-  };
+  const togglePreset = (name) => { const set = new Set(selectedPresets); if (set.has(name)) set.delete(name); else set.add(name); setSelectedPresetsText(Array.from(set).join(",")); };
+  const selectPresetCategory = (name) => setSelectedPresetsText((presetDetails?.categories?.[name] || []).join(","));
 
-  const loadOverview = async (options = {}) => {
-    setStatus("loading");
-    await withProgress("Loading overview", async () => {
-      try {
-        const [h, p, pd, i, u, r, o, envv, history] = await Promise.all([
-          apiGet("/health", authState, options),
-          apiGet("/scanner/presets", authState, options),
-          apiGet("/scanner/presets/details", authState, options).catch(() => null),
-          apiGet("/execution/intents?limit=10", authState, options),
-          apiGet("/scanner/latest-universe", authState, options),
-          apiGet("/recommend/latest", authState, options),
-          apiGet("/ops/latest-report", authState, options).catch(() => null),
-          apiGet("/ops/env/validate", authState, options).catch(() => null),
-          apiGet(`/pipeline/scan/history?limit=24${scanHistoryFilter !== "all" ? `&status=${encodeURIComponent(scanHistoryFilter)}` : ""}`, authState, options).catch(() => ({ items: [] })),
-        ]);
-        setHealth(h);
-        setOpsReport(o);
-        setEnvValidation(envv);
-        setPresets(p.items || []);
-        setPresetDetails(pd || null);
-        setIntents(i.items || []);
-        setLatestUniverse(u.items || []);
-        setScanUniverseRefreshedAt(new Date().toISOString());
-        setLatestRecs(r.items || []);
-        setScanHistory(history?.items || []);
-        await loadMcpStatus(options);
-        setStatus("ready");
-      } catch (e) {
-        if (isAbortError(e)) {
-          setStatus("canceled");
-          return;
-        }
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const signInWithGoogleWeb = async () => { if (!isWeb) { setGoogleSignInStatus("Google popup login is available on web builds only."); return; } setGoogleSignInStatus("starting"); await withProgress("Signing in", async () => { try { if (!FIREBASE_WEB_CONFIG.apiKey || !FIREBASE_WEB_CONFIG.authDomain || !FIREBASE_WEB_CONFIG.projectId || !FIREBASE_WEB_CONFIG.appId) throw new Error("Missing EXPO_PUBLIC_FIREBASE_* config variables for web login"); const [{ initializeApp, getApps }, { getAuth, GoogleAuthProvider, signInWithPopup }] = await Promise.all([import("firebase/app"), import("firebase/auth")]); const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_WEB_CONFIG); const result = await signInWithPopup(getAuth(app), new GoogleAuthProvider()); const idToken = await result.user.getIdToken(); setBearerToken(idToken); setGoogleSignInStatus(`signed in as ${result.user.email || result.user.uid}`); await checkFirebaseIdentity(); } catch (e) { setGoogleSignInStatus(`error: ${e.message}`); } }); };
 
-  const togglePreset = (name) => {
-    const set = new Set(selectedPresets);
-    if (set.has(name)) {
-      set.delete(name);
-    } else {
-      set.add(name);
-    }
-    setSelectedPresetsText(Array.from(set).join(","));
-  };
+  const checkFirebaseIdentity = async () => { setStatus("checking identity"); await withProgress("Checking identity", async () => { try { setFirebaseAuthCheck(await apiGet("/auth/me", authState)); setStatus("ready"); } catch (e) { setFirebaseAuthCheck({ authenticated: false, error: e.message }); setStatus(`error: ${e.message}`); } }); };
 
-  const selectPresetCategory = (categoryName) => {
-    const items = presetDetails?.categories?.[categoryName] || [];
-    setSelectedPresetsText(items.join(","));
-  };
+  const unlockWorkspace = async () => { setStatus("auth check"); await withProgress("Unlocking workspace", async () => { try { setFirebaseAuthCheck(await apiGet("/auth/me", authState)); setWorkspaceUnlocked(true); setSurface("Workspace"); await saveCredentials(); setStatus("ready"); } catch (e) { setFirebaseAuthCheck({ authenticated: false, error: e.message }); setWorkspaceUnlocked(false); setStatus(`error: ${e.message}`); } }); };
 
-  const signInWithGoogleWeb = async () => {
-    if (!isWeb) {
-      setGoogleSignInStatus("Google popup login is available on web builds only.");
-      return;
-    }
-    setGoogleSignInStatus("starting");
-    await withProgress("Signing in", async () => {
-      try {
-      if (!FIREBASE_WEB_CONFIG.apiKey || !FIREBASE_WEB_CONFIG.authDomain || !FIREBASE_WEB_CONFIG.projectId || !FIREBASE_WEB_CONFIG.appId) {
-        throw new Error("Missing EXPO_PUBLIC_FIREBASE_* config variables for web login");
-      }
+  const unlockWorkspaceLocal = async () => { setFirebaseAuthCheck({ mode: "local-dev", authenticated: true, note: "Workspace unlocked without token because API auth is disabled." }); setWorkspaceUnlocked(true); setSurface("Workspace"); await saveCredentials(); setStatus("ready"); };
 
-      const [{ initializeApp, getApps }, { getAuth, GoogleAuthProvider, signInWithPopup }] = await Promise.all([
-        import("firebase/app"),
-        import("firebase/auth"),
-      ]);
+  const loadUserSettings = async () => { setSettingsSaveStatus("loading"); await withProgress("Loading user settings", async () => { try { const data = await apiGet("/user/settings", authState); setUserSettingsData(data); setUserSettingsText(JSON.stringify(data.settings || {}, null, 2)); setSettingsSaveStatus("ready"); } catch (e) { setUserSettingsData({ ok: false, error: e.message }); setSettingsSaveStatus(`error: ${e.message}`); } }); };
 
-      const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_WEB_CONFIG);
-      const auth = getAuth(app);
-      const provider = new GoogleAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      const idToken = await result.user.getIdToken();
-      setBearerToken(idToken);
-      setGoogleSignInStatus(`signed in as ${result.user.email || result.user.uid}`);
-      await checkFirebaseIdentity();
-      } catch (e) {
-        setGoogleSignInStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const saveUserSettings = async () => { setSettingsSaveStatus("saving"); await withProgress("Saving user settings", async () => { try { const data = await apiPut("/user/settings", { settings: JSON.parse(userSettingsText || "{}") }, authState); setUserSettingsData(data); setSettingsSaveStatus("saved"); } catch (e) { setSettingsSaveStatus(`error: ${e.message}`); } }); };
+
+  const runScanPipeline = async () => { stopScanPolling(); setScanProgressPct(0); setScanEtaSeconds(null); setScanElapsedSeconds(null); setScanCurrentPreset(""); setScanFailedPresets([]); setScanPresetsCompleted(0); setScanPresetCount(0); setScanFinishedAt(""); setScanLastMessage("Scan queued"); setStatus("scan running"); await withProgress("Running scan", async () => { try { const start = await apiPost("/pipeline/scan/start", { db: dbPath, parallel: scanParallel, max_workers: Math.max(1, Math.min(16, parseNumber(scanWorkers, 4))), presets: selectedPresets.length ? selectedPresets : null }, authState); applyScanStatus(start); startScanPolling(start.job_id); setStatus("scan running"); } catch (e) { stopScanPolling(); setScanLastMessage(`Scan failed: ${e.message}`); setScanFinishedAt(new Date().toISOString()); setStatus(`error: ${e.message}`); } }); };
+
+  const cancelScanPipeline = () => { if (!scanJobId || !scanIsActive) return; setStatus("scan cancel requested"); apiPost(`/pipeline/scan/cancel/${encodeURIComponent(scanJobId)}`, {}, authState).then((snap) => applyScanStatus(snap)).catch((e) => setScanLastMessage(`Cancel failed: ${e.message}`)); };
+
+  const runRecommendPipeline = async () => { setStatus("recommend running"); await withProgress("Running recommendations", async () => { try { setRecommendResult(await apiPost("/pipeline/recommend", { db: dbPath, tickers: parseTickers(recommendTickersText), save: recommendSave }, authState) || null); await loadOverview(); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadBacktest = async () => { setStatus("running backtest"); setBacktestStep(-1); await withProgress("Running backtest", async () => { try { const endQ = backtestEnd.trim() ? `&end=${encodeURIComponent(backtestEnd.trim())}` : ""; const tickerSafe = encodeURIComponent(ticker); const periodQuery = encodeURIComponent(analyticsPeriod || "2y"); const intervalQuery = encodeURIComponent(analyticsInterval || "1d"); const [data, indicators, seasonality, summary, timeline] = await Promise.all([apiGet(`/backtest/short-term?ticker=${tickerSafe}&start=${encodeURIComponent(backtestStart)}${endQ}&entry_rsi_threshold=${encodeURIComponent(parseNumber(backtestEntryRsi, 50))}&max_hold_days=${encodeURIComponent(Math.max(1, parseNumber(backtestMaxHoldDays, 7)))}&stop_loss_pct=${encodeURIComponent(Math.max(0, parseNumber(backtestStopLossPct, 0)))}&ma_filter=${encodeURIComponent((backtestMaFilter || "sma20").trim().toLowerCase())}&take_profit_pct=${encodeURIComponent(Math.max(0, parseNumber(backtestTakeProfitPct, 0)))}&ma_trend_filter=${encodeURIComponent((backtestMaTrendFilter || "none").trim().toLowerCase())}`, authState), apiGet(`/charts/indicators?ticker=${tickerSafe}&period=${periodQuery}&interval=${intervalQuery}`, authState).catch(() => null), apiGet(`/charts/seasonality?ticker=${tickerSafe}&years=10`, authState).catch(() => null), apiGet(`/news/summary?ticker=${tickerSafe}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&sentiment=${encodeURIComponent(newsSentiment)}&max_groups=8`, authState).catch(() => null), apiGet(`/news/timeline?ticker=${tickerSafe}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&period=${periodQuery}&interval=${intervalQuery}&sentiment=${encodeURIComponent(newsSentiment)}&max_articles=24`, authState).catch(() => null)]); setBacktestSummary(data.summary || null); setBacktestEquity(data.equity || []); if (indicators?.items) setIndicatorChart(indicators.items); if (seasonality?.items) setSeasonalityChart(seasonality.items); if (summary) setNewsSummary(summary); if (timeline) setNewsTimeline(timeline); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadPortfolio = async () => { setStatus("loading portfolio"); await withProgress("Loading portfolio", async () => { try { const [statusData, signalsData, positionData] = await Promise.all([apiGet("/broker/mcp/status", authState).catch(() => null), apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState).catch(() => null), apiGet("/portfolio/positions", authState).catch(() => null)]); if (statusData?.account) setPortfolioAccount(statusData.account); if (signalsData?.signals) { setMcpSignals(signalsData); const metrics = calcPortfolioMetrics(signalsData); setPortfolioMetrics(metrics); } if (positionData?.positions) setPortfolioPositions(positionData.positions); if (positionData?.equity_curve) setPortfolioEquity(positionData.equity_curve); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadTradeData = async () => { setStatus("loading trade data"); await withProgress("Loading trade data", async () => { try { const [orders, positions] = await Promise.all([apiGet("/execution/intents?limit=30", authState).catch(() => ({ items: [] })), apiGet("/portfolio/positions", authState).catch(() => ({ positions: [] }))]); setTradeOrderHistory(orders.items || []); setTradeActivePositions(positions.positions || []); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadMarketData = async () => { setStatus("loading market data"); await withProgress("Loading market data", async () => { try { const tickerSafe = encodeURIComponent(marketTicker); const [indicators, forecast] = await Promise.all([apiGet(`/charts/indicators?ticker=${tickerSafe}&period=1y&interval=${encodeURIComponent(marketTimeframe)}`, authState).catch(() => null), apiGet(`/charts/forecast?ticker=${tickerSafe}&period=1y&interval=${encodeURIComponent(marketTimeframe)}&horizon=21`, authState).catch(() => null)]); if (indicators?.items) setMarketIndicators(indicators.items); if (forecast) setMarketForecast(forecast); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const testAlpacaConnection = async () => { setSettingsAlpacaStatus("testing"); await withProgress("Testing Alpaca", async () => { try { const data = await apiPost("/settings/test-alpaca", { key: settingsAlpacaKey, secret: settingsAlpacaSecret }, authState); setSettingsAlpacaStatus(data?.ok ? "connected" : `failed: ${data?.error || "unknown"}`); } catch (e) { setSettingsAlpacaStatus(`error: ${e.message}`); } }); };
+
+  const saveAppSettings = async () => { setSettingsSaveMsg("saving..."); await withProgress("Saving settings", async () => { try { await apiPut("/settings/save", { risk_stop_loss_pct: parseNumber(settingsRiskStopLoss, 5), risk_max_position_pct: parseNumber(settingsRiskMaxPos, 20), daily_loss_limit: parseNumber(settingsDailyLossLimit, 2000), llm_key: settingsLlmKey, llm_endpoint: settingsLlmEndpoint }, authState); setSettingsSaveMsg("Settings saved successfully"); setTimeout(() => setSettingsSaveMsg(""), 3000); } catch (e) { setSettingsSaveMsg(`Error: ${e.message}`); } }); };
+
+  const executePaperTrade = async () => { setStatus("placing paper trade"); await withProgress("Paper trade", async () => { try { const payload = { ticker: tradeTicker.toUpperCase(), action: tradeAction, qty: parseNumber(tradeQty, 10) }; if (tradeStopLoss.trim()) payload.stop_loss = parseNumber(tradeStopLoss, 0); if (tradeTakeProfit.trim()) payload.take_profit = parseNumber(tradeTakeProfit, 0); await apiPost("/trade/paper", payload, authState); await loadTradeData(); setStatus("trade placed"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  // ====== Existing API calls continued ======
+  const loadOptions = async () => { setStatus("loading options"); await withProgress("Loading options", async () => { try { const data = await apiGet(`/options/ideas?ticker=${encodeURIComponent(ticker)}&horizon=${encodeURIComponent(horizon)}&bias=${encodeURIComponent(optionsBias)}&budget=${encodeURIComponent(parseNumber(optionsBudget, 300))}`, authState); setOptionIdeas(data.items || []); setOptionsResultMeta({ count: data.count || 0, horizon, bias: optionsBias, budget: parseNumber(optionsBudget, 300) }); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const cacheMarketSeries = async () => { setStatus("caching market series"); await withProgress("Caching yfinance series", async () => { try { const data = await apiPost(`/market/series/cache?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(analyticsPeriod)}&interval=${encodeURIComponent(analyticsInterval)}`, {}, authState); setMarketSeriesCache(data || null); if (data?.items?.length) setIndicatorChart(data.items); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadAnalytics = async () => { setStatus("loading analytics"); await withProgress("Loading analytics", async () => { try { const tickerList = parseTickers(analyticsTickersText) || [ticker]; const rankQuery = encodeURIComponent(tickerList.join(",")); const periodQuery = encodeURIComponent(analyticsPeriod); const intervalQuery = encodeURIComponent(analyticsInterval); const [ranked, indicators, seasonality, distribution, forecast, summary, timeline, performanceCompare, seasonalityCompare] = await Promise.all([apiGet(`/recommend/analyze?tickers=${rankQuery}&period=${periodQuery}&interval=${intervalQuery}&limit=${Math.min(12, tickerList.length)}`, authState), apiGet(`/charts/indicators?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}`, authState), apiGet(`/charts/seasonality?ticker=${encodeURIComponent(ticker)}&years=10`, authState), apiGet(`/charts/price-distribution?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}&bins=${encodeURIComponent(parseNumber(analyticsBins, 24))}`, authState), apiGet(`/charts/forecast?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}&horizon=${encodeURIComponent(parseNumber(analyticsHorizon, 30))}`, authState), apiGet(`/news/summary?ticker=${encodeURIComponent(ticker)}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&sentiment=${encodeURIComponent(newsSentiment)}&max_groups=8`, authState), apiGet(`/news/timeline?ticker=${encodeURIComponent(ticker)}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&period=${periodQuery}&interval=${intervalQuery}&sentiment=${encodeURIComponent(newsSentiment)}&max_articles=24`, authState), apiGet(`/charts/performance-compare?tickers=${rankQuery}&period=${periodQuery}&interval=${intervalQuery}&base=${encodeURIComponent(parseNumber(compareBase, 100))}`, authState), apiGet(`/charts/seasonality-compare?ticker=${encodeURIComponent(ticker)}&years=${encodeURIComponent(Math.max(3, Math.min(20, parseNumber(seasonalityYears, 10))))}&sector=${encodeURIComponent(seasonalitySectorOverride || "")}&sector_etf=${encodeURIComponent(seasonalityEtfOverride || "")}`, authState)]); setAnalyticsRanked(ranked.items || []); setAnalyticsSaveResult(null); setIndicatorChart(indicators.items || []); setSeasonalityChart(seasonality.items || []); setDistributionChart(distribution || null); setForecastChart(forecast || null); setNewsSummary(summary || null); setNewsTimeline(timeline || null); setPerformanceCompareChart(performanceCompare || null); setSeasonalityCompareChart(seasonalityCompare || null); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadChartsFast = async () => { setStatus("loading charts"); await withProgress("Loading core charts", async () => { try { const periodQuery = encodeURIComponent(analyticsPeriod); const intervalQuery = encodeURIComponent(analyticsInterval); const years = encodeURIComponent(Math.max(3, Math.min(20, parseNumber(seasonalityYears, 10)))); const [indicators, seasonality, seasonalityCompare] = await Promise.all([apiGet(`/charts/indicators?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}`, authState), apiGet(`/charts/seasonality?ticker=${encodeURIComponent(ticker)}&years=${years}`, authState), apiGet(`/charts/seasonality-compare?ticker=${encodeURIComponent(ticker)}&years=${years}&sector=${encodeURIComponent(seasonalitySectorOverride || "")}&sector_etf=${encodeURIComponent(seasonalityEtfOverride || "")}`, authState)]); setIndicatorChart(indicators.items || []); setSeasonalityChart(seasonality.items || []); setSeasonalityCompareChart(seasonalityCompare || null); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const saveAnalyticsLeaderboard = async () => { setStatus("saving analytics leaderboard"); await withProgress("Saving leaderboard", async () => { try { const tickerList = parseTickers(analyticsTickersText) || [ticker]; const data = await apiPost("/analytics/leaderboard", { db: dbPath, tickers: tickerList, period: analyticsPeriod, interval: analyticsInterval, limit: Math.min(12, tickerList.length), save: true, forecast_horizon: Math.max(5, Math.min(90, parseNumber(analyticsHorizon, 30))) }, authState); setAnalyticsRanked(data.items || []); setAnalyticsLatest(data.items || []); setAnalyticsBatchId(data.batch_id || ""); setAnalyticsSaveResult(data || null); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadLatestAnalyticsLeaderboard = async () => { setStatus("loading latest leaderboard"); await withProgress("Loading latest leaderboard", async () => { try { const data = await apiGet(`/analytics/leaderboard/latest?db=${encodeURIComponent(dbPath)}`, authState); setAnalyticsLatest(data.items || []); setAnalyticsBatchId(data.batch_id || ""); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const loadSignals = async () => { setSignalsLoading(true); setStatus("loading signals"); await withProgress("Loading signals", async () => { try { setSignalsData(await apiGet(`/signals/generate?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(signalsTimeframe)}&lookback_bars=120&detectors=breakout,rsi,macd,pullback`, authState) || null); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } finally { setSignalsLoading(false); } }); };
+
+  const loadTrainingFeatures = async () => { setStatus("loading training features"); await withProgress("Loading training features", async () => { try { const tickerList = parseTickers(analyticsTickersText) || [ticker]; setTrainingFeatures((await apiGet(`/analytics/training-features?tickers=${encodeURIComponent(tickerList.join(","))}&period=${encodeURIComponent(analyticsPeriod)}&interval=${encodeURIComponent(analyticsInterval)}&forecast_horizon=${encodeURIComponent(parseNumber(analyticsHorizon, 30))}&limit=${encodeURIComponent(Math.min(12, tickerList.length))}`, authState)).items || []); setStatus("ready"); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  const proposeOrder = async () => { setStatus("proposing"); await withProgress("Proposing order", async () => { try { setExecutionResult(await apiPost("/execution/propose", { ticker, action: executionAction, qty: parseNumber(executionQty, 1), notional: parseNumber(notional, 0), orders_today: parseNumber(executionOrdersToday, 0), position_notional_after: parseNumber(executionPositionAfter, parseNumber(notional, 0)), broker_mode: executionBrokerMode, auto: executionAuto, max_daily_notional: parseNumber(executionMaxDaily, 5000), max_orders_per_day: parseNumber(executionMaxOrders, 20), max_position_notional: parseNumber(executionMaxPosition, 2000), db: dbPath }, authState) || null); await loadOverview(); } catch (e) { setStatus(`error: ${e.message}`); } }); };
+
+  // ====== Assistant with state context injection ======
+  const buildAssistantContext = () => ({ portfolio: { account: portfolioAccount, signals: mcpSignals?.signals?.length || 0, positions: portfolioPositions.length }, signals: (mcpSignals?.signals || []).slice(0, 5).map(s => ({ ticker: s.ticker, action: s.action || s.signal, strength: s.strength || s.score })), activeTab: screen, backtestState: backtestSummary ? { ticker, n_trades: backtestSummary.n_trades, win_rate: backtestSummary.win_rate, sharpe: backtestSummary.sharpe } : null });
 
   const askAssistant = async () => {
     const userMessage = assistantInput.trim();
     if (!userMessage) return;
-    const runId = Date.now();
-    assistantRunRef.current = runId;
+    const runId = Date.now(); assistantRunRef.current = runId;
     const userTurn = { role: "user", content: userMessage, ts: new Date().toISOString() };
-    setAssistantConversation((prev) => [...prev, userTurn]);
-    setAssistantInput("");
-    setAssistantAutoResults([]);
-    setAssistantAutoSummary(null);
+    setAssistantConversation((prev) => [...prev, userTurn]); setAssistantInput(""); setAssistantAutoResults([]); setAssistantAutoSummary(null);
     setStatus("assistant query");
     await withProgress("Running assistant query", async () => {
       try {
-        const data = await apiPost("/assistant/query", { message: userMessage, db: "sqlite:///quantflow.db" }, authState);
+        const ctx = buildAssistantContext();
+        const data = await apiPost("/assistant/query", { message: `[Context: ${JSON.stringify(ctx)}] ${userMessage}`, db: "sqlite:///quantflow.db" }, authState);
         let enhanced = data || null;
-        const userLower = userMessage.toLowerCase();
-        const answerText = String(data?.answer || "").toLowerCase();
-        const isGeneric = answerText.includes("i can answer from offline quantflow data") || answerText.includes("ask for mcp status");
-        const asksRanking = /rank|best|high conviction|top|opportunit/.test(userLower);
-        const asksMultiFactor = /technical|seasonal|seasonality|temporal|sentiment/.test(userLower);
-        const asksMcp = /mcp|robinhood|broker|account auth|login/.test(userLower);
-        const isSmallTalk = /^[\W_]+$/.test(userLower) || /^(hi|hello|hey|yo|how are you|how r you|thanks|thank you|ok|okay|cool)$/.test(userLower);
-        const asksCapabilities = /what else can you do|what can you do|what do you do|\bhelp\b|\bcapabilities\b/.test(userLower);
-        const shouldAutoRankEnhance = (asksRanking || asksMultiFactor) && !isSmallTalk;
-        const shouldSuppressAutoRun = isSmallTalk || asksCapabilities;
+        const userLower = userMessage.toLowerCase(), answerText = String(data?.answer || "").toLowerCase();
+        const isSmallTalk = /^(hi|hello|hey|yo|thanks|thank you|ok|okay|cool)$/.test(userLower);
+        const shouldSuppressAutoRun = isSmallTalk;
 
-        if (asksMcp) {
-          const [statusData, readinessData, signalsData] = await Promise.all([
-            apiGet("/broker/mcp/status", authState).catch((e) => ({ error: e.message })),
-            apiGet("/broker/mcp/readiness", authState).catch((e) => ({ error: e.message })),
-            apiGet("/portfolio/signals?broker_mode=robinhood_mcp", authState).catch((e) => ({ error: e.message })),
-          ]);
-
-          if (!statusData?.error) setMcpStatus(statusData || null);
-          if (!readinessData?.error) setMcpReadiness(readinessData || null);
-          if (!signalsData?.error) {
-            setMcpSignals(signalsData || null);
-            setMcpSignalsError("");
-          } else {
-            setMcpSignalsError(String(signalsData.error || ""));
-          }
-
-          const readyState = statusData?.authenticated
-            ? "authenticated"
-            : statusData?.connected
-              ? "transport connected but account auth incomplete"
-              : "not connected";
-          const signalCount = Number(signalsData?.count || 0);
-          const nextSteps = (readinessData?.next_steps || []).slice(0, 3).join(" ");
-
-          enhanced = {
-            ...(enhanced || {}),
-            answer: `Robinhood MCP status is ${readyState}. Portfolio signal rows available: ${signalCount}. ${nextSteps || "Use Check MCP and Connect Robinhood, then complete account auth in your MCP client session and re-check."}`,
-            suggested_tool_calls: [
-              { name: "check_mcp_status", method: "GET", path: "/broker/mcp/status" },
-              { name: "check_mcp_readiness", method: "GET", path: "/broker/mcp/readiness" },
-              { name: "load_portfolio_signals", method: "GET", path: "/portfolio/signals?broker_mode=robinhood_mcp" },
-            ],
-          };
+        // Auto-enhance ranking queries
+        if (/rank|best|top|opportunit|technical|seasonal|sentiment/.test(userLower) && !isSmallTalk) {
+          try {
+            const latest = await apiGet("/recommend/latest?limit=30", authState).catch(() => ({ items: [] }));
+            const rows = (latest?.items || []).map((row) => { const entry = Number(row.entry || 0), target = Number(row.target || 0), confidence = Number(row.confidence || 0), bias = String(row.bias || "neutral").toLowerCase(), edge = entry > 0 ? (target - entry) / entry : 0; return { ticker: String(row.ticker || "").toUpperCase(), horizon: String(row.horizon || ""), bias, confidence, edge, conviction: confidence * 0.7 + Math.max(-1, Math.min(1, edge)) * 0.3 }; }).filter((row) => row.ticker && row.bias !== "neutral");
+            const best = [], seen = new Set(); rows.sort((a, b) => b.conviction - a.conviction); for (const row of rows) { if (seen.has(row.ticker)) continue; seen.add(row.ticker); best.push(row); if (best.length >= 5) break; }
+            if (best.length) { const top = best.slice(0, 5); enhanced = { ...(data || {}), answer: `Top ranked: ${top.map(r => `${r.ticker} (${r.bias}, conf ${fmtNumber(r.confidence, 2)}, edge ${fmtPct(r.edge)})`).join("; ")}`, opportunities: top }; }
+          } catch (e) {}
         }
 
-        if (shouldAutoRankEnhance || (isGeneric && !isSmallTalk && (asksRanking || asksMultiFactor))) {
-          const latest = await apiGet("/recommend/latest?limit=30", authState).catch(() => ({ items: [] }));
-          const rows = (latest?.items || []).map((row) => {
-            const entry = Number(row.entry || 0);
-            const target = Number(row.target || 0);
-            const confidence = Number(row.confidence || 0);
-            const bias = String(row.bias || "neutral").toLowerCase();
-            const edge = entry > 0 ? (target - entry) / entry : 0;
-            const conviction = confidence * 0.7 + Math.max(-1, Math.min(1, edge)) * 0.3;
-            return {
-              ticker: String(row.ticker || "").toUpperCase(),
-              horizon: String(row.horizon || ""),
-              bias,
-              confidence,
-              edge,
-              conviction,
-            };
-          }).filter((row) => row.ticker && row.bias !== "neutral");
-
-          const bestByTicker = [];
-          const seen = new Set();
-          rows.sort((a, b) => b.conviction - a.conviction || b.confidence - a.confidence);
-          for (const row of rows) {
-            if (seen.has(row.ticker)) continue;
-            seen.add(row.ticker);
-            bestByTicker.push(row);
-            if (bestByTicker.length >= 6) break;
-          }
-
-          if (bestByTicker.length) {
-            const top = bestByTicker.slice(0, 5);
-            const primary = top[0].ticker;
-            const bullet = top.map((r) => `${r.ticker} (${r.bias}, conf ${fmtNumber(r.confidence, 2)}, edge ${fmtPct(r.edge)})`).join("; ");
-            enhanced = {
-              ...(data || {}),
-              answer: `Top ranked opportunities from your latest local recommendations: ${bullet}. Use the actions below to run technical, seasonality/temporal, and sentiment analysis immediately.`,
-              opportunities: top,
-              suggested_tool_calls: [
-                { name: "load_recommend_latest", method: "GET", path: "/recommend/latest" },
-                { name: "analyze_top_basket", method: "GET", path: `/recommend/analyze?tickers=${encodeURIComponent(top.map((r) => r.ticker).join(","))}&period=${encodeURIComponent(analyticsPeriod)}&interval=${encodeURIComponent(analyticsInterval)}&limit=${top.length}` },
-                { name: "indicators_primary", method: "GET", path: `/charts/indicators?ticker=${encodeURIComponent(primary)}&period=${encodeURIComponent(analyticsPeriod)}&interval=${encodeURIComponent(analyticsInterval)}` },
-                { name: "seasonality_primary", method: "GET", path: `/charts/seasonality-compare?ticker=${encodeURIComponent(primary)}&years=${encodeURIComponent(Math.max(3, Math.min(20, parseNumber(seasonalityYears, 10))))}` },
-                { name: "sentiment_primary", method: "GET", path: `/news/summary?ticker=${encodeURIComponent(primary)}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&sentiment=${encodeURIComponent(newsSentiment)}&max_groups=8` },
-                { name: "check_mcp", method: "GET", path: "/broker/mcp/status" },
-              ],
-            };
-          }
-        }
-
-        setAssistantResponse(enhanced || null);
-        setAssistantActionResult(null);
-        const assistantTurn = {
-          role: "assistant",
-          content: enhanced?.answer || (enhanced ? compactJson(enhanced, 800) : "No response."),
-          suggested_tool_calls: enhanced?.suggested_tool_calls || [],
-          summary: enhanced?.summary || null,
-          ts: new Date().toISOString(),
-        };
+        setAssistantResponse(enhanced || null); setAssistantActionResult(null);
+        const assistantTurn = { role: "assistant", content: enhanced?.answer || (enhanced ? compactJson(enhanced, 800) : "No response."), suggested_tool_calls: enhanced?.suggested_tool_calls || [], summary: enhanced?.summary || null, ts: new Date().toISOString() };
         setAssistantConversation((prev) => [...prev, assistantTurn]);
 
         if (assistantAutoRunGet && !shouldSuppressAutoRun) {
-          const autoCalls = (enhanced?.suggested_tool_calls || [])
-            .filter((c) => String(c?.method || "GET").toUpperCase() === "GET")
-            .slice(0, 3);
-          if (autoCalls.length) {
-            const results = [];
-            for (const call of autoCalls) {
-              if (assistantRunRef.current !== runId) return;
-              try {
-                const result = await apiGet(call.path, authState);
-                results.push({ ok: true, call, result });
-                if (call.path.includes("/broker/mcp/status")) setMcpStatus(result || null);
-                if (call.path.includes("/broker/mcp/readiness")) setMcpReadiness(result || null);
-                if (call.path.includes("/portfolio/signals")) {
-                  setMcpSignals(result || null);
-                  setMcpSignalsError("");
-                }
-              } catch (e) {
-                results.push({ ok: false, call, error: e.message });
-              }
-            }
-            if (assistantRunRef.current !== runId) return;
-            setAssistantAutoResults(results);
-            const okCount = results.filter((r) => r.ok).length;
-            setAssistantAutoSummary({
-              ts: new Date().toISOString(),
-              total: results.length,
-              ok: okCount,
-              failed: results.length - okCount,
-            });
-          }
+          const autoCalls = (enhanced?.suggested_tool_calls || []).filter((c) => String(c?.method || "GET").toUpperCase() === "GET").slice(0, 3);
+          if (autoCalls.length) { const results = []; for (const call of autoCalls) { if (assistantRunRef.current !== runId) return; try { results.push({ ok: true, call, result: await apiGet(call.path, authState) }); } catch (e) { results.push({ ok: false, call, error: e.message }); } } if (assistantRunRef.current !== runId) return; setAssistantAutoResults(results); const okCount = results.filter(r => r.ok).length; setAssistantAutoSummary({ ts: new Date().toISOString(), total: results.length, ok: okCount, failed: results.length - okCount }); }
         }
         setStatus("ready");
-      } catch (e) {
-        setAssistantConversation((prev) => [...prev, { role: "assistant", content: `Error: ${e.message}`, ts: new Date().toISOString() }]);
-        setStatus(`error: ${e.message}`);
-      }
+      } catch (e) { setAssistantConversation((prev) => [...prev, { role: "assistant", content: `Error: ${e.message}`, ts: new Date().toISOString() }]); setStatus(`error: ${e.message}`); }
     });
   };
 
-  const executeSuggestedToolCall = async (call) => {
-    setStatus(`run ${call.name || "action"}`);
-    await withProgress(`Running ${call.name || "action"}`, async () => {
-      try {
-      const method = (call.method || "GET").toUpperCase();
-      if (method === "POST" && assistantDryRun) {
-        setAssistantActionResult({
-          ok: true,
-          dryRun: true,
-          call,
-          result: {
-            message: "Dry-run mode: POST action not executed.",
-            would_call: call.path,
-            payload: call.payload || {},
-          },
-        });
-        setStatus("ready");
-        return;
-      }
+  const executeSuggestedToolCall = async (call) => { setStatus(`run ${call.name || "action"}`); await withProgress(`Running ${call.name || "action"}`, async () => { try { const method = (call.method || "GET").toUpperCase(); if (method === "POST" && assistantDryRun) { setAssistantActionResult({ ok: true, dryRun: true, call, result: { message: "Dry-run mode: POST action not executed.", would_call: call.path, payload: call.payload || {} } }); setStatus("ready"); return; } const result = method === "POST" ? await apiPost(call.path, call.payload || {}, authState) : await apiGet(call.path, authState); setAssistantActionResult({ ok: true, call, result }); await loadOverview(); setStatus("ready"); } catch (e) { setAssistantActionResult({ ok: false, call, error: e.message }); setStatus(`error: ${e.message}`); } }); };
+  const requestExecuteAction = (call) => { if ((call.method || "GET").toUpperCase() === "POST") { setPendingAction(call); return; } executeSuggestedToolCall(call); };
+  const confirmPendingAction = async () => { if (!pendingAction) return; const call = pendingAction; setPendingAction(null); await executeSuggestedToolCall(call); };
+  const cancelPendingAction = () => { setPendingAction(null); setStatus("ready"); };
 
-      let result;
-      if (method === "POST") {
-        result = await apiPost(call.path, call.payload || {}, authState);
-      } else {
-        result = await apiGet(call.path, authState);
-      }
-      setAssistantActionResult({
-        ok: true,
-        call,
-        result,
-      });
-      await loadOverview();
-      setStatus("ready");
-      } catch (e) {
-        setAssistantActionResult({ ok: false, call, error: e.message });
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  const runMcpOnboardingRunbook = async () => { setStatus("assistant mcp runbook"); await withProgress("Running MCP onboarding runbook", async () => { const steps = [], stamp = new Date().toISOString(); const runStep = async (name, path) => { try { steps.push({ name, path, ok: true }); return await apiGet(path, authState); } catch (e) { steps.push({ name, path, ok: false, error: e.message }); return { error: e.message }; } }; const statusData = await runStep("Check MCP status", "/broker/mcp/status"); const readinessData = await runStep("Check MCP readiness", "/broker/mcp/readiness"); const signalsData = await runStep("Load portfolio signals", "/portfolio/signals?broker_mode=robinhood_mcp"); if (!statusData?.error) setMcpStatus(statusData || null); if (!readinessData?.error) setMcpReadiness(readinessData || null); if (!signalsData?.error) { setMcpSignals(signalsData || null); setMcpSignalsError(""); } else { setMcpSignals(null); setMcpSignalsError(String(signalsData.error || "unknown")); } const blockers = (readinessData?.checks || []).filter(r => r.state === "fail"), warnings = (readinessData?.checks || []).filter(r => r.state === "warn"), remediation = [...(readinessData?.next_steps || [])]; if (statusData?.connected && !statusData?.authenticated) remediation.unshift("Complete Robinhood auth in your MCP client session."); if (!statusData?.connected) remediation.unshift("Verify MCP endpoint connectivity and configuration."); const report = { ran_at: stamp, transport_connected: Boolean(statusData?.connected), authenticated: Boolean(statusData?.authenticated), account_available: Boolean(statusData?.account_available), positions_count: Number(statusData?.positions_count || 0), signals_count: Number(signalsData?.count || 0), overall_ready: Boolean(readinessData?.overall_ready), blockers, warnings, remediation, steps }; setMcpRunbookReport(report); setAssistantConversation((prev) => [...prev, { role: "assistant", content: `MCP runbook complete. Ready: ${report.overall_ready ? "yes" : "no"}. Blockers: ${report.blockers.length}. Signals: ${report.signals_count}.`, suggested_tool_calls: [{ name: "check_mcp_status", method: "GET", path: "/broker/mcp/status" }, { name: "check_mcp_readiness", method: "GET", path: "/broker/mcp/readiness" }, { name: "load_portfolio_signals", method: "GET", path: "/portfolio/signals?broker_mode=robinhood_mcp" }], ts: stamp }]); setStatus("ready"); }); };
 
-  const requestExecuteAction = (call) => {
-    const method = (call.method || "GET").toUpperCase();
-    if (method === "POST") {
-      setPendingAction(call);
-      return;
-    }
-    executeSuggestedToolCall(call);
-  };
+  function calcPortfolioMetrics(signalsData) {
+    const sigs = signalsData?.signals || [];
+    const longCount = sigs.filter(s => (s.action || s.signal) === "buy" || s.direction === "long").length;
+    const shortCount = sigs.filter(s => (s.action || s.signal) === "sell" || s.direction === "short").length;
+    const avgStrength = sigs.length ? sigs.reduce((sum, s) => sum + (Number(s.strength || s.score || s.confidence || 0)), 0) / sigs.length : 0;
+    return { total_signals: sigs.length, long_count: longCount, short_count: shortCount, avg_strength: avgStrength };
+  }
 
-  const confirmPendingAction = async () => {
-    if (!pendingAction) return;
-    const call = pendingAction;
-    setPendingAction(null);
-    await executeSuggestedToolCall(call);
-  };
-
-  const cancelPendingAction = () => {
-    setPendingAction(null);
-    setStatus("ready");
-  };
-
-  const runMcpOnboardingRunbook = async () => {
-    setStatus("assistant mcp runbook");
-    setAssistantAutoResults([]);
-    await withProgress("Running MCP onboarding runbook", async () => {
-      const steps = [];
-      const stamp = new Date().toISOString();
-
-      const runStep = async (name, path) => {
-        try {
-          const result = await apiGet(path, authState);
-          steps.push({ name, path, ok: true });
-          return result;
-        } catch (e) {
-          steps.push({ name, path, ok: false, error: e.message });
-          return { error: e.message };
-        }
-      };
-
-      const statusData = await runStep("Check MCP status", "/broker/mcp/status");
-      const readinessData = await runStep("Check MCP readiness", "/broker/mcp/readiness");
-      const signalsData = await runStep("Load portfolio signals", "/portfolio/signals?broker_mode=robinhood_mcp");
-
-      if (!statusData?.error) setMcpStatus(statusData || null);
-      if (!readinessData?.error) setMcpReadiness(readinessData || null);
-      if (!signalsData?.error) {
-        setMcpSignals(signalsData || null);
-        setMcpSignalsError("");
-      } else {
-        setMcpSignals(null);
-        setMcpSignalsError(String(signalsData.error || "unknown error"));
-      }
-
-      const checks = readinessData?.checks || [];
-      const blockers = checks.filter((row) => row.state === "fail");
-      const warnings = checks.filter((row) => row.state === "warn");
-      const remediation = [
-        ...(readinessData?.next_steps || []),
-      ];
-
-      if (statusData?.connected && !statusData?.authenticated) {
-        remediation.unshift("Complete Robinhood agentic account authentication in your MCP-capable client session, then rerun this runbook.");
-      }
-      if (!statusData?.connected) {
-        remediation.unshift("Verify MCP endpoint connectivity and Robinhood MCP transport configuration.");
-      }
-
-      const report = {
-        ran_at: stamp,
-        transport_connected: Boolean(statusData?.connected),
-        authenticated: Boolean(statusData?.authenticated),
-        account_available: Boolean(statusData?.account_available),
-        positions_available: Boolean(statusData?.positions_available),
-        positions_count: Number(statusData?.positions_count || 0),
-        signals_count: Number(signalsData?.count || 0),
-        overall_ready: Boolean(readinessData?.overall_ready),
-        blockers,
-        warnings,
-        remediation,
-        steps,
-      };
-
-      setMcpRunbookReport(report);
-      setAssistantConversation((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `MCP onboarding runbook complete. Ready: ${report.overall_ready ? "yes" : "no"}. Blockers: ${report.blockers.length}. Warnings: ${report.warnings.length}. Signals: ${report.signals_count}.`,
-          summary: {
-            ready: report.overall_ready,
-            blockers: report.blockers.length,
-            warnings: report.warnings.length,
-            signals: report.signals_count,
-          },
-          suggested_tool_calls: [
-            { name: "check_mcp_status", method: "GET", path: "/broker/mcp/status" },
-            { name: "check_mcp_readiness", method: "GET", path: "/broker/mcp/readiness" },
-            { name: "load_portfolio_signals", method: "GET", path: "/portfolio/signals?broker_mode=robinhood_mcp" },
-          ],
-          ts: stamp,
-        },
-      ]);
-      setStatus("ready");
-    });
-  };
-
-  const runScanPipeline = async () => {
-    stopScanPolling();
-    setScanProgressPct(0);
-    setScanEtaSeconds(null);
-    setScanElapsedSeconds(null);
-    setScanCurrentPreset("");
-    setScanFailedPresets([]);
-    setScanPresetsCompleted(0);
-    setScanPresetCount(0);
-    setScanFinishedAt("");
-    setScanLastMessage("Scan queued");
-    setStatus("scan running");
-    await withProgress("Running scan", async () => {
-      try {
-        const payload = {
-          db: dbPath,
-          parallel: scanParallel,
-          max_workers: Math.max(1, Math.min(16, parseNumber(scanWorkers, 4))),
-          presets: selectedPresets.length ? selectedPresets : null,
-        };
-        const start = await apiPost("/pipeline/scan/start", payload, authState);
-        applyScanStatus(start);
-        startScanPolling(start.job_id);
-        setStatus("scan running");
-      } catch (e) {
-        stopScanPolling();
-        setScanLastMessage(`Scan failed: ${e.message}`);
-        setScanFinishedAt(new Date().toISOString());
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const cancelScanPipeline = () => {
-    if (!scanJobId || !scanIsActive) return;
-    setStatus("scan cancel requested");
-    setScanLastMessage("Cancel requested");
-    apiPost(`/pipeline/scan/cancel/${encodeURIComponent(scanJobId)}`, {}, authState)
-      .then((snap) => applyScanStatus(snap))
-      .catch((e) => setScanLastMessage(`Cancel failed: ${e.message}`));
-  };
-
-  const runRecommendPipeline = async () => {
-    setStatus("recommend running");
-    await withProgress("Running recommendations", async () => {
-      try {
-        const payload = {
-          db: dbPath,
-          tickers: parseTickers(recommendTickersText),
-          save: recommendSave,
-        };
-        const result = await apiPost("/pipeline/recommend", payload, authState);
-        setRecommendResult(result || null);
-        await loadOverview();
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadOptions = async () => {
-    setStatus("loading options");
-    await withProgress("Loading options", async () => {
-      try {
-        const data = await apiGet(
-          `/options/ideas?ticker=${encodeURIComponent(ticker)}&horizon=${encodeURIComponent(horizon)}&bias=${encodeURIComponent(optionsBias)}&budget=${encodeURIComponent(parseNumber(optionsBudget, 300))}`,
-          authState
-        );
-        setOptionIdeas(data.items || []);
-        setOptionsResultMeta({ count: data.count || 0, horizon, bias: optionsBias, budget: parseNumber(optionsBudget, 300) });
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadBacktest = async () => {
-    setStatus("running backtest");
-    await withProgress("Running backtest", async () => {
-      try {
-        const endQ = backtestEnd.trim() ? `&end=${encodeURIComponent(backtestEnd.trim())}` : "";
-        const tickerSafe = encodeURIComponent(ticker);
-        const periodQuery = encodeURIComponent(analyticsPeriod || "2y");
-        const intervalQuery = encodeURIComponent(analyticsInterval || "1d");
-        const [data, indicators, seasonality, summary, timeline] = await Promise.all([
-          apiGet(
-            `/backtest/short-term?ticker=${tickerSafe}&start=${encodeURIComponent(backtestStart)}${endQ}&entry_rsi_threshold=${encodeURIComponent(parseNumber(backtestEntryRsi, 50))}&max_hold_days=${encodeURIComponent(Math.max(1, parseNumber(backtestMaxHoldDays, 7)))}&stop_loss_pct=${encodeURIComponent(Math.max(0, parseNumber(backtestStopLossPct, 0)))}&ma_filter=${encodeURIComponent((backtestMaFilter || "sma20").trim().toLowerCase())}&take_profit_pct=${encodeURIComponent(Math.max(0, parseNumber(backtestTakeProfitPct, 0)))}&ma_trend_filter=${encodeURIComponent((backtestMaTrendFilter || "none").trim().toLowerCase())}`,
-            authState
-          ),
-          apiGet(`/charts/indicators?ticker=${tickerSafe}&period=${periodQuery}&interval=${intervalQuery}`, authState).catch(() => null),
-          apiGet(`/charts/seasonality?ticker=${tickerSafe}&years=10`, authState).catch(() => null),
-          apiGet(`/news/summary?ticker=${tickerSafe}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&sentiment=${encodeURIComponent(newsSentiment)}&max_groups=8`, authState).catch(() => null),
-          apiGet(`/news/timeline?ticker=${tickerSafe}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&period=${periodQuery}&interval=${intervalQuery}&sentiment=${encodeURIComponent(newsSentiment)}&max_articles=24`, authState).catch(() => null),
-        ]);
-        setBacktestSummary(data.summary || null);
-        setBacktestEquity(data.equity || []);
-        if (indicators?.items) setIndicatorChart(indicators.items);
-        if (Array.isArray(seasonality?.items)) setSeasonalityChart(seasonality.items);
-        if (summary) setNewsSummary(summary);
-        if (timeline) setNewsTimeline(timeline);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const cacheMarketSeries = async () => {
-    setStatus("caching market series");
-    await withProgress("Caching yfinance series", async () => {
-      try {
-        const periodQuery = encodeURIComponent(analyticsPeriod);
-        const intervalQuery = encodeURIComponent(analyticsInterval);
-        const data = await apiPost(
-          `/market/series/cache?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}`,
-          {},
-          authState
-        );
-        setMarketSeriesCache(data || null);
-        if (data?.items?.length) {
-          setIndicatorChart(data.items);
-        }
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadAnalytics = async () => {
-    setStatus("loading analytics");
-    await withProgress("Loading analytics", async () => {
-      try {
-        const tickerList = parseTickers(analyticsTickersText) || [ticker];
-        const rankQuery = encodeURIComponent(tickerList.join(","));
-        const periodQuery = encodeURIComponent(analyticsPeriod);
-        const intervalQuery = encodeURIComponent(analyticsInterval);
-        const [ranked, indicators, seasonality, distribution, forecast, summary, timeline, performanceCompare, seasonalityCompare] = await Promise.all([
-          apiGet(`/recommend/analyze?tickers=${rankQuery}&period=${periodQuery}&interval=${intervalQuery}&limit=${Math.min(12, tickerList.length)}`, authState),
-          apiGet(`/charts/indicators?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}`, authState),
-          apiGet(`/charts/seasonality?ticker=${encodeURIComponent(ticker)}&years=10`, authState),
-          apiGet(`/charts/price-distribution?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}&bins=${encodeURIComponent(parseNumber(analyticsBins, 24))}`, authState),
-          apiGet(`/charts/forecast?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}&horizon=${encodeURIComponent(parseNumber(analyticsHorizon, 30))}`, authState),
-          apiGet(`/news/summary?ticker=${encodeURIComponent(ticker)}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&sentiment=${encodeURIComponent(newsSentiment)}&max_groups=8`, authState),
-          apiGet(`/news/timeline?ticker=${encodeURIComponent(ticker)}&db=${encodeURIComponent(dbPath)}&days=${encodeURIComponent(parseNumber(newsDays, 30))}&period=${periodQuery}&interval=${intervalQuery}&sentiment=${encodeURIComponent(newsSentiment)}&max_articles=24`, authState),
-          apiGet(`/charts/performance-compare?tickers=${rankQuery}&period=${periodQuery}&interval=${intervalQuery}&base=${encodeURIComponent(parseNumber(compareBase, 100))}`, authState),
-          apiGet(`/charts/seasonality-compare?ticker=${encodeURIComponent(ticker)}&years=${encodeURIComponent(Math.max(3, Math.min(20, parseNumber(seasonalityYears, 10))))}&sector=${encodeURIComponent(seasonalitySectorOverride || "")}&sector_etf=${encodeURIComponent(seasonalityEtfOverride || "")}`, authState),
-        ]);
-        setAnalyticsRanked(ranked.items || []);
-        setAnalyticsSaveResult(null);
-        setIndicatorChart(indicators.items || []);
-        setSeasonalityChart(seasonality.items || []);
-        setDistributionChart(distribution || null);
-        setForecastChart(forecast || null);
-        setNewsSummary(summary || null);
-        setNewsTimeline(timeline || null);
-        setPerformanceCompareChart(performanceCompare || null);
-        setSeasonalityCompareChart(seasonalityCompare || null);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadChartsFast = async () => {
-    setStatus("loading charts");
-    await withProgress("Loading core charts", async () => {
-      try {
-        const periodQuery = encodeURIComponent(analyticsPeriod);
-        const intervalQuery = encodeURIComponent(analyticsInterval);
-        const years = encodeURIComponent(Math.max(3, Math.min(20, parseNumber(seasonalityYears, 10))));
-        const [indicators, seasonality, seasonalityCompare] = await Promise.all([
-          apiGet(`/charts/indicators?ticker=${encodeURIComponent(ticker)}&period=${periodQuery}&interval=${intervalQuery}`, authState),
-          apiGet(`/charts/seasonality?ticker=${encodeURIComponent(ticker)}&years=${years}`, authState),
-          apiGet(`/charts/seasonality-compare?ticker=${encodeURIComponent(ticker)}&years=${years}&sector=${encodeURIComponent(seasonalitySectorOverride || "")}&sector_etf=${encodeURIComponent(seasonalityEtfOverride || "")}`, authState),
-        ]);
-        setIndicatorChart(indicators.items || []);
-        setSeasonalityChart(seasonality.items || []);
-        setSeasonalityCompareChart(seasonalityCompare || null);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const saveAnalyticsLeaderboard = async () => {
-    setStatus("saving analytics leaderboard");
-    await withProgress("Saving leaderboard", async () => {
-      try {
-        const tickerList = parseTickers(analyticsTickersText) || [ticker];
-        const payload = {
-          db: dbPath,
-          tickers: tickerList,
-          period: analyticsPeriod,
-          interval: analyticsInterval,
-          limit: Math.min(12, tickerList.length),
-          save: true,
-          forecast_horizon: Math.max(5, Math.min(90, parseNumber(analyticsHorizon, 30))),
-        };
-        const data = await apiPost("/analytics/leaderboard", payload, authState);
-        setAnalyticsRanked(data.items || []);
-        setAnalyticsLatest(data.items || []);
-        setAnalyticsBatchId(data.batch_id || "");
-        setAnalyticsSaveResult(data || null);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadLatestAnalyticsLeaderboard = async () => {
-    setStatus("loading latest leaderboard");
-    await withProgress("Loading latest leaderboard", async () => {
-      try {
-        const data = await apiGet(`/analytics/leaderboard/latest?db=${encodeURIComponent(dbPath)}`, authState);
-        setAnalyticsLatest(data.items || []);
-        setAnalyticsBatchId(data.batch_id || "");
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const loadSignals = async () => {
-    setSignalsLoading(true);
-    setStatus("loading signals");
-    await withProgress("Loading signals", async () => {
-      try {
-        const data = await apiGet(
-          `/signals/generate?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(signalsTimeframe)}&lookback_bars=120&detectors=breakout,rsi,macd,pullback`,
-          authState
-        );
-        setSignalsData(data || null);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      } finally {
-        setSignalsLoading(false);
-      }
-    });
-  };
-
-  const loadTrainingFeatures = async () => {
-    setStatus("loading training features");
-    await withProgress("Loading training features", async () => {
-      try {
-        const tickerList = parseTickers(analyticsTickersText) || [ticker];
-        const data = await apiGet(
-          `/analytics/training-features?tickers=${encodeURIComponent(tickerList.join(","))}&period=${encodeURIComponent(analyticsPeriod)}&interval=${encodeURIComponent(analyticsInterval)}&forecast_horizon=${encodeURIComponent(parseNumber(analyticsHorizon, 30))}&limit=${encodeURIComponent(Math.min(12, tickerList.length))}`,
-          authState
-        );
-        setTrainingFeatures(data.items || []);
-        setStatus("ready");
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const proposeOrder = async () => {
-    setStatus("proposing");
-    await withProgress("Proposing order", async () => {
-      try {
-        const result = await apiPost("/execution/propose", {
-          ticker,
-          action: executionAction,
-          qty: parseNumber(executionQty, 1),
-          notional: parseNumber(notional, 0),
-          orders_today: parseNumber(executionOrdersToday, 0),
-          position_notional_after: parseNumber(executionPositionAfter, parseNumber(notional, 0)),
-          broker_mode: executionBrokerMode,
-          auto: executionAuto,
-          max_daily_notional: parseNumber(executionMaxDaily, 5000),
-          max_orders_per_day: parseNumber(executionMaxOrders, 20),
-          max_position_notional: parseNumber(executionMaxPosition, 2000),
-          db: dbPath,
-        }, authState);
-        setExecutionResult(result || null);
-        await loadOverview();
-      } catch (e) {
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const checkFirebaseIdentity = async () => {
-    setStatus("checking identity");
-    await withProgress("Checking identity", async () => {
-      try {
-        const data = await apiGet("/auth/me", authState);
-        setFirebaseAuthCheck(data);
-        setStatus("ready");
-      } catch (e) {
-        setFirebaseAuthCheck({ authenticated: false, error: e.message });
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const unlockWorkspace = async () => {
-    setStatus("auth check");
-    await withProgress("Unlocking workspace", async () => {
-      try {
-        const data = await apiGet("/auth/me", authState);
-        setFirebaseAuthCheck(data || null);
-        setWorkspaceUnlocked(true);
-        setSurface("Workspace");
-        await saveCredentials();
-        setStatus("ready");
-      } catch (e) {
-        setFirebaseAuthCheck({ authenticated: false, error: e.message });
-        setWorkspaceUnlocked(false);
-        setStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const unlockWorkspaceLocal = async () => {
-    setFirebaseAuthCheck({ mode: "local-dev", authenticated: true, note: "Workspace unlocked without token because API auth is disabled." });
-    setWorkspaceUnlocked(true);
-    setSurface("Workspace");
-    await saveCredentials();
-    setStatus("ready");
-  };
-
-  const loadUserSettings = async () => {
-    setSettingsSaveStatus("loading");
-    await withProgress("Loading user settings", async () => {
-      try {
-        const data = await apiGet("/user/settings", authState);
-        setUserSettingsData(data);
-        setUserSettingsText(JSON.stringify(data.settings || {}, null, 2));
-        setSettingsSaveStatus("ready");
-      } catch (e) {
-        setUserSettingsData({ ok: false, error: e.message });
-        setSettingsSaveStatus(`error: ${e.message}`);
-      }
-    });
-  };
-
-  const saveUserSettings = async () => {
-    setSettingsSaveStatus("saving");
-    await withProgress("Saving user settings", async () => {
-      try {
-        const parsed = JSON.parse(userSettingsText || "{}");
-        const data = await apiPut("/user/settings", { settings: parsed }, authState);
-        setUserSettingsData(data);
-        setSettingsSaveStatus("saved");
-      } catch (e) {
-        setSettingsSaveStatus(`error: ${e.message}`);
-      }
-    });
-  };
+  // ==========================================
+  // RENDER FUNCTIONS
+  // ==========================================
 
   const renderLanding = () => (
-    <>
-      <View style={styles.hero}>
-        <Text style={styles.heroEyebrow}>QuantFlow</Text>
-        <Text style={styles.heroTitle}>From quant workflows to a product-ready public landing and operator console</Text>
-        <Text style={styles.heroBody}>
-          Unified scanner, recommender, options picker, policy-gated execution, MCP readiness, and auth-backed user settings.
-          This Public surface is safe for demos and landing use, while Workspace is gated for operator actions.
-        </Text>
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={loadOverview}>
-            <Text style={styles.buttonText}>Refresh Public Metrics</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={() => setSurface("Workspace")}>
-            <Text style={styles.secondaryButtonText}>Go To Operator Workspace</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      <View style={styles.cardGrid}>
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Data Acquisition</Text>
-          <Text style={styles.item}>Finviz scanner with proxy/API transport fallback and runtime diagnostics.</Text>
-          <Text style={styles.item}>Latest presets: {presets.length}</Text>
-          <Text style={styles.item}>Universe rows: {latestUniverse.length}</Text>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Decision Intelligence</Text>
-          <Text style={styles.item}>Rule-based recommendations plus options filtering and short-term backtesting.</Text>
-          <Text style={styles.item}>Latest recommendations: {latestRecs.length}</Text>
-          <Text style={styles.item}>Recent intents: {intents.length}</Text>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Trust & Operations</Text>
-          <Text style={styles.item}>Policy-gated execution, MCP readiness checks, and ops report endpoint.</Text>
-          <Text style={styles.item}>Auth enabled: {health?.auth_enabled ? "yes" : "no"}</Text>
-          <Text style={styles.item}>Firebase enabled: {health?.firebase_auth_enabled ? "yes" : "no"}</Text>
-        </View>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Direct Links</Text>
-        <Text style={styles.item}>Public: {isWeb ? `${window.location.origin}${window.location.pathname}?view=public` : "available on web build"}</Text>
-        <Text style={styles.item}>Workspace: {isWeb ? `${window.location.origin}${window.location.pathname}?view=workspace` : "available on web build"}</Text>
-      </View>
-    </>
+    <><View style={styles.hero}><Text style={styles.heroEyebrow}>QuantFlow</Text><Text style={styles.heroTitle}>From quant workflows to a product-ready public landing and operator console</Text><Text style={styles.heroBody}>Unified scanner, recommender, options picker, policy-gated execution, MCP readiness, and auth-backed user settings.</Text><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={loadOverview}><Text style={styles.buttonText}>Refresh Public Metrics</Text></Pressable><Pressable style={styles.secondaryButton} onPress={() => setSurface("Workspace")}><Text style={styles.secondaryButtonText}>Go To Operator Workspace</Text></Pressable></View></View>
+    <View style={styles.cardGrid}><View style={styles.card}><Text style={styles.cardTitle}>Data Acquisition</Text><Text style={styles.item}>Finviz scanner with proxy/API transport fallback.</Text><Text style={styles.item}>Latest presets: {presets.length}</Text><Text style={styles.item}>Universe rows: {latestUniverse.length}</Text></View><View style={styles.card}><Text style={styles.cardTitle}>Decision Intelligence</Text><Text style={styles.item}>Rule-based recommendations plus options filtering.</Text><Text style={styles.item}>Latest recommendations: {latestRecs.length}</Text><Text style={styles.item}>Recent intents: {intents.length}</Text></View><View style={styles.card}><Text style={styles.cardTitle}>Trust & Operations</Text><Text style={styles.item}>Policy-gated execution, MCP readiness checks.</Text><Text style={styles.item}>Auth enabled: {health?.auth_enabled ? "yes" : "no"}</Text></View></View></>
   );
 
   const renderWorkspaceGate = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Operator Workspace Gate</Text>
-      <Text style={styles.item}>Authenticate before enabling workflow tabs and execution actions.</Text>
-      {!workspaceUnlocked ? (
-        <>
-          <Text style={styles.fieldLabel}>API Key</Text>
-          <TextInput
-            value={apiKeyInput}
-            onChangeText={setApiKeyInput}
-            style={styles.input}
-            placeholder="x-api-key (optional)"
-            autoCapitalize="none"
-          />
-          <Text style={styles.fieldLabel}>Bearer Token</Text>
-          <TextInput
-            value={bearerToken}
-            onChangeText={setBearerToken}
-            style={[styles.input, styles.tokenInput]}
-            placeholder="Firebase ID token (Bearer)"
-            autoCapitalize="none"
-            multiline
-          />
-          <View style={styles.inlineRow}>
-            <Pressable onPress={() => setRememberCredentials(!rememberCredentials)} style={styles.inlineRow}>
-              <View style={[styles.checkbox, rememberCredentials && styles.checkboxChecked]} />
-              <Text style={styles.item}>Remember credentials</Text>
-            </Pressable>
-          </View>
-          <View style={styles.inlineRowWrap}>
-            <Pressable style={styles.button} onPress={unlockWorkspace}>
-              <Text style={styles.buttonText}>Unlock Workspace</Text>
-            </Pressable>
-            {!health?.auth_enabled && (
-              <Pressable style={styles.secondaryButton} onPress={unlockWorkspaceLocal}>
-                <Text style={styles.secondaryButtonText}>Enter Workspace (Local Dev)</Text>
-              </Pressable>
-            )}
-            <Pressable style={styles.secondaryButton} onPress={() => setSurface("Public")}>
-              <Text style={styles.secondaryButtonText}>Back To Public Landing</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.item}>Auth check: {firebaseAuthCheck ? compactJson(firebaseAuthCheck, 900) : "not checked"}</Text>
-        </>
-      ) : (
-        <>
-          <Text style={styles.item}>✓ Workspace unlocked</Text>
-          <Text style={styles.item}>Authentication: {firebaseAuthCheck?.authenticated ? "authenticated" : "verified"}</Text>
-          <View style={styles.inlineRowWrap}>
-            <Pressable style={styles.cancelButton} onPress={logoutWorkspace}>
-              <Text style={styles.buttonText}>Logout</Text>
-            </Pressable>
-          </View>
-        </>
-      )}
-      <Text style={styles.warnText}>Client-side gate is for UX and demo safety. Backend auth still enforces write access.</Text>
-      {!health?.auth_enabled && <Text style={styles.item}>Detected local mode: API auth is disabled, so you can enter workspace without token.</Text>}
-    </View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Operator Workspace Gate</Text><Text style={styles.item}>Authenticate before enabling workflow tabs.</Text>
+    {!workspaceUnlocked ? (<><Text style={styles.fieldLabel}>API Key</Text><TextInput value={apiKeyInput} onChangeText={setApiKeyInput} style={styles.input} placeholder="x-api-key (optional)" autoCapitalize="none" /><Text style={styles.fieldLabel}>Bearer Token</Text><TextInput value={bearerToken} onChangeText={setBearerToken} style={[styles.input, styles.tokenInput]} placeholder="Firebase ID token (Bearer)" autoCapitalize="none" multiline /><View style={styles.inlineRow}><Pressable onPress={() => setRememberCredentials(!rememberCredentials)} style={styles.inlineRow}><View style={[styles.checkbox, rememberCredentials && styles.checkboxChecked]} /><Text style={styles.item}>Remember credentials</Text></Pressable></View><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={unlockWorkspace}><Text style={styles.buttonText}>Unlock Workspace</Text></Pressable>{!health?.auth_enabled && <Pressable style={styles.secondaryButton} onPress={unlockWorkspaceLocal}><Text style={styles.secondaryButtonText}>Enter Workspace (Local Dev)</Text></Pressable>}<Pressable style={styles.secondaryButton} onPress={() => setSurface("Public")}><Text style={styles.secondaryButtonText}>Back To Public Landing</Text></Pressable></View></>) : (<><Text style={styles.item}>✓ Workspace unlocked</Text><View style={styles.inlineRowWrap}><Pressable style={styles.cancelButton} onPress={logoutWorkspace}><Text style={styles.buttonText}>Logout</Text></Pressable></View></>)}</View>
   );
 
   const renderOverview = () => (
-    <>
-      <View style={styles.row}>
-        <Pressable style={styles.button} onPress={loadOverview}>
-          <Text style={styles.buttonText}>Refresh</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Health</Text>
-        <Text style={styles.item}>{health ? compactJson(health) : "not loaded"}</Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Environment Validation</Text>
-        <Text style={styles.item}>Status: {envValidation ? (envValidation.ok ? "ready" : "action needed") : "unknown"}</Text>
-        <Text style={styles.item}>Provider: {envValidation?.provider || "unknown"}</Text>
-        <Text style={styles.item}>Mode: {envValidation?.scraping_mode || "unknown"}</Text>
-        {!!envValidation?.missing?.length && <Text style={styles.warnText}>Missing: {envValidation.missing.join(" | ")}</Text>}
-        {!!envValidation?.warnings?.length && <Text style={styles.warnText}>Warnings: {envValidation.warnings.join(" | ")}</Text>}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Ops Report</Text>
-        <Text>DB status: {opsReport ? opsReport.overall_db_status : "not loaded"}</Text>
-        <Text>Generated: {opsReport ? opsReport.generated_at : "unknown"}</Text>
-        <Text>
-          Snapshots: {opsReport?.tables?.ticker_snapshots?.count ?? 0}
-          {" | "}
-          Recommendations: {opsReport?.tables?.recommendations?.count ?? 0}
-        </Text>
-        <Text>
-          Scraping mode: {opsReport?.runtime?.scraping_status?.mode || "unknown"}
-          {" | "}
-          Provider: {opsReport?.runtime?.scraping_status?.provider || "unknown"}
-        </Text>
-        {!!opsReport?.validation && (
-          <>
-            <Text>Snapshot rows saved: {opsReport.validation.snapshot_rows_saved}</Text>
-            <Text>Recommendations saved: {opsReport.validation.recommendations_saved}</Text>
-            <Text>
-              Presets: {opsReport.validation.successful_presets} ok
-              {" / failed: "}
-              {opsReport.validation.failed_presets?.length ? opsReport.validation.failed_presets.join(", ") : "none"}
-            </Text>
-          </>
-        )}
-        {!opsReport && <Text style={styles.warnText}>Ops report unavailable. Run ops-report or ops-refresh first.</Text>}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Robinhood MCP</Text>
-        <Text>Connected: {mcpStatus ? (mcpStatus.connected ? "yes" : "no") : "unknown"}</Text>
-        <Text>Authenticated: {mcpStatus ? (mcpStatus.authenticated ? "yes" : "no") : "unknown"}</Text>
-        <Text>Account data: {mcpStatus ? (mcpStatus.account_available ? "yes" : "no") : "unknown"}</Text>
-        <Text>Positions: {mcpStatus ? String(mcpStatus.positions_count || 0) : "0"}</Text>
-        <Text>Portfolio signals: {mcpSignals ? String(mcpSignals.count || 0) : "0"}</Text>
-        {!!(mcpStatus && mcpStatus.endpoint) && <Text style={styles.item}>Endpoint: {mcpStatus.endpoint}</Text>}
-        {!!(mcpStatus && (mcpStatus.account_error || mcpStatus.positions_error || mcpStatus.error)) && (
-          <Text style={styles.warnText}>Last MCP error: {mcpStatus.account_error || mcpStatus.positions_error || mcpStatus.error}</Text>
-        )}
-        {!!mcpSignalsError && <Text style={styles.warnText}>Signals error: {mcpSignalsError}</Text>}
-        <Pressable style={styles.button} onPress={loadMcpStatus}>
-          <Text style={styles.buttonText}>Check MCP</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={connectMcp}>
-          <Text style={styles.secondaryButtonText}>Connect Robinhood</Text>
-        </Pressable>
-        {!!mcpLoginResult && (
-          <Text style={styles.item}>
-            Connect result: {mcpLoginResult.ok ? "ok" : "not ready"}
-            {mcpLoginResult.message ? ` | ${mcpLoginResult.message}` : ""}
-          </Text>
-        )}
-        {!!mcpSignals?.signals?.length && (
-          <View>
-            <Text style={styles.item}>Top signal snapshot:</Text>
-            {(mcpSignals.signals || []).slice(0, 3).map((sig, idx) => (
-              <Text key={`sig-${String(idx)}`} style={styles.item}>
-                {sig.ticker || "-"} | {sig.action || sig.signal || "hold"} | strength {fmtNumber(sig.strength || sig.score || 0, 2)}
-              </Text>
-            ))}
-          </View>
-        )}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>MCP Login Readiness</Text>
-        <Text style={styles.item}>Overall ready: {mcpReadiness ? (mcpReadiness.overall_ready ? "yes" : "no") : "unknown"}</Text>
-        {(mcpReadiness?.checks || []).map((c) => (
-          <Text key={c.id} style={styles.item}>
-            {c.state === "pass" ? "PASS" : c.state === "warn" ? "WARN" : "FAIL"} | {c.label} | {c.details}
-          </Text>
-        ))}
-        {(mcpReadiness?.next_steps || []).slice(0, 4).map((s, idx) => (
-          <Text key={`step-${String(idx)}`} style={styles.item}>Step {idx + 1}: {s}</Text>
-        ))}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Presets ({presets.length})</Text>
-        {(presets || []).slice(0, 8).map((p) => (
-          <Text key={p} style={styles.item}>{p}</Text>
-        ))}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Recent Intents ({intents.length})</Text>
-        {(intents || []).slice(0, 8).map((i) => (
-          <Text key={String(i.id)} style={styles.item}>
-            #{i.id} {i.ticker} {i.action} ${i.notional} [{i.status}]
-          </Text>
-        ))}
-      </View>
-    </>
+    <><View style={styles.row}><Pressable style={styles.button} onPress={loadOverview}><Text style={styles.buttonText}>Refresh</Text></Pressable></View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Health</Text><Text style={styles.item}>{health ? compactJson(health) : "not loaded"}</Text></View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Robinhood MCP</Text><Text>Connected: {mcpStatus ? (mcpStatus.connected ? "yes" : "no") : "unknown"}</Text><Text>Authenticated: {mcpStatus ? (mcpStatus.authenticated ? "yes" : "no") : "unknown"}</Text><Text>Positions: {mcpStatus ? String(mcpStatus.positions_count || 0) : "0"}</Text><Text>Signals: {mcpSignals ? String(mcpSignals.count || 0) : "0"}</Text><Pressable style={styles.button} onPress={loadMcpStatus}><Text style={styles.buttonText}>Check MCP</Text></Pressable><Pressable style={styles.secondaryButton} onPress={connectMcp}><Text style={styles.secondaryButtonText}>Connect Robinhood</Text></Pressable></View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Presets ({presets.length})</Text>{(presets || []).slice(0, 8).map((p) => <Text key={p} style={styles.item}>{p}</Text>)}</View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Recent Intents ({intents.length})</Text>{(intents || []).slice(0, 8).map((i) => <Text key={String(i.id)} style={styles.item}>#{i.id} {i.ticker} {i.action} ${i.notional} [{i.status}]</Text>)}</View></>
   );
 
   const renderScanner = () => (
-    <>
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Scanner Pipeline Controls</Text>
-        {(scanIsActive || scannerBusy) && <ProgressBar progress={scanIsActive ? scanProgressPct : progressValue} label={scanIsActive ? `Scan ${scanProgressPct.toFixed(1)}%` : "Running scanner pipeline"} compact />}
-        <Text style={styles.item}>DB path</Text>
-        <TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" />
-        <Text style={styles.item}>Preset profiles (comma-separated)</Text>
-        <TextInput
-          value={selectedPresetsText}
-          onChangeText={setSelectedPresetsText}
-          style={styles.input}
-          placeholder="weekly_momo,weekly_bear"
-          autoCapitalize="none"
-        />
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.smallButton} onPress={() => selectPresetCategory("weekly")}>
-            <Text style={styles.buttonText}>Weekly</Text>
-          </Pressable>
-          <Pressable style={styles.smallButton} onPress={() => selectPresetCategory("monthly")}>
-            <Text style={styles.buttonText}>Monthly</Text>
-          </Pressable>
-          <Pressable style={styles.smallButton} onPress={() => setSelectedPresetsText((presetDetails?.items || presets || []).join(","))}>
-            <Text style={styles.buttonText}>All</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.fieldLabel}>Preset Search</Text>
-        <TextInput value={presetSearch} onChangeText={setPresetSearch} style={styles.input} placeholder="Search preset name" autoCapitalize="none" />
-        <View style={styles.inlineRowWrap}>
-          {availablePresets.slice(0, 12).map((name) => {
-            const active = selectedPresets.includes(name);
-            return (
-              <Pressable key={name} style={active ? styles.smallButton : styles.mutedButton} onPress={() => togglePreset(name)}>
-                <Text style={styles.buttonText}>{name}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
-        <View style={styles.inlineRowWrap}>
-          <Text style={styles.item}>Parallel run:</Text>
-          <Pressable style={scanParallel ? styles.smallButton : styles.mutedButton} onPress={() => setScanParallel(true)}>
-            <Text style={styles.buttonText}>ON</Text>
-          </Pressable>
-          <Pressable style={!scanParallel ? styles.smallButton : styles.mutedButton} onPress={() => setScanParallel(false)}>
-            <Text style={styles.buttonText}>OFF</Text>
-          </Pressable>
-          <Text style={styles.fieldLabel}>Workers</Text>
-          <TextInput value={scanWorkers} onChangeText={setScanWorkers} style={[styles.input, styles.compactInput]} placeholder="Workers" keyboardType="numeric" />
-        </View>
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={runScanPipeline}>
-            <Text style={styles.buttonText}>Run Scan</Text>
-          </Pressable>
-          {scanIsActive && (
-            <Pressable style={styles.cancelButton} onPress={cancelScanPipeline}>
-              <Text style={styles.buttonText}>Cancel Scan</Text>
-            </Pressable>
-          )}
-          <Pressable style={styles.secondaryButton} onPress={() => loadScanHistory(scanHistoryFilter)}>
-            <Text style={styles.secondaryButtonText}>Refresh History</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={loadOverview}>
-            <Text style={styles.secondaryButtonText}>Refresh Universe</Text>
-          </Pressable>
-        </View>
-      </View>
+    <><View style={styles.card}><Text style={styles.cardTitle}>Scanner Pipeline Controls</Text>{(scanIsActive || scannerBusy) && <ProgressBar progress={scanIsActive ? scanProgressPct : progressValue} label={scanIsActive ? `Scan ${scanProgressPct.toFixed(1)}%` : "Running scanner pipeline"} compact />}<Text style={styles.item}>DB path</Text><TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" /><Text style={styles.item}>Preset profiles</Text><TextInput value={selectedPresetsText} onChangeText={setSelectedPresetsText} style={styles.input} placeholder="weekly_momo,weekly_bear" autoCapitalize="none" /><View style={styles.inlineRowWrap}><Pressable style={styles.smallButton} onPress={() => selectPresetCategory("weekly")}><Text style={styles.buttonText}>Weekly</Text></Pressable><Pressable style={styles.smallButton} onPress={() => selectPresetCategory("monthly")}><Text style={styles.buttonText}>Monthly</Text></Pressable><Pressable style={styles.smallButton} onPress={() => setSelectedPresetsText((presetDetails?.items || presets || []).join(","))}><Text style={styles.buttonText}>All</Text></Pressable></View><Text style={styles.fieldLabel}>Preset Search</Text><TextInput value={presetSearch} onChangeText={setPresetSearch} style={styles.input} placeholder="Search preset name" autoCapitalize="none" /><View style={styles.inlineRowWrap}>{availablePresets.slice(0, 12).map((name) => { const active = selectedPresets.includes(name); return <Pressable key={name} style={active ? styles.smallButton : styles.mutedButton} onPress={() => togglePreset(name)}><Text style={styles.buttonText}>{name}</Text></Pressable>; })}</View><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={runScanPipeline}><Text style={styles.buttonText}>Run Scan</Text></Pressable>{scanIsActive && <Pressable style={styles.cancelButton} onPress={cancelScanPipeline}><Text style={styles.buttonText}>Cancel Scan</Text></Pressable>}<Pressable style={styles.secondaryButton} onPress={() => loadScanHistory(scanHistoryFilter)}><Text style={styles.secondaryButtonText}>Refresh History</Text></Pressable></View></View>
+    <View style={styles.panelSplit}><View style={[styles.card, styles.panelCol]}><Text style={styles.cardTitle}>Scan Status</Text><Text style={styles.item}>Job: {scanJobId || "none"} | state: {scanJobStatus}</Text><Text style={styles.item}>Progress: {scanPresetsCompleted}/{scanPresetCount || "-"} presets</Text><Text style={styles.cardTitle}>History</Text><View style={styles.inlineRowWrap}>{[["all", "All"], ["completed", "Completed"], ["failed", "Failed"]].map(([value, label]) => <Pressable key={value} style={scanHistoryFilter === value ? styles.smallButton : styles.mutedButton} onPress={() => setScanHistoryFilter(value)}><Text style={styles.buttonText}>{label}</Text></Pressable>)}</View>{(scanHistoryFiltered || []).slice(0, 10).map((row) => <View key={row.job_id} style={styles.analyticsItemCard}><Text style={styles.analyticsHeadline}>{row.status} | {fmtTimestamp(row.created_at)}</Text><Text style={styles.item}>Job {row.job_id} | rows {row.rows_saved} | elapsed {fmtDurationSeconds(row.elapsed_seconds)}</Text></View>)}</View><View style={[styles.card, styles.panelCol]}><Text style={styles.cardTitle}>Universe Viewer</Text><Text style={styles.fieldLabel}>Preset Filter</Text><TextInput value={universePresetFilter} onChangeText={setUniversePresetFilter} style={styles.input} placeholder="Filter by preset name" autoCapitalize="none" /><Text style={styles.fieldLabel}>Rows To Show</Text><TextInput value={universeLimit} onChangeText={setUniverseLimit} style={styles.input} placeholder="Rows to show" keyboardType="numeric" /><Text style={styles.cardTitle}>Latest Universe ({filteredUniverse.length} shown)</Text>{(filteredUniverse || []).map((row, idx) => { const price = row.price ?? row.close ?? row.last ?? "-"; const rsi = row.rsi ?? row.rsi14 ?? "-"; return <Text key={String(idx)} style={styles.item}>{row.ticker || "?"} | {row.preset || "-"} | price {price} | rsi {rsi}</Text>; })}</View></View></>
+  );
 
-      <View style={styles.panelSplit}>
-        <View style={[styles.card, styles.panelCol]}>
-          <Text style={styles.cardTitle}>Scan Status And History</Text>
-          <Text style={styles.item}>Job: {scanJobId || "none"} | state: {scanJobStatus}</Text>
-          <Text style={styles.item}>Progress: {scanPresetsCompleted}/{scanPresetCount || "-"} presets | ETA: {fmtDurationSeconds(scanEtaSeconds)} | elapsed: {fmtDurationSeconds(scanElapsedSeconds)}</Text>
-          <Text style={styles.item}>Current preset: {scanCurrentPreset || "-"} | failed: {scanFailedPresets.length}</Text>
-          <Text style={styles.item}>Started: {fmtTimestamp(scanStartedAt)} | Finished: {fmtTimestamp(scanFinishedAt)}</Text>
-          <Text style={styles.item}>Universe last refreshed: {fmtTimestamp(scanUniverseRefreshedAt)}</Text>
-          <Text style={styles.item}>Scan status: {scanLastMessage || "idle"}</Text>
-          {!!scanResult && (
-            <Text style={styles.item}>
-              Last result: presets {scanResult.preset_count}, rows saved {scanResult.rows_saved}, failed {scanResult.failed_presets?.length || 0}
-            </Text>
-          )}
+  const renderRecommend = () => (
+    <View style={styles.card}><Text style={styles.cardTitle}>Recommendations</Text>{recommendBusy && <ProgressBar progress={progressValue} label="Computing recommendations" compact />}<Text style={styles.item}>DB path</Text><TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" /><Text style={styles.item}>Tickers (comma-separated)</Text><TextInput value={recommendTickersText} onChangeText={setRecommendTickersText} style={styles.input} placeholder="AAPL,MSFT,NVDA" autoCapitalize="characters" /><View style={styles.inlineRowWrap}><Text style={styles.item}>Save to DB:</Text><Pressable style={recommendSave ? styles.smallButton : styles.mutedButton} onPress={() => setRecommendSave(true)}><Text style={styles.buttonText}>YES</Text></Pressable><Pressable style={!recommendSave ? styles.smallButton : styles.mutedButton} onPress={() => setRecommendSave(false)}><Text style={styles.buttonText}>NO</Text></Pressable></View><Pressable style={styles.button} onPress={runRecommendPipeline}><Text style={styles.buttonText}>Run Recommend</Text></Pressable>{!!recommendResult && <Text style={styles.item}>Run result: tickers {recommendResult.ticker_count}, recs {recommendResult.recommendation_count}, saved {recommendResult.saved ? "yes" : "no"}</Text>}<Text style={styles.cardTitle}>Latest Recs ({latestRecs.length})</Text>{(latestRecs || []).slice(0, 12).map((row, idx) => <Text key={String(idx)} style={styles.item}>{row.ticker} {row.bias || "-"} ({row.horizon || "?"}) conf {Number(row.confidence || 0).toFixed(2)} entry {Number(row.entry || 0).toFixed(2)} stop {Number(row.stop || 0).toFixed(2)} target {Number(row.target || 0).toFixed(2)}</Text>)}</View>
+  );
 
-          <Text style={styles.item}>History filter</Text>
+  const renderOptions = () => (
+    <View style={styles.card}><Text style={styles.cardTitle}>Options Ideas</Text><Text style={styles.fieldLabel}>Ticker</Text><TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" /><Text style={styles.fieldLabel}>Horizon</Text><TextInput value={horizon} onChangeText={setHorizon} style={styles.input} placeholder="Horizon: 1w/1m/3m" /><Text style={styles.fieldLabel}>Bias</Text><TextInput value={optionsBias} onChangeText={setOptionsBias} style={styles.input} placeholder="Bias: long/short" /><Text style={styles.fieldLabel}>Budget</Text><TextInput value={optionsBudget} onChangeText={setOptionsBudget} style={styles.input} placeholder="Budget" keyboardType="numeric" /><Pressable style={styles.button} onPress={loadOptions}><Text style={styles.buttonText}>Load Ideas</Text></Pressable>{!!optionsResultMeta && <Text style={styles.item}>Result: {optionsResultMeta.count} ideas | {optionsResultMeta.horizon} | {optionsResultMeta.bias} | budget ${optionsResultMeta.budget}</Text>}{(optionIdeas || []).slice(0, 12).map((row, idx) => <Text key={String(idx)} style={styles.item}>{row.expiry || "?"} {row.right || ""} {row.strike ? Number(row.strike).toFixed(2) : "-"} | mid {row.mid ? Number(row.mid).toFixed(2) : "-"}</Text>)}</View>
+  );
+
+  // ====== PORTFOLIO TAB ======
+  const renderPortfolio = () => {
+    const equityValues = portfolioEquity.map((row) => Number(row.equity || row.value || 0));
+    const equityDates = portfolioEquity.map((row) => String(row.date || row.timestamp || ""));
+    const signalItems = mcpSignals?.signals || [];
+
+    return (
+      <>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Portfolio Dashboard</Text>
           <View style={styles.inlineRowWrap}>
-            {[
-              ["all", "All"],
-              ["running", "Running"],
-              ["completed", "Completed"],
-              ["canceled", "Canceled"],
-              ["failed", "Failed"],
-            ].map(([value, label]) => (
-              <Pressable key={value} style={scanHistoryFilter === value ? styles.smallButton : styles.mutedButton} onPress={() => setScanHistoryFilter(value)}>
-                <Text style={styles.buttonText}>{label}</Text>
-              </Pressable>
-            ))}
+            <Pressable style={styles.button} onPress={loadPortfolio}><Text style={styles.buttonText}>Refresh Portfolio</Text></Pressable>
+            <Pressable style={styles.secondaryButton} onPress={loadMcpStatus}><Text style={styles.secondaryButtonText}>Check MCP</Text></Pressable>
+          </View>
+        </View>
+
+        <View style={styles.panelSplit}>
+          <View style={[styles.card, styles.panelCol]}>
+            <Text style={styles.cardTitle}>Account</Text>
+            {portfolioAccount ? (
+              <>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Equity</Text><Text style={styles.metricValue}>${fmtNumber(portfolioAccount.equity, 2)}</Text></View>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Cash</Text><Text style={styles.metricValue}>${fmtNumber(portfolioAccount.cash, 2)}</Text></View>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Buying Power</Text><Text style={styles.metricValue}>${fmtNumber(portfolioAccount.buying_power, 2)}</Text></View>
+              </>
+            ) : (
+              <Text style={styles.mutedText}>Connect Robinhood MCP to load account data.</Text>
+            )}
           </View>
 
-          <Text style={styles.item}>Rows saved trend (last {scanHistoryRowsSeries.length} jobs)</Text>
-          <MiniSeriesChart series={[{ label: "rows", values: scanHistoryRowsSeries, color: THEME.accentDeep, width: 3 }]} height={90} />
-          <Text style={styles.item}>Duration trend seconds (last {scanHistoryDurationSeries.length} jobs)</Text>
-          <MiniSeriesChart series={[{ label: "duration", values: scanHistoryDurationSeries, color: THEME.warn, width: 3 }]} height={90} />
-
-          {(scanHistoryFiltered || []).slice(0, 10).map((row) => (
-            <View key={row.job_id} style={styles.analyticsItemCard}>
-              <Text style={styles.analyticsHeadline}>{row.status} | {fmtTimestamp(row.created_at)}</Text>
-              <Text style={styles.item}>Job {row.job_id}</Text>
-              <Text style={styles.item}>Progress {fmtNumber(row.progress_pct)}% | presets {row.presets_completed}/{row.preset_count} | rows {row.rows_saved}</Text>
-              <Text style={styles.item}>Elapsed {fmtDurationSeconds(row.elapsed_seconds)} | ETA {fmtDurationSeconds(row.eta_seconds)} | failed {row.failed_presets?.length || 0}</Text>
-            </View>
-          ))}
+          <View style={[styles.card, styles.panelCol]}>
+            <Text style={styles.cardTitle}>Signal Metrics</Text>
+            {portfolioMetrics ? (
+              <>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Total Signals</Text><Text style={styles.metricValue}>{portfolioMetrics.total_signals}</Text></View>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Long / Short</Text><Text style={styles.metricValue}>{portfolioMetrics.long_count} / {portfolioMetrics.short_count}</Text></View>
+                <View style={styles.metricRow}><Text style={styles.metricLabel}>Avg Strength</Text><Text style={styles.metricValue}>{fmtNumber(portfolioMetrics.avg_strength, 3)}</Text></View>
+              </>
+            ) : (
+              <Text style={styles.mutedText}>Load portfolio signals to see metrics.</Text>
+            )}
+          </View>
         </View>
 
-        <View style={[styles.card, styles.panelCol]}>
-          <Text style={styles.cardTitle}>Universe Viewer</Text>
-          <Text style={styles.fieldLabel}>Preset Filter</Text>
-          <TextInput value={universePresetFilter} onChangeText={setUniversePresetFilter} style={styles.input} placeholder="Filter by preset name (e.g., weekly)" autoCapitalize="none" />
-          <Text style={styles.fieldLabel}>Rows To Show</Text>
-          <TextInput value={universeLimit} onChangeText={setUniverseLimit} style={styles.input} placeholder="Rows to show (1-200)" keyboardType="numeric" />
-          <Text style={styles.cardTitle}>Latest Universe ({filteredUniverse.length} shown of {latestUniverse.length})</Text>
-          {(filteredUniverse || []).map((row, idx) => {
-            const price = row.price ?? row.close ?? row.last ?? "-";
-            const rsi = row.rsi ?? row.rsi14 ?? row["RSI(14)"] ?? "-";
-            const relVolume = row.rel_volume ?? row.relative_volume ?? row.rv ?? row["Rel Volume"] ?? "-";
+        {equityValues.length > 0 && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Equity Curve</Text>
+            <MiniSeriesChart series={[{ label: "equity", values: equityValues, color: THEME.accentDeep, width: 3 }]} xLabels={equityDates} height={160} />
+          </View>
+        )}
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Active Positions ({portfolioPositions.length})</Text>
+          {portfolioPositions.length === 0 ? (
+            <Text style={styles.mutedText}>No active positions loaded.</Text>
+          ) : (
+            portfolioPositions.map((pos, idx) => {
+              const pnl = Number(pos.unrealized_pl || pos.pnl || 0);
+              const pnlColor = pnl >= 0 ? THEME.ok : THEME.warn;
+              return (
+                <View key={`pos-${idx}`} style={[styles.analyticsItemCard, { borderLeftWidth: 4, borderLeftColor: pnlColor }]}>
+                  <Text style={styles.analyticsHeadline}>{pos.ticker || pos.symbol} — {pos.qty || pos.quantity} shares @ ${fmtNumber(pos.avg_entry_price || pos.avg_price)}</Text>
+                  <Text style={styles.item}>Current: ${fmtNumber(pos.current_price || pos.price)} | Market value: ${fmtNumber(pos.market_value, 2)}</Text>
+                  <Text style={[styles.item, { color: pnlColor, fontWeight: "700" }]}>P&L: {pnl >= 0 ? "+" : ""}{fmtPct(pos.unrealized_plpc || 0)} (${fmtNumber(pnl, 2)})</Text>
+                </View>
+              );
+            })
+          )}
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>AI Signals ({signalItems.length})</Text>
+          {signalItems.length === 0 ? (
+            <Text style={styles.mutedText}>No AI signals loaded. Run Check MCP or Connect Robinhood.</Text>
+          ) : (
+            signalItems.map((sig, idx) => {
+              const dir = sig.action || sig.signal || "hold";
+              const dirColor = dir === "buy" || dir === "long" ? THEME.ok : dir === "sell" || dir === "short" ? THEME.warn : THEME.textMuted;
+              const conf = Number(sig.strength || sig.score || sig.confidence || 0);
+              return (
+                <View key={`sig-${idx}`} style={[styles.analyticsItemCard, { borderLeftWidth: 4, borderLeftColor: dirColor }]}>
+                  <View style={styles.inlineRow}>
+                    <Text style={[styles.analyticsHeadline, { color: dirColor }]}>{dir.toUpperCase()}</Text>
+                    <Text style={styles.analyticsHeadline}>{sig.ticker}</Text>
+                    <View style={{ flex: 1 }} />
+                    <Text style={styles.item}>Confidence {(conf * 100).toFixed(0)}%</Text>
+                  </View>
+                  {sig.reason && <Text style={styles.item}>{String(sig.reason).slice(0, 120)}</Text>}
+                </View>
+              );
+            })
+          )}
+        </View>
+      </>
+    );
+  };
+
+  // ====== TRADE TAB ======
+  const renderTrade = () => (
+    <>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Paper Trade</Text>
+        <Text style={styles.mutedText}>Simulated paper trading. No real orders are placed.</Text>
+        <View style={styles.inlineRowWrap}>
+          <Pressable style={styles.button} onPress={loadTradeData}><Text style={styles.buttonText}>Refresh Trade Data</Text></Pressable>
+        </View>
+
+        <Text style={styles.fieldLabel}>Ticker</Text>
+        <TextInput value={tradeTicker} onChangeText={setTradeTicker} style={styles.input} placeholder="AAPL" autoCapitalize="characters" />
+        <View style={styles.inlineRowWrap}>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Action</Text>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Quantity</Text>
+        </View>
+        <View style={styles.inlineRowWrap}>
+          <TextInput value={tradeAction} onChangeText={setTradeAction} style={[styles.input, styles.compactInput]} placeholder="buy/sell" autoCapitalize="none" />
+          <TextInput value={tradeQty} onChangeText={setTradeQty} style={[styles.input, styles.compactInput]} placeholder="10" keyboardType="numeric" />
+        </View>
+        <View style={styles.inlineRowWrap}>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Stop Loss %</Text>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Take Profit %</Text>
+        </View>
+        <View style={styles.inlineRowWrap}>
+          <TextInput value={tradeStopLoss} onChangeText={setTradeStopLoss} style={[styles.input, styles.compactInput]} placeholder="Optional stop loss %" keyboardType="numeric" />
+          <TextInput value={tradeTakeProfit} onChangeText={setTradeTakeProfit} style={[styles.input, styles.compactInput]} placeholder="Optional take profit %" keyboardType="numeric" />
+        </View>
+        <Pressable style={styles.button} onPress={executePaperTrade}><Text style={styles.buttonText}>Place Paper Trade</Text></Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Active Positions ({tradeActivePositions.length})</Text>
+        {tradeActivePositions.length === 0 ? (
+          <Text style={styles.mutedText}>No active paper positions.</Text>
+        ) : (
+          tradeActivePositions.map((pos, idx) => {
+            const pnl = Number(pos.unrealized_pl || pos.pnl || 0);
             return (
-              <Text key={String(idx)} style={styles.item}>{row.ticker || row.symbol || "?"} | {row.preset || "-"} | {row.sector || "-"} | price {price} | rsi {rsi} | rv {relVolume}</Text>
+              <View key={`tpos-${idx}`} style={[styles.analyticsItemCard, { borderLeftWidth: 4, borderLeftColor: pnl >= 0 ? THEME.ok : THEME.warn }]}>
+                <Text style={styles.analyticsHeadline}>{pos.ticker} — {pos.qty} shares @ ${fmtNumber(pos.avg_entry_price || pos.avg_price)}</Text>
+                <Text style={[styles.item, { color: pnl >= 0 ? THEME.ok : THEME.warn, fontWeight: "700" }]}>P&L: {pnl >= 0 ? "+" : ""}{fmtPct(pos.unrealized_plpc || 0)} (${fmtNumber(pnl, 2)})</Text>
+              </View>
             );
-          })}
-        </View>
+          })
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Order History ({tradeOrderHistory.length})</Text>
+        {tradeOrderHistory.length === 0 ? (
+          <Text style={styles.mutedText}>No paper trade history yet.</Text>
+        ) : (
+          tradeOrderHistory.slice(0, 20).map((order, idx) => (
+            <View key={`ord-${idx}`} style={styles.analyticsItemCard}>
+              <Text style={styles.analyticsHeadline}>{order.ticker} — {order.action} x{order.qty || order.quantity} [{(order.status || "pending").toUpperCase()}]</Text>
+              <Text style={styles.item}>Notional: ${fmtNumber(order.notional, 2)} | {fmtTimestamp(order.created_at || order.ts)}</Text>
+            </View>
+          ))
+        )}
       </View>
     </>
   );
 
-  const renderRecommend = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Recommendations</Text>
-      {recommendBusy && <ProgressBar progress={progressValue} label="Computing recommendations" compact />}
-      <Text style={styles.item}>DB path</Text>
-      <TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" />
-      <Text style={styles.item}>Tickers (comma-separated, leave empty for full high-interest universe)</Text>
-      <TextInput value={recommendTickersText} onChangeText={setRecommendTickersText} style={styles.input} placeholder="AAPL,MSFT,NVDA" autoCapitalize="characters" />
-      <View style={styles.inlineRowWrap}>
-        <Text style={styles.item}>Save to DB:</Text>
-        <Pressable style={recommendSave ? styles.smallButton : styles.mutedButton} onPress={() => setRecommendSave(true)}>
-          <Text style={styles.buttonText}>YES</Text>
-        </Pressable>
-        <Pressable style={!recommendSave ? styles.smallButton : styles.mutedButton} onPress={() => setRecommendSave(false)}>
-          <Text style={styles.buttonText}>NO</Text>
-        </Pressable>
-      </View>
-      <Pressable style={styles.button} onPress={runRecommendPipeline}>
-        <Text style={styles.buttonText}>Run Recommend</Text>
-      </Pressable>
-      {!!recommendResult && (
-        <Text style={styles.item}>
-          Run result: tickers {recommendResult.ticker_count}, recs {recommendResult.recommendation_count}, failed {recommendResult.failed_tickers?.length || 0}, saved {recommendResult.saved ? "yes" : "no"}
-        </Text>
-      )}
-      <Text style={styles.cardTitle}>Latest Recs ({latestRecs.length})</Text>
-      {(latestRecs || []).slice(0, 12).map((row, idx) => (
-        <Text key={String(idx)} style={styles.item}>
-          {row.ticker} {row.bias || "-"} ({row.horizon || "?"}) conf {Number(row.confidence || 0).toFixed(2)} entry {Number(row.entry || 0).toFixed(2)} stop {Number(row.stop || 0).toFixed(2)} target {Number(row.target || 0).toFixed(2)}
-        </Text>
-      ))}
-    </View>
-  );
-
-  const renderOptions = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Options Ideas</Text>
-      <Text style={styles.fieldLabel}>Ticker</Text>
-      <TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" />
-      <Text style={styles.fieldLabel}>Horizon</Text>
-      <TextInput value={horizon} onChangeText={setHorizon} style={styles.input} placeholder="Horizon: 1w/1m/3m" />
-      <Text style={styles.fieldLabel}>Bias</Text>
-      <TextInput value={optionsBias} onChangeText={setOptionsBias} style={styles.input} placeholder="Bias: long/short" />
-      <Text style={styles.fieldLabel}>Budget</Text>
-      <TextInput value={optionsBudget} onChangeText={setOptionsBudget} style={styles.input} placeholder="Budget" keyboardType="numeric" />
-      <Pressable style={styles.button} onPress={loadOptions}>
-        <Text style={styles.buttonText}>Load Ideas</Text>
-      </Pressable>
-      {!!optionsResultMeta && (
-        <Text style={styles.item}>Result: {optionsResultMeta.count} ideas | {optionsResultMeta.horizon} | {optionsResultMeta.bias} | budget ${optionsResultMeta.budget}</Text>
-      )}
-      {(optionIdeas || []).slice(0, 12).map((row, idx) => (
-        <Text key={String(idx)} style={styles.item}>
-          {row.expiry || "?"} {row.right || ""} {row.strike ? Number(row.strike).toFixed(2) : "-"} | mid {row.mid ? Number(row.mid).toFixed(2) : "-"} | spread {(row.ask !== undefined && row.bid !== undefined) ? Number(row.ask - row.bid).toFixed(2) : "-"} | OI {row.open_interest ?? "-"} | Vol {row.volume ?? "-"}
-        </Text>
-      ))}
-    </View>
-  );
-
+  // ====== ANALYTICS TAB ======
   const renderAnalytics = () => {
     const priceSeries = indicatorTail.map((row) => Number(row["adj close"] || row.close || 0));
     const sma20Series = indicatorTail.map((row) => Number(row.sma20 || 0));
@@ -2253,14 +1030,8 @@ export default function App() {
     const compareTickers = performanceCompareChart?.tickers || [];
     const compareSeries = compareTickers.slice(0, 6).map((name, idx) => {
       const palette = [THEME.text, THEME.accentDeep, THEME.warn, "#0ea5e9", "#b45309", "#475569"];
-      return {
-        label: name,
-        values: compareRows.map((row) => Number(row[name] || 0)),
-        color: palette[idx % palette.length],
-        width: 2,
-      };
+      return { label: name, values: compareRows.map((row) => Number(row[name] || 0)), color: palette[idx % palette.length], width: 2 };
     });
-
     const seasonalityCompareRows = seasonalityCompareChart?.items || [];
     const seasonalityStockAvg = seasonalityCompareRows.map((row) => Number(row.stock_avg_ret || 0));
     const seasonalitySectorAvg = seasonalityCompareRows.map((row) => Number(row.sector_avg_ret || 0));
@@ -2269,273 +1040,20 @@ export default function App() {
     const seasonalitySectorCum = seasonalityCompareRows.map((row) => Number(row.sector_cum || 0));
 
     return (
-      <>
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Analytics Workbench</Text>
-          {analyticsBusy && <ProgressBar progress={progressValue} label="Loading analytics datasets" compact />}
-          <Text style={styles.item}>Load ranked setups, indicator charts, price-distribution support and resistance, seasonality, and lightweight forecasts from the same quant backend.</Text>
-          <Text style={styles.item}>Analytics DB path</Text>
-          <TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" />
-          <Text style={styles.fieldLabel}>Primary Ticker</Text>
-          <TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Primary ticker" autoCapitalize="characters" />
-          <Text style={styles.fieldLabel}>Ranking Basket</Text>
-          <TextInput value={analyticsTickersText} onChangeText={setAnalyticsTickersText} style={styles.input} placeholder="Ranking basket: AAPL,MSFT,NVDA" autoCapitalize="characters" />
-          <Text style={styles.fieldLabel}>Analytics Parameters</Text>
-          <View style={styles.inlineRowWrap}>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Period</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Interval</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Bins</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Forecast Days</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>News Days</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>News Sentiment</Text>
-          </View>
-          <View style={styles.inlineRowWrap}>
-            <TextInput value={analyticsPeriod} onChangeText={setAnalyticsPeriod} style={[styles.input, styles.compactInput]} placeholder="Period" autoCapitalize="none" />
-            <TextInput value={analyticsInterval} onChangeText={setAnalyticsInterval} style={[styles.input, styles.compactInput]} placeholder="Interval" autoCapitalize="none" />
-            <TextInput value={analyticsBins} onChangeText={setAnalyticsBins} style={[styles.input, styles.compactInput]} placeholder="Bins" keyboardType="numeric" />
-            <TextInput value={analyticsHorizon} onChangeText={setAnalyticsHorizon} style={[styles.input, styles.compactInput]} placeholder="Forecast days" keyboardType="numeric" />
-            <TextInput value={newsDays} onChangeText={setNewsDays} style={[styles.input, styles.compactInput]} placeholder="News days" keyboardType="numeric" />
-            <TextInput value={newsSentiment} onChangeText={setNewsSentiment} style={[styles.input, styles.compactInput]} placeholder="News sentiment" autoCapitalize="none" />
-          </View>
-          <Text style={styles.fieldLabel}>Comparison And Seasonality Overrides</Text>
-          <View style={styles.inlineRowWrap}>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Compare Base</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Seasonality Years</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Sector Override</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Sector ETF Override</Text>
-          </View>
-          <View style={styles.inlineRowWrap}>
-            <TextInput value={compareBase} onChangeText={setCompareBase} style={[styles.input, styles.compactInput]} placeholder="Compare base" keyboardType="numeric" />
-            <TextInput value={seasonalityYears} onChangeText={setSeasonalityYears} style={[styles.input, styles.compactInput]} placeholder="Seasonality years" keyboardType="numeric" />
-            <TextInput value={seasonalitySectorOverride} onChangeText={setSeasonalitySectorOverride} style={[styles.input, styles.compactInput]} placeholder="Sector override" autoCapitalize="words" />
-            <TextInput value={seasonalityEtfOverride} onChangeText={setSeasonalityEtfOverride} style={[styles.input, styles.compactInput]} placeholder="Sector ETF override" autoCapitalize="characters" />
-          </View>
-          <View style={styles.inlineRowWrap}>
-            <Pressable style={styles.button} onPress={loadAnalytics}>
-              <Text style={styles.buttonText}>Load Analytics</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={loadChartsFast}>
-              <Text style={styles.secondaryButtonText}>Load Core Charts Fast</Text>
-            </Pressable>
-            <Pressable style={styles.button} onPress={cacheMarketSeries}>
-              <Text style={styles.buttonText}>Fetch + Cache Series</Text>
-            </Pressable>
-            <Pressable style={styles.button} onPress={saveAnalyticsLeaderboard}>
-              <Text style={styles.buttonText}>Save Leaderboard</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={loadLatestAnalyticsLeaderboard}>
-              <Text style={styles.secondaryButtonText}>Load Latest Leaderboard</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={loadTrainingFeatures}>
-              <Text style={styles.secondaryButtonText}>Load Training Features</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={runRecommendPipeline}>
-              <Text style={styles.secondaryButtonText}>Run Recommend Pipeline</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.item}>Saved leaderboard batch: {analyticsBatchId || "none"}</Text>
-          {!!marketSeriesCache && <Text style={styles.item}>Cached series: {marketSeriesCache.count || 0} rows at {marketSeriesCache.path || "n/a"}</Text>}
-          <Text style={styles.item}>Indicator rows loaded: {indicatorChart.length} | RSI points: {indicatorTail.filter((row) => Number.isFinite(Number(row.rsi14))).length}</Text>
-          {!!analyticsSaveResult && <Text style={styles.item}>Save result: count {analyticsSaveResult.count || 0} | saved {analyticsSaveResult.saved ? "yes" : "no"}</Text>}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Live Signal Generator</Text>
-          <Text style={styles.item}>
-            Runs breakout, RSI cross, MACD cross, and pullback detectors on the latest {signalsTimeframe} bars for {ticker}.
-            {" "}{signalsData?.data_source === "alpaca" ? "Data: Alpaca real-time." : "Data: yfinance (delayed). Set ALPACA_API_KEY for real-time."}
-          </Text>
-          <View style={styles.rowWrap}>
-            {["1Min","5Min","15Min","30Min","1Hour","1Day"].map((tf) => (
-              <Pressable
-                key={tf}
-                style={[styles.chip, signalsTimeframe === tf && styles.chipActive]}
-                onPress={() => setSignalsTimeframe(tf)}
-              >
-                <Text style={[styles.chipText, signalsTimeframe === tf && styles.chipActiveText]}>{tf}</Text>
-              </Pressable>
-            ))}
-          </View>
-          <Pressable style={[styles.button, signalsLoading && styles.buttonDisabled]} onPress={loadSignals} disabled={signalsLoading}>
-            <Text style={styles.buttonText}>{signalsLoading ? "Loading…" : "Run Signal Scan"}</Text>
-          </Pressable>
-          {!!signalsData && (
-            <>
-              <Text style={styles.item}>
-                {signalsData.bar_count} bars loaded | generated {signalsData.generated_at?.slice(0,19) || ""}
-              </Text>
-              {signalsData.latest_bar && (
-                <Text style={styles.item}>
-                  Latest bar — O {fmtNumber(signalsData.latest_bar.open)} H {fmtNumber(signalsData.latest_bar.high)} L {fmtNumber(signalsData.latest_bar.low)} C {fmtNumber(signalsData.latest_bar.close)} Vol {fmtNumber(signalsData.latest_bar.volume, 0)}
-                </Text>
-              )}
-              {(signalsData.signals || []).length === 0 ? (
-                <Text style={[styles.item, {color: THEME.muted}]}>No signals fired on the latest bar.</Text>
-              ) : (
-                <>
-                  <Text style={[styles.item, {fontWeight:"bold", color: THEME.accent}]}>
-                    {signalsData.signal_count} signal{signalsData.signal_count !== 1 ? "s" : ""} detected:
-                  </Text>
-                  {(signalsData.signals || []).map((sig, idx) => (
-                    <View key={`sig-${idx}`} style={[styles.analyticsItemCard, {borderLeftWidth:3, borderLeftColor: sig.direction==="long" ? "#16a34a" : "#dc2626"}]}>
-                      <Text style={styles.analyticsHeadline}>
-                        {sig.signal_type.toUpperCase()} · {sig.direction.toUpperCase()} · {sig.ticker} @ {fmtNumber(sig.price)}
-                      </Text>
-                      <Text style={styles.item}>Confidence {fmtNumber(sig.confidence, 3)} | {sig.ts?.slice(0,19) || ""}</Text>
-                      <Text style={styles.item}>
-                        {Object.entries(sig.details || {}).map(([k,v]) => `${k}: ${typeof v==="number" ? fmtNumber(v,3) : v}`).join(" | ")}
-                      </Text>
-                    </View>
-                  ))}
-                </>
-              )}
-              {/* Mini close-price chart for the signal scan window */}
-              {signalsData.bar_count > 0 && (() => {
-                const bars = signalsData._bars || [];
-                return null; // bars not yet passed through; full chart comes from /charts/indicators
-              })()}
-            </>
-          )}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Ranked Setups ({analyticsRanked.length})</Text>
-          {(analyticsRanked || []).slice(0, 6).map((row) => (
-            <View key={row.ticker} style={styles.analyticsItemCard}>
-              <Text style={styles.analyticsHeadline}>{row.ticker} | {row.bias} | {row.primary_horizon} | composite {fmtNumber(row.composite_score)}</Text>
-              <Text style={styles.item}>Price {fmtNumber(row.price)} | support {fmtNumber(row.support_resistance?.nearest_support)} | resistance {fmtNumber(row.support_resistance?.nearest_resistance)}</Text>
-              <Text style={styles.item}>Upside to resistance {fmtPct(row.support_resistance?.resistance_gap_pct)} | buffer to support {fmtPct(row.support_resistance?.support_gap_pct)}</Text>
-              <ScoreBars breakdown={row.score_breakdown} />
-              {(row.recommendations || []).slice(0, 3).map((rec) => (
-                <Text key={`${row.ticker}-${rec.horizon}`} style={styles.item}>{rec.horizon} {rec.bias} | conf {fmtNumber(rec.confidence)} | entry {fmtNumber(rec.entry)} | stop {fmtNumber(rec.stop)} | target {fmtNumber(rec.target)}</Text>
-              ))}
-            </View>
-          ))}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Persisted Leaderboard ({analyticsLatest.length})</Text>
-          <Text style={styles.item}>Latest saved batch: {analyticsBatchId || "not loaded"}</Text>
-          {(analyticsLatest || []).slice(0, 6).map((row, idx) => (
-            <Text key={`latest-${row.ticker}-${String(idx)}`} style={styles.item}>
-              {row.ticker} | {row.bias} | {row.primary_horizon} | composite {fmtNumber(row.composite_score)} | support {fmtNumber(row.nearest_support)} | resistance {fmtNumber(row.nearest_resistance)}
-            </Text>
-          ))}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Price And Trend Structure</Text>
-          <Text style={styles.item}>{ticker} adjusted close vs SMA20 and SMA50 over the latest {indicatorTail.length} bars.</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "price", values: priceSeries, color: THEME.text, width: 3, type: "line" },
-              { label: "sma20", values: sma20Series, color: THEME.accent, width: 2, type: "line" },
-              { label: "sma50", values: sma50Series, color: THEME.warn, width: 2, type: "line" },
-            ]}
-            xLabels={indicatorTail.map((row) => String(row.date || ""))}
-            height={140}
-          />
-          <Text style={styles.item}>RSI 14</Text>
-          <MiniSeriesChart series={[{ label: "rsi", values: rsiSeries, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={90} />
-          <Text style={styles.item}>Volume</Text>
-          <MiniSeriesChart series={[{ label: "volume", values: volumeSeries, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={90} />
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Stock Performance Comparison</Text>
-          <Text style={styles.item}>Normalized comparison for selected tickers from a base of {fmtNumber(compareBase)}. This helps compare relative strength and drawdown behavior on the same scale.</Text>
-          <MiniSeriesChart series={compareSeries} height={130} />
-          {(performanceCompareChart?.summary || []).slice(0, 8).map((row) => (
-            <Text key={`cmp-${row.ticker}`} style={styles.item}>{row.ticker} | return {fmtPct(row.return_pct)} | vol {fmtPct(row.volatility)}</Text>
-          ))}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Price Distribution And Quantified Levels</Text>
-          <Text style={styles.item}>Distribution density approximates where price spent the most time and volume, which is a practical support and resistance proxy for both execution and training features.</Text>
-          <Text style={styles.item}>Current {fmtNumber(distributionChart?.current_price)} | range {fmtPct(distributionChart?.range_pct)}</Text>
-          <HorizontalDistribution items={distributionChart?.bins || []} color={THEME.accent} />
-          <Text style={styles.item}>Support levels: {(distributionChart?.support_levels || []).map((row) => `${fmtNumber(row.price)} (${fmtPct(row.distance_pct)})`).join(" | ") || "-"}</Text>
-          <Text style={styles.item}>Resistance levels: {(distributionChart?.resistance_levels || []).map((row) => `${fmtNumber(row.price)} (${fmtPct(row.distance_pct)})`).join(" | ") || "-"}</Text>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>News Timeline</Text>
-          <Text style={styles.item}>Articles are aligned to the nearest price date so you can compare event timing against price behavior.</Text>
-          <Text style={styles.item}>Archive summary: {newsSummary?.summary || "-"}</Text>
-          <NewsTimelineChart timeline={newsTimeline} />
-          <NewsSummaryList summary={newsSummary} />
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Forecast Envelope</Text>
-          <Text style={styles.item}>Daily trend {fmtPct(forecastChart?.daily_trend_pct)} | projected return {fmtPct(forecastChart?.forecast_return_pct)} | uncertainty band {fmtPct(forecastChart?.confidence_band_pct)}</Text>
-          <Text style={styles.item}>Recent realized prices</Text>
-          <MiniSeriesChart series={[{ label: "history", values: historySeries, color: THEME.text, width: 3 }]} height={120} />
-          <Text style={styles.item}>Forward path with upper and lower envelope</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "forecast-lower", values: forecastLowerSeries, color: "#d97706", width: 2, opacity: 0.5 },
-              { label: "forecast-center", values: forecastPriceSeries, color: THEME.accentDeep, width: 3 },
-              { label: "forecast-upper", values: forecastUpperSeries, color: "#16a34a", width: 2, opacity: 0.5 },
-            ]}
-            height={120}
-          />
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Seasonality</Text>
-          <Text style={styles.item}>Average daily return and realized deviation by day-of-year across the historical sample.</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "avg_ret", values: seasonalityAvg, color: THEME.accent, width: 3, type: "line" },
-              { label: "std_ret", values: seasonalityStd, color: THEME.warn, width: 2, opacity: 0.7, type: "line" },
-            ]}
-            xLabels={seasonalityTail.map((row, idx) => dayOfYearLabel(row, idx + 1))}
-            height={120}
-          />
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Stock Vs Sector Seasonality</Text>
-          <Text style={styles.item}>{seasonalityCompareChart?.ticker || ticker} vs {seasonalityCompareChart?.sector_etf || "sector ETF"} ({seasonalityCompareChart?.sector || "auto sector"})</Text>
-          <Text style={styles.item}>Alignment corr {fmtNumber(seasonalityCompareChart?.metrics?.corr, 3)} | follow-rate {fmtPct(seasonalityCompareChart?.metrics?.follow_rate)} | mean abs diff {fmtPct(seasonalityCompareChart?.metrics?.mean_abs_diff)}</Text>
-          <Text style={styles.item}>Average seasonal return by day-of-year</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "stock-avg", values: seasonalityStockAvg, color: THEME.accentDeep, width: 3, type: "line" },
-              { label: "sector-avg", values: seasonalitySectorAvg, color: "#0ea5e9", width: 2, type: "line" },
-              { label: "spread", values: seasonalitySpread, color: THEME.warn, width: 2, opacity: 0.7, type: "line" },
-            ]}
-            height={120}
-          />
-          <Text style={styles.item}>Cumulative seasonal path</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "stock-cum", values: seasonalityStockCum, color: THEME.text, width: 3, type: "line" },
-              { label: "sector-cum", values: seasonalitySectorCum, color: "#16a34a", width: 2, type: "line" },
-            ]}
-            height={120}
-          />
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Training Features ({trainingFeatures.length})</Text>
-          <Text style={styles.item}>These rows are model-ready numeric features derived from the same recommendation and distribution pipeline, useful for training or ranking experiments.</Text>
-          {(trainingFeatures || []).slice(0, 8).map((row) => (
-            <View key={`feat-${row.ticker}`} style={styles.analyticsItemCard}>
-              <Text style={styles.analyticsHeadline}>{row.ticker} | composite {fmtNumber(row.composite_score)} | bias {row.top_bias} | horizon {row.primary_horizon}</Text>
-              <Text style={styles.item}>5d {fmtPct(row.ret_5d)} | 21d {fmtPct(row.ret_21d)} | 63d {fmtPct(row.ret_63d)}</Text>
-              <Text style={styles.item}>RSI {fmtNumber(row.rsi14)} | ATR {fmtNumber(row.atr14)} | Vol20 {fmtNumber(row.vol20, 3)}</Text>
-              <Text style={styles.item}>SMA20 {fmtPct(row.distance_sma20_pct)} | SMA50 {fmtPct(row.distance_sma50_pct)} | SMA200 {fmtPct(row.distance_sma200_pct)}</Text>
-              <Text style={styles.item}>Forecast {fmtPct(row.forecast_return_pct)} | band {fmtPct(row.forecast_band_pct)} | trend/day {fmtPct(row.forecast_daily_trend_pct)}</Text>
-            </View>
-          ))}
-        </View>
-      </>
+      <><View style={styles.card}><Text style={styles.cardTitle}>Analytics Workbench</Text>{analyticsBusy && <ProgressBar progress={progressValue} label="Loading analytics datasets" compact />}<Text style={styles.fieldLabel}>Primary Ticker</Text><TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" autoCapitalize="characters" /><Text style={styles.fieldLabel}>Ranking Basket</Text><TextInput value={analyticsTickersText} onChangeText={setAnalyticsTickersText} style={styles.input} placeholder="AAPL,MSFT,NVDA" autoCapitalize="characters" /><View style={styles.inlineRowWrap}><TextInput value={analyticsPeriod} onChangeText={setAnalyticsPeriod} style={[styles.input, styles.compactInput]} placeholder="Period" autoCapitalize="none" /><TextInput value={analyticsInterval} onChangeText={setAnalyticsInterval} style={[styles.input, styles.compactInput]} placeholder="Interval" autoCapitalize="none" /><TextInput value={analyticsBins} onChangeText={setAnalyticsBins} style={[styles.input, styles.compactInput]} placeholder="Bins" keyboardType="numeric" /><TextInput value={analyticsHorizon} onChangeText={setAnalyticsHorizon} style={[styles.input, styles.compactInput]} placeholder="Forecast days" keyboardType="numeric" /></View><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={loadAnalytics}><Text style={styles.buttonText}>Load Analytics</Text></Pressable><Pressable style={styles.secondaryButton} onPress={loadChartsFast}><Text style={styles.secondaryButtonText}>Load Core Charts Fast</Text></Pressable></View></View>
+      <View style={styles.card}><Text style={styles.cardTitle}>Ranked Setups ({analyticsRanked.length})</Text>{(analyticsRanked || []).slice(0, 6).map((row) => (<View key={row.ticker} style={styles.analyticsItemCard}><Text style={styles.analyticsHeadline}>{row.ticker} | {row.bias} | {row.primary_horizon} | composite {fmtNumber(row.composite_score)}</Text><Text style={styles.item}>Price {fmtNumber(row.price)} | support {fmtNumber(row.support_resistance?.nearest_support)} | resistance {fmtNumber(row.support_resistance?.nearest_resistance)}</Text><ScoreBars breakdown={row.score_breakdown} /></View>))}</View>
+      <View style={styles.card}><Text style={styles.cardTitle}>Price + SMA</Text><MiniSeriesChart series={[{ label: "price", values: priceSeries, color: THEME.text, width: 3, type: "line" }, { label: "sma20", values: sma20Series, color: THEME.accent, width: 2, type: "line" }, { label: "sma50", values: sma50Series, color: THEME.warn, width: 2, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={140} />
+      <Text style={styles.item}>RSI 14</Text><MiniSeriesChart series={[{ label: "rsi", values: rsiSeries, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={90} />
+      <Text style={styles.item}>Volume</Text><MiniSeriesChart series={[{ label: "volume", values: volumeSeries, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={90} /></View>
+      {distributionChart && (<View style={styles.card}><Text style={styles.cardTitle}>Price Distribution</Text><Text style={styles.item}>Current {fmtNumber(distributionChart?.current_price)} | range {fmtPct(distributionChart?.range_pct)}</Text><HorizontalDistribution items={distributionChart?.bins || []} color={THEME.accent} /></View>)}
+      {forecastChart && (<View style={styles.card}><Text style={styles.cardTitle}>Forecast Envelope</Text><Text style={styles.item}>Daily trend {fmtPct(forecastChart?.daily_trend_pct)} | projected return {fmtPct(forecastChart?.forecast_return_pct)}</Text><MiniSeriesChart series={[{ label: "history", values: historySeries, color: THEME.text, width: 3 }]} height={120} /><MiniSeriesChart series={[{ label: "fc-lower", values: forecastLowerSeries, color: "#d97706", width: 2, opacity: 0.5 }, { label: "fc-center", values: forecastPriceSeries, color: THEME.accentDeep, width: 3 }, { label: "fc-upper", values: forecastUpperSeries, color: "#16a34a", width: 2, opacity: 0.5 }]} height={120} /></View>)}
+      {seasonalityChart.length > 0 && (<View style={styles.card}><Text style={styles.cardTitle}>Seasonality</Text><MiniSeriesChart series={[{ label: "avg_ret", values: seasonalityAvg, color: THEME.accent, width: 3 }, { label: "std_ret", values: seasonalityStd, color: THEME.warn, width: 2, opacity: 0.7 }]} xLabels={seasonalityTail.map((row, idx) => dayOfYearLabel(row, idx + 1))} height={120} /></View>)}
+      {performanceCompareChart && (<View style={styles.card}><Text style={styles.cardTitle}>Performance Comparison</Text><MiniSeriesChart series={compareSeries} height={130} />{(performanceCompareChart?.summary || []).slice(0, 8).map((row) => <Text key={`cmp-${row.ticker}`} style={styles.item}>{row.ticker} | return {fmtPct(row.return_pct)} | vol {fmtPct(row.volatility)}</Text>)}</View>)}
+      {trainingFeatures.length > 0 && (<View style={styles.card}><Text style={styles.cardTitle}>Training Features ({trainingFeatures.length})</Text>{(trainingFeatures || []).slice(0, 8).map((row) => (<View key={`feat-${row.ticker}`} style={styles.analyticsItemCard}><Text style={styles.analyticsHeadline}>{row.ticker} | composite {fmtNumber(row.composite_score)}</Text><Text style={styles.item}>RSI {fmtNumber(row.rsi14)} | ATR {fmtNumber(row.atr14)} | Vol20 {fmtNumber(row.vol20, 3)}</Text></View>))}</View>)}</>
     );
   };
 
+  // ====== CHARTS TAB ======
   const renderCharts = () => {
     const priceSeries = indicatorTail.map((row) => Number(row["adj close"] || row.close || 0));
     const sma20Series = indicatorTail.map((row) => Number(row.sma20 || 0));
@@ -2544,265 +1062,292 @@ export default function App() {
     const volumeSeries = indicatorTail.map((row) => Number(row.volume || 0));
     const seasonalityAvg = seasonalityTail.map((row) => Number(row.avg_ret || 0));
     const seasonalityStd = seasonalityTail.map((row) => Number(row.std_ret || 0));
-    const seasonalityCompareRows = seasonalityCompareChart?.items || [];
-    const seasonalityStockAvg = seasonalityCompareRows.map((row) => Number(row.stock_avg_ret || 0));
-    const seasonalitySectorAvg = seasonalityCompareRows.map((row) => Number(row.sector_avg_ret || 0));
-    const seasonalitySpread = seasonalityCompareRows.map((row) => Number(row.spread || 0));
-    const seasonalityStockCum = seasonalityCompareRows.map((row) => Number(row.stock_cum || 0));
-    const seasonalitySectorCum = seasonalityCompareRows.map((row) => Number(row.sector_cum || 0));
     const hasData = priceSeries.some((v) => v > 0);
+    return (
+      <><View style={styles.card}><Text style={styles.cardTitle}>Charts — {ticker}</Text><View style={styles.inlineRowWrap}><TextInput value={ticker} onChangeText={setTicker} style={[styles.input, styles.compactInput]} placeholder="Ticker" autoCapitalize="characters" /><TextInput value={analyticsPeriod} onChangeText={setAnalyticsPeriod} style={[styles.input, styles.compactInput]} placeholder="Period" autoCapitalize="none" /><TextInput value={analyticsInterval} onChangeText={setAnalyticsInterval} style={[styles.input, styles.compactInput]} placeholder="Interval" autoCapitalize="none" /></View><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={loadAnalytics}><Text style={styles.buttonText}>Load Charts</Text></Pressable><Pressable style={styles.secondaryButton} onPress={loadChartsFast}><Text style={styles.secondaryButtonText}>Load Fast</Text></Pressable></View></View>
+      {hasData && (<><View style={styles.card}><Text style={styles.cardTitle}>Price — {ticker}</Text><MiniSeriesChart series={[{ label: "price", values: priceSeries, color: THEME.text, width: 3, type: "line" }, { label: "sma20", values: sma20Series, color: THEME.accent, width: 2, type: "line" }, { label: "sma50", values: sma50Series, color: THEME.warn, width: 2, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={160} /></View>
+      <View style={styles.card}><Text style={styles.cardTitle}>RSI 14</Text><MiniSeriesChart series={[{ label: "rsi14", values: rsiSeries, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={120} /></View>
+      <View style={styles.card}><Text style={styles.cardTitle}>Volume</Text><MiniSeriesChart series={[{ label: "volume", values: volumeSeries, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={100} /></View>
+      <View style={styles.card}><Text style={styles.cardTitle}>Seasonality</Text><MiniSeriesChart series={[{ label: "avg_ret", values: seasonalityAvg, color: THEME.accent, width: 3 }, { label: "std_ret", values: seasonalityStd, color: THEME.warn, width: 2, opacity: 0.7 }]} xLabels={seasonalityTail.map((row, idx) => dayOfYearLabel(row, idx + 1))} height={130} /></View></>)}</>
+    );
+  };
+
+  // ====== EXECUTION TAB ======
+  const renderExecution = () => (
+    <View style={styles.card}><Text style={styles.cardTitle}>Propose Order</Text>{executionBusy && <ProgressBar progress={progressValue} label="Evaluating policy" compact />}<Text style={styles.fieldLabel}>Ticker</Text><TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" /><Text style={styles.fieldLabel}>Action</Text><TextInput value={executionAction} onChangeText={setExecutionAction} style={styles.input} placeholder="Action: buy/sell" autoCapitalize="none" /><Text style={styles.fieldLabel}>Quantity</Text><TextInput value={executionQty} onChangeText={setExecutionQty} style={styles.input} placeholder="Qty" keyboardType="numeric" /><Text style={styles.fieldLabel}>Notional</Text><TextInput value={notional} onChangeText={setNotional} style={styles.input} placeholder="Notional" keyboardType="numeric" /><Text style={styles.fieldLabel}>Broker Mode</Text><TextInput value={executionBrokerMode} onChangeText={setExecutionBrokerMode} style={styles.input} placeholder="robinhood_mcp" autoCapitalize="none" /><Text style={styles.item}>Policy limits</Text><Text style={styles.fieldLabel}>Max Daily Notional</Text><TextInput value={executionMaxDaily} onChangeText={setExecutionMaxDaily} style={styles.input} placeholder="5000" keyboardType="numeric" /><Text style={styles.fieldLabel}>Max Position Notional</Text><TextInput value={executionMaxPosition} onChangeText={setExecutionMaxPosition} style={styles.input} placeholder="2000" keyboardType="numeric" /><Pressable style={styles.button} onPress={proposeOrder}><Text style={styles.buttonText}>Create Intent</Text></Pressable>{!!executionResult && <Text style={styles.item}>Decision: {executionResult.allow ? "APPROVED" : "BLOCKED"} | intent #{executionResult.intent_id} | reason: {executionResult.reason}</Text>}<Text style={styles.cardTitle}>Recent Intents ({intents.length})</Text>{(intents || []).slice(0, 12).map((i) => <Text key={String(i.id)} style={styles.item}>#{i.id} {i.ticker} {i.action} ${i.notional} [{i.status}]</Text>)}</View>
+  );
+
+  // ====== BACKTEST TAB (enhanced) ======
+  const renderBacktest = () => {
+    const equityValues = backtestEquity.map((row) => Number(row.equity || 0));
+    const equityDates = backtestEquity.map((row) => String(row.date || row.timestamp || ""));
+    const priceTail = indicatorTail.map((row) => Number(row["adj close"] || row.close || 0));
+    const sma20 = indicatorTail.map((row) => Number(row.sma20 || 0));
+    const bbUpper = indicatorTail.map((row) => Number(row.bb_upper || 0));
+    const bbLower = indicatorTail.map((row) => Number(row.bb_lower || 0));
+    const rsi14 = indicatorTail.map((row) => Number(row.rsi14 || 0));
+    const volSeries = indicatorTail.map((row) => Number(row.volume || 0));
+    const indicatorDates = indicatorTail.map((row) => String(row.date || ""));
+    const tradeMarkers = backtestSummary?.trades || [];
+    const stepIdx = backtestStep >= 0 && backtestStep < equityValues.length ? backtestStep : -1;
+
     return (
       <>
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Charts — {ticker}</Text>
-          <Text style={styles.item}>Load price, RSI, volume, and seasonality charts for any ticker. Use the Analytics tab to configure settings and fetch data, or load directly below.</Text>
-          <Text style={styles.fieldLabel}>Chart Controls</Text>
+          <Text style={styles.cardTitle}>Backtest</Text>
+          {backtestBusy && <ProgressBar progress={progressValue} label="Backtest in progress" compact />}
+          <Text style={styles.fieldLabel}>Ticker</Text>
+          <TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" />
           <View style={styles.inlineRowWrap}>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Ticker</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Period</Text>
-            <Text style={[styles.fieldLabel, styles.compactLabel]}>Interval</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>Start Date</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>End Date</Text>
           </View>
           <View style={styles.inlineRowWrap}>
-            <TextInput value={ticker} onChangeText={setTicker} style={[styles.input, styles.compactInput]} placeholder="Ticker" autoCapitalize="characters" />
-            <TextInput value={analyticsPeriod} onChangeText={setAnalyticsPeriod} style={[styles.input, styles.compactInput]} placeholder="Period (1y)" autoCapitalize="none" />
-            <TextInput value={analyticsInterval} onChangeText={setAnalyticsInterval} style={[styles.input, styles.compactInput]} placeholder="Interval (1d)" autoCapitalize="none" />
+            <TextInput value={backtestStart} onChangeText={setBacktestStart} style={[styles.input, styles.compactInput]} placeholder="YYYY-MM-DD" autoCapitalize="none" />
+            <TextInput value={backtestEnd} onChangeText={setBacktestEnd} style={[styles.input, styles.compactInput]} placeholder="Optional YYYY-MM-DD" autoCapitalize="none" />
           </View>
           <View style={styles.inlineRowWrap}>
-            <Pressable style={styles.button} onPress={loadAnalytics}>
-              <Text style={styles.buttonText}>Load Charts</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={loadChartsFast}>
-              <Text style={styles.secondaryButtonText}>Load Fast</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={cacheMarketSeries}>
-              <Text style={styles.secondaryButtonText}>Fetch + Cache Series</Text>
-            </Pressable>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>Entry RSI</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>Max Hold Days</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>Stop Loss %</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>Take Profit %</Text>
           </View>
-          {analyticsBusy && <ProgressBar progress={progressValue} label="Loading chart data" compact />}
-          {!hasData && !analyticsBusy && (
-            <Text style={styles.mutedText}>No data loaded. Enter a ticker and press Load Charts.</Text>
-          )}
-          <Text style={styles.item}>Indicator rows: {indicatorChart.length}</Text>
+          <View style={styles.inlineRowWrap}>
+            <TextInput value={backtestEntryRsi} onChangeText={setBacktestEntryRsi} style={[styles.input, styles.compactInput]} placeholder="50" keyboardType="numeric" />
+            <TextInput value={backtestMaxHoldDays} onChangeText={setBacktestMaxHoldDays} style={[styles.input, styles.compactInput]} placeholder="7" keyboardType="numeric" />
+            <TextInput value={backtestStopLossPct} onChangeText={setBacktestStopLossPct} style={[styles.input, styles.compactInput]} placeholder="0" keyboardType="numeric" />
+            <TextInput value={backtestTakeProfitPct} onChangeText={setBacktestTakeProfitPct} style={[styles.input, styles.compactInput]} placeholder="0" keyboardType="numeric" />
+          </View>
+          <View style={styles.inlineRowWrap}>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>MA Filter</Text>
+            <Text style={[styles.fieldLabel, styles.compactLabel]}>MA Trend</Text>
+          </View>
+          <View style={styles.inlineRowWrap}>
+            <TextInput value={backtestMaFilter} onChangeText={setBacktestMaFilter} style={[styles.input, styles.compactInput]} placeholder="sma20" autoCapitalize="none" />
+            <TextInput value={backtestMaTrendFilter} onChangeText={setBacktestMaTrendFilter} style={[styles.input, styles.compactInput]} placeholder="none" autoCapitalize="none" />
+          </View>
+          <Pressable style={styles.button} onPress={loadBacktest}><Text style={styles.buttonText}>Run Short-Term Backtest</Text></Pressable>
         </View>
 
-        {hasData && (
+        {backtestSummary ? (
           <>
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>Price — {ticker}</Text>
-              <Text style={styles.item}>Adjusted close with SMA 20 and SMA 50 over the latest {indicatorTail.length} bars.</Text>
-              <MiniSeriesChart
-                series={[
-                  { label: "price", values: priceSeries, color: THEME.text, width: 3, type: "line" },
-                  { label: "sma20", values: sma20Series, color: THEME.accent, width: 2, type: "line" },
-                  { label: "sma50", values: sma50Series, color: THEME.warn, width: 2, type: "line" },
-                ]}
-                xLabels={indicatorTail.map((row) => String(row.date || ""))}
-                height={160}
-              />
+              <Text style={styles.cardTitle}>Performance Metrics</Text>
+              <View style={styles.panelSplit}>
+                <View style={[styles.card, styles.panelCol, { padding: 8 }]}>
+                  <Text style={styles.item}>Trades: {backtestSummary.n_trades}</Text>
+                  <Text style={styles.item}>Win Rate: {fmtPct(backtestSummary.win_rate)}</Text>
+                  <Text style={styles.item}>Avg Return: {fmtPct(backtestSummary.avg_ret)}</Text>
+                  <Text style={styles.item}>Max DD: {fmtPct(backtestSummary.max_dd)}</Text>
+                </View>
+                <View style={[styles.card, styles.panelCol, { padding: 8 }]}>
+                  <Text style={styles.item}>Sharpe: {fmtNumber(backtestSummary.sharpe)}</Text>
+                  <Text style={styles.item}>Sortino: {fmtNumber(backtestSummary.sortino)}</Text>
+                  <Text style={styles.item}>CAGR: {fmtPct(backtestSummary.cagr)}</Text>
+                  <Text style={styles.item}>Profit Factor: {fmtNumber(backtestSummary.profit_factor)}</Text>
+                </View>
+              </View>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>RSI 14</Text>
-              <Text style={styles.item}>Relative Strength Index. Above 70 is typically overbought; below 30 oversold.</Text>
-              <MiniSeriesChart series={[{ label: "rsi14", values: rsiSeries, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={120} />
+              <Text style={styles.cardTitle}>Equity Curve ({equityValues.length} points)</Text>
+              {stepIdx >= 0 && <Text style={styles.item}>Step {stepIdx + 1} / {equityValues.length} | Equity: ${fmtNumber(equityValues[stepIdx], 2)}</Text>}
+              <MiniSeriesChart series={[{ label: "equity", values: equityValues, color: THEME.accentDeep, width: 3 }]} xLabels={equityDates} height={140} />
+              {equityValues.length > 1 && (
+                <View style={styles.inlineRowWrap}>
+                  <Pressable style={styles.smallButton} onPress={() => setBacktestStep(0)}><Text style={styles.buttonText}>◀◀</Text></Pressable>
+                  <Pressable style={styles.smallButton} onPress={() => setBacktestStep(Math.max(0, backtestStep - 1))}><Text style={styles.buttonText}>◀</Text></Pressable>
+                  <Text style={[styles.item, { minWidth: 100, textAlign: "center" }]}>{backtestStep < 0 ? "Full" : `${backtestStep + 1}/${equityValues.length}`}</Text>
+                  <Pressable style={styles.smallButton} onPress={() => setBacktestStep(Math.min(equityValues.length - 1, backtestStep + 1))}><Text style={styles.buttonText}>▶</Text></Pressable>
+                  <Pressable style={styles.smallButton} onPress={() => setBacktestStep(equityValues.length - 1)}><Text style={styles.buttonText}>▶▶</Text></Pressable>
+                  <Pressable style={styles.mutedButton} onPress={() => setBacktestStep(-1)}><Text style={styles.buttonText}>Reset</Text></Pressable>
+                </View>
+              )}
             </View>
 
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Volume</Text>
-              <MiniSeriesChart series={[{ label: "volume", values: volumeSeries, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={indicatorTail.map((row) => String(row.date || ""))} height={100} />
+            {priceTail.length > 0 && (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Price + Bollinger Bands (20,2)</Text>
+                <MiniSeriesChart
+                  series={[
+                    { label: "price", values: priceTail, color: THEME.text, width: 3, type: "line" },
+                    { label: "sma20", values: sma20, color: THEME.accent, width: 2, type: "line" },
+                    { label: "bb_upper", values: bbUpper.length ? bbUpper : sma20.map(v => v * 1.02), color: "#16a34a", width: 1, opacity: 0.5, type: "line" },
+                    { label: "bb_lower", values: bbLower.length ? bbLower : sma20.map(v => v * 0.98), color: "#dc2626", width: 1, opacity: 0.5, type: "line" },
+                  ]}
+                  xLabels={indicatorDates} height={140}
+                />
+              </View>
+            )}
+
+            <View style={styles.panelSplit}>
+              {rsi14.length > 0 && (
+                <View style={[styles.card, styles.panelCol]}>
+                  <Text style={styles.cardTitle}>RSI (14)</Text>
+                  <MiniSeriesChart series={[{ label: "rsi", values: rsi14, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={indicatorDates} height={90} />
+                  <View style={styles.inlineRow}>
+                    <Text style={[styles.item, { color: THEME.warn, fontSize: 10 }]}>— 70 overbought</Text>
+                    <Text style={[styles.item, { color: THEME.ok, fontSize: 10 }]}>— 30 oversold</Text>
+                  </View>
+                </View>
+              )}
+              {volSeries.length > 0 && (
+                <View style={[styles.card, styles.panelCol]}>
+                  <Text style={styles.cardTitle}>Volume</Text>
+                  <MiniSeriesChart series={[{ label: "volume", values: volSeries, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={indicatorDates} height={90} />
+                </View>
+              )}
             </View>
 
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Seasonality — Average Daily Return</Text>
-              <Text style={styles.item}>Average and standard deviation of daily returns by day-of-year across the historical sample. High average with low deviation indicates a reliable seasonal edge.</Text>
-              <MiniSeriesChart
-                series={[
-                  { label: "avg_ret", values: seasonalityAvg, color: THEME.accent, width: 3, type: "line" },
-                  { label: "std_ret", values: seasonalityStd, color: THEME.warn, width: 2, opacity: 0.7, type: "line" },
-                ]}
-                xLabels={seasonalityTail.map((row, idx) => dayOfYearLabel(row, idx + 1))}
-                height={130}
-              />
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Stock vs Sector Seasonality</Text>
-              <Text style={styles.item}>
-                {seasonalityCompareChart?.ticker || ticker} vs {seasonalityCompareChart?.sector_etf || "sector ETF"} ({seasonalityCompareChart?.sector || "auto sector"}). Alignment corr {fmtNumber(seasonalityCompareChart?.metrics?.corr, 3)} | follow-rate {fmtPct(seasonalityCompareChart?.metrics?.follow_rate)}.
-              </Text>
-              <Text style={styles.item}>Average seasonal return by day-of-year</Text>
-              <MiniSeriesChart
-                series={[
-                  { label: "stock-avg", values: seasonalityStockAvg, color: THEME.accentDeep, width: 3, type: "line" },
-                  { label: "sector-avg", values: seasonalitySectorAvg, color: "#0ea5e9", width: 2, type: "line" },
-                  { label: "spread", values: seasonalitySpread, color: THEME.warn, width: 2, opacity: 0.7, type: "line" },
-                ]}
-                height={130}
-              />
-              <Text style={styles.item}>Cumulative seasonal path</Text>
-              <MiniSeriesChart
-                series={[
-                  { label: "stock-cum", values: seasonalityStockCum, color: THEME.text, width: 3, type: "line" },
-                  { label: "sector-cum", values: seasonalitySectorCum, color: "#16a34a", width: 2, type: "line" },
-                ]}
-                height={120}
-              />
-            </View>
+            {tradeMarkers.length > 0 && (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Trade Markers ({tradeMarkers.length} trades)</Text>
+                {tradeMarkers.slice(0, 12).map((trade, idx) => (
+                  <View key={`trade-${idx}`} style={[styles.analyticsItemCard, { borderLeftWidth: 4, borderLeftColor: Number(trade.return_pct || 0) >= 0 ? THEME.ok : THEME.warn }]}>
+                    <Text style={styles.analyticsHeadline}>
+                      {trade.action || "buy"} {trade.ticker || ticker} @ ${fmtNumber(trade.entry_price)} → {trade.exit_reason || "close"} @ ${fmtNumber(trade.exit_price)} | Return: {fmtPct(trade.return_pct)}
+                    </Text>
+                    <Text style={styles.item}>
+                      Entry: {fmtTimestamp(trade.entry_date)} | Exit: {fmtTimestamp(trade.exit_date)} | Hold: {trade.hold_days || "-"}d
+                      {trade.model_sigma !== undefined ? ` | σ: ${fmtNumber(trade.model_sigma, 4)}` : ""}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </>
+        ) : (
+          <View style={styles.card}><Text style={styles.mutedText}>No backtest loaded. Configure parameters and run.</Text></View>
         )}
       </>
     );
   };
 
-  const renderBacktest = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Backtest</Text>
-      {backtestBusy && <ProgressBar progress={progressValue} label="Backtest in progress" compact />}
-      <Text style={styles.fieldLabel}>Ticker</Text>
-      <TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" />
-      <Text style={styles.fieldLabel}>Start Date</Text>
-      <TextInput value={backtestStart} onChangeText={setBacktestStart} style={styles.input} placeholder="Start date (YYYY-MM-DD)" autoCapitalize="none" />
-      <Text style={styles.fieldLabel}>End Date (Optional)</Text>
-      <TextInput value={backtestEnd} onChangeText={setBacktestEnd} style={styles.input} placeholder="End date (optional, YYYY-MM-DD)" autoCapitalize="none" />
-      <Text style={styles.fieldLabel}>Strategy Parameters</Text>
-      <View style={styles.inlineRowWrap}>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>Entry RSI Threshold</Text>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>Max Hold Days</Text>
-      </View>
-      <View style={styles.inlineRowWrap}>
-        <TextInput value={backtestEntryRsi} onChangeText={setBacktestEntryRsi} style={[styles.input, styles.compactInput]} placeholder="Entry RSI threshold" keyboardType="numeric" />
-        <TextInput value={backtestMaxHoldDays} onChangeText={setBacktestMaxHoldDays} style={[styles.input, styles.compactInput]} placeholder="Max hold days" keyboardType="numeric" />
-      </View>
-      <View style={styles.inlineRowWrap}>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>Stop Loss %</Text>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>MA Filter (sma20/sma50/sma200)</Text>
-      </View>
-      <View style={styles.inlineRowWrap}>
-        <TextInput value={backtestStopLossPct} onChangeText={setBacktestStopLossPct} style={[styles.input, styles.compactInput]} placeholder="Stop loss % (0 disables)" keyboardType="numeric" />
-        <TextInput value={backtestMaFilter} onChangeText={setBacktestMaFilter} style={[styles.input, styles.compactInput]} placeholder="sma20" autoCapitalize="none" />
-      </View>
-      <View style={styles.inlineRowWrap}>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>Take Profit %</Text>
-        <Text style={[styles.fieldLabel, styles.compactLabel]}>MA Trend Filter</Text>
-      </View>
-      <View style={styles.inlineRowWrap}>
-        <TextInput value={backtestTakeProfitPct} onChangeText={setBacktestTakeProfitPct} style={[styles.input, styles.compactInput]} placeholder="Take profit % (0 disables)" keyboardType="numeric" />
-        <TextInput value={backtestMaTrendFilter} onChangeText={setBacktestMaTrendFilter} style={[styles.input, styles.compactInput]} placeholder="none" autoCapitalize="none" />
-      </View>
-      <Pressable style={styles.button} onPress={loadBacktest}>
-        <Text style={styles.buttonText}>Run Short-Term Backtest</Text>
-      </Pressable>
-      {backtestSummary ? (
-        <>
-          {!!backtestSummary.params && (
-            <Text style={styles.item}>
-              Params: RSI gt {fmtNumber(backtestSummary.params.entry_rsi_threshold)} | Max hold {backtestSummary.params.max_hold_days}d | Stop loss {fmtNumber(backtestSummary.params.stop_loss_pct)}% | Take profit {fmtNumber(backtestSummary.params.take_profit_pct)}% | MA {String(backtestSummary.params.ma_filter || "sma20").toUpperCase()} | Trend {String(backtestSummary.params.ma_trend_filter || "none").toUpperCase()}
-            </Text>
-          )}
-          <Text style={styles.item}>Trades: {backtestSummary.n_trades} | Win rate: {fmtPct(backtestSummary.win_rate)} | Avg hold: {Number(backtestSummary.avg_hold_days || 0).toFixed(1)}d</Text>
-          <Text style={styles.item}>Avg return: {fmtPct(backtestSummary.avg_ret)} | Median return: {fmtPct(backtestSummary.median_ret)} | Max DD: {fmtPct(backtestSummary.max_dd)}</Text>
-          <Text style={styles.item}>Sharpe: {Number(backtestSummary.sharpe || 0).toFixed(2)} | Sortino: {Number(backtestSummary.sortino || 0).toFixed(2)} | CAGR: {fmtPct(backtestSummary.cagr)} | PF: {Number(backtestSummary.profit_factor || 0).toFixed(2)}</Text>
-          <Text style={styles.item}>Equity curve points: {backtestEquity.length}</Text>
-          <MiniSeriesChart
-            series={[{ label: "equity", values: backtestEquity.map((row) => Number(row.equity || 0)), color: THEME.accentDeep, width: 3 }]}
-            xLabels={backtestEquity.map((row) => String(row.date || row.timestamp || ""))}
-            height={120}
-          />
+  // ====== MARKET TAB ======
+  const renderMarket = () => {
+    const marketPrice = marketIndicators.map((row) => Number(row["adj close"] || row.close || 0));
+    const marketSma20 = marketIndicators.map((row) => Number(row.sma20 || 0));
+    const marketSma50 = marketIndicators.map((row) => Number(row.sma50 || 0));
+    const marketRsi = marketIndicators.map((row) => Number(row.rsi14 || 0));
+    const marketVol = marketIndicators.map((row) => Number(row.volume || 0));
+    const marketDates = marketIndicators.map((row) => String(row.date || ""));
 
-          <Text style={styles.cardTitle}>Price Movement Context</Text>
-          <Text style={styles.item}>
-            Last close {fmtNumber(indicatorTail[indicatorTail.length - 1]?.["adj close"] || indicatorTail[indicatorTail.length - 1]?.close)} |
-            20-bar move {indicatorTail.length > 20 ? fmtPct((Number(indicatorTail[indicatorTail.length - 1]?.["adj close"] || indicatorTail[indicatorTail.length - 1]?.close || 0) / Number(indicatorTail[indicatorTail.length - 21]?.["adj close"] || indicatorTail[indicatorTail.length - 21]?.close || 1)) - 1) : "-"} |
-            RSI {fmtNumber(indicatorTail[indicatorTail.length - 1]?.rsi14)}
-          </Text>
-          <MiniSeriesChart
-            series={[
-              { label: "price", values: indicatorTail.map((row) => Number(row["adj close"] || row.close || 0)), color: THEME.text, width: 3, type: "line" },
-              { label: "sma20", values: indicatorTail.map((row) => Number(row.sma20 || 0)), color: THEME.accent, width: 2, type: "line" },
-              { label: "sma50", values: indicatorTail.map((row) => Number(row.sma50 || 0)), color: THEME.warn, width: 2, type: "line" },
-            ]}
-            xLabels={indicatorTail.map((row) => String(row.date || ""))}
-            height={120}
-          />
+    const fcPrice = (marketForecast?.forecast || []).map((row) => Number(row.price || 0));
+    const fcUpper = (marketForecast?.forecast || []).map((row) => Number(row.upper || 0));
+    const fcLower = (marketForecast?.forecast || []).map((row) => Number(row.lower || 0));
+    const fcHistory = (marketForecast?.history || []).map((row) => Number(row.price || 0));
 
-          <Text style={styles.cardTitle}>Seasonality Context</Text>
-          <Text style={styles.item}>Seasonality sample points: {seasonalityTail.length} | average daily return and deviation by day-of-year.</Text>
-          <MiniSeriesChart
-            series={[
-              { label: "avg_ret", values: seasonalityTail.map((row) => Number(row.avg_ret || 0)), color: THEME.accent, width: 3, type: "line" },
-              { label: "std_ret", values: seasonalityTail.map((row) => Number(row.std_ret || 0)), color: THEME.warn, width: 2, type: "line", opacity: 0.75 },
-            ]}
-            xLabels={seasonalityTail.map((row, idx) => dayOfYearLabel(row, idx + 1))}
-            height={100}
-          />
+    return (
+      <>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Market — {marketTicker}</Text>
+          <View style={styles.inlineRowWrap}>
+            <TextInput value={marketTicker} onChangeText={setMarketTicker} style={[styles.input, styles.compactInput]} placeholder="Ticker" autoCapitalize="characters" />
+            <View style={styles.rowWrap}>
+              {["1m", "5m", "15m", "1H", "1d"].map((tf) => (
+                <Pressable key={tf} style={[styles.chip, marketTimeframe === tf && styles.chipActive]} onPress={() => setMarketTimeframe(tf)}>
+                  <Text style={[styles.chipText, marketTimeframe === tf && styles.chipActiveText]}>{tf}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Pressable style={styles.button} onPress={loadMarketData}><Text style={styles.buttonText}>Load Data</Text></Pressable>
+          </View>
+        </View>
 
-          <Text style={styles.cardTitle}>Sentiment Context</Text>
-          <Text style={styles.item}>News summary: {newsSummary?.summary || "No sentiment summary loaded."}</Text>
-          {!!(newsSummary?.items?.length) && (
-            <Text style={styles.item}>
-              Latest aggregate sentiment: {fmtNumber(newsSummary.items[0]?.avg_sentiment)} across {newsSummary.items[0]?.count || 0} articles ({newsSummary.items[0]?.date || "-"}).
-            </Text>
-          )}
-          <NewsTimelineChart timeline={newsTimeline} />
-          <NewsSummaryList summary={newsSummary} />
-        </>
-      ) : (
-        <Text style={styles.item}>no backtest loaded</Text>
-      )}
-    </View>
+        {marketPrice.length > 0 ? (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Price — {marketTicker}</Text>
+              <MiniSeriesChart series={[
+                { label: "price", values: marketPrice, color: THEME.text, width: 3, type: "line" },
+                { label: "sma20", values: marketSma20, color: THEME.accent, width: 2, type: "line" },
+                { label: "sma50", values: marketSma50, color: THEME.warn, width: 2, type: "line" },
+              ]} xLabels={marketDates} height={160} />
+            </View>
+
+            <View style={styles.panelSplit}>
+              <View style={[styles.card, styles.panelCol]}>
+                <Text style={styles.cardTitle}>RSI (14)</Text>
+                <MiniSeriesChart series={[{ label: "rsi", values: marketRsi, color: THEME.accentDeep, width: 3, type: "line" }]} xLabels={marketDates} height={100} />
+              </View>
+              <View style={[styles.card, styles.panelCol]}>
+                <Text style={styles.cardTitle}>Volume</Text>
+                <MiniSeriesChart series={[{ label: "vol", values: marketVol, color: "#7c6d5a", width: 3, opacity: 0.75, type: "bar" }]} xLabels={marketDates} height={100} />
+              </View>
+            </View>
+
+            {fcPrice.length > 0 && (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>AI Forecast Overlay — {marketTicker}</Text>
+                <Text style={styles.item}>Projected return: {fmtPct(marketForecast?.forecast_return_pct)} | Confidence band: {fmtPct(marketForecast?.confidence_band_pct)}</Text>
+                <Text style={styles.item}>Recent history ({fcHistory.length} bars)</Text>
+                <MiniSeriesChart series={[{ label: "history", values: fcHistory, color: THEME.text, width: 3 }]} height={100} />
+                <Text style={styles.item}>21-step forecast path (dashed overlay)</Text>
+                <MiniSeriesChart series={[
+                  { label: "fc-lower", values: fcLower, color: "#d97706", width: 1, opacity: 0.5 },
+                  { label: "fc-center", values: fcPrice, color: THEME.accentDeep, width: 3 },
+                  { label: "fc-upper", values: fcUpper, color: "#16a34a", width: 1, opacity: 0.5 },
+                ]} height={120} />
+              </View>
+            )}
+          </>
+        ) : (
+          <View style={styles.card}><Text style={styles.mutedText}>Enter a ticker, select timeframe, and load data to view charts.</Text></View>
+        )}
+      </>
+    );
+  };
+
+  // ====== SETTINGS TAB ======
+  const renderSettings = () => (
+    <>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Configuration</Text>
+        <Text style={styles.item}>Backend URL: {API_BASE}</Text>
+        <Text style={styles.item}>Auth enabled: {health?.auth_enabled ? "yes" : "no"}</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Alpaca API</Text>
+        <Text style={styles.mutedText}>Set these to use Alpaca for real-time market data and trading.</Text>
+        <Text style={styles.fieldLabel}>API Key</Text>
+        <TextInput value={settingsAlpacaKey} onChangeText={setSettingsAlpacaKey} style={styles.input} placeholder="PK..." autoCapitalize="none" secureTextEntry />
+        <Text style={styles.fieldLabel}>Secret Key</Text>
+        <TextInput value={settingsAlpacaSecret} onChangeText={setSettingsAlpacaSecret} style={styles.input} placeholder="SK..." autoCapitalize="none" secureTextEntry />
+        <View style={styles.inlineRowWrap}>
+          <Pressable style={styles.button} onPress={testAlpacaConnection}><Text style={styles.buttonText}>Test Connection</Text></Pressable>
+          <Text style={styles.item}>Status: {settingsAlpacaStatus}</Text>
+        </View>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>LLM API</Text>
+        <Text style={styles.mutedText}>Configure your LLM endpoint for the AI Assistant.</Text>
+        <Text style={styles.fieldLabel}>API Key</Text>
+        <TextInput value={settingsLlmKey} onChangeText={setSettingsLlmKey} style={styles.input} placeholder="sk-..." autoCapitalize="none" secureTextEntry />
+        <Text style={styles.fieldLabel}>Endpoint URL</Text>
+        <TextInput value={settingsLlmEndpoint} onChangeText={setSettingsLlmEndpoint} style={styles.input} placeholder="https://api.openai.com/v1" autoCapitalize="none" />
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Risk Parameters</Text>
+        <View style={styles.inlineRowWrap}>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Stop Loss %</Text>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Max Position %</Text>
+          <Text style={[styles.fieldLabel, styles.compactLabel]}>Daily Loss Limit $</Text>
+        </View>
+        <View style={styles.inlineRowWrap}>
+          <TextInput value={settingsRiskStopLoss} onChangeText={setSettingsRiskStopLoss} style={[styles.input, styles.compactInput]} placeholder="5" keyboardType="numeric" />
+          <TextInput value={settingsRiskMaxPos} onChangeText={setSettingsRiskMaxPos} style={[styles.input, styles.compactInput]} placeholder="20" keyboardType="numeric" />
+          <TextInput value={settingsDailyLossLimit} onChangeText={setSettingsDailyLossLimit} style={[styles.input, styles.compactInput]} placeholder="2000" keyboardType="numeric" />
+        </View>
+        <Pressable style={styles.button} onPress={saveAppSettings}><Text style={styles.buttonText}>Save Settings</Text></Pressable>
+        {!!settingsSaveMsg && <Text style={[styles.item, { color: settingsSaveMsg.includes("Error") ? THEME.warn : THEME.ok }]}>{settingsSaveMsg}</Text>}
+      </View>
+    </>
   );
 
-  const renderExecution = () => (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>Propose Order</Text>
-      {executionBusy && <ProgressBar progress={progressValue} label="Evaluating policy and creating intent" compact />}
-      <Text style={styles.item}>DB path</Text>
-      <TextInput value={dbPath} onChangeText={setDbPath} style={styles.input} placeholder="sqlite:///quantflow.db" autoCapitalize="none" />
-      <Text style={styles.fieldLabel}>Ticker</Text>
-      <TextInput value={ticker} onChangeText={setTicker} style={styles.input} placeholder="Ticker" />
-      <Text style={styles.fieldLabel}>Action</Text>
-      <TextInput value={executionAction} onChangeText={setExecutionAction} style={styles.input} placeholder="Action: buy/sell" autoCapitalize="none" />
-      <Text style={styles.fieldLabel}>Quantity</Text>
-      <TextInput value={executionQty} onChangeText={setExecutionQty} style={styles.input} placeholder="Qty" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Notional</Text>
-      <TextInput value={notional} onChangeText={setNotional} style={styles.input} placeholder="Notional" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Orders Today</Text>
-      <TextInput value={executionOrdersToday} onChangeText={setExecutionOrdersToday} style={styles.input} placeholder="Orders today" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Position Notional After</Text>
-      <TextInput value={executionPositionAfter} onChangeText={setExecutionPositionAfter} style={styles.input} placeholder="Position notional after" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Broker Mode</Text>
-      <TextInput value={executionBrokerMode} onChangeText={setExecutionBrokerMode} style={styles.input} placeholder="Broker mode: robinhood_mcp | robinhood" autoCapitalize="none" />
-      <View style={styles.inlineRowWrap}>
-        <Text style={styles.item}>Auto mode:</Text>
-        <Pressable style={executionAuto ? styles.smallButton : styles.mutedButton} onPress={() => setExecutionAuto(true)}>
-          <Text style={styles.buttonText}>ON</Text>
-        </Pressable>
-        <Pressable style={!executionAuto ? styles.smallButton : styles.mutedButton} onPress={() => setExecutionAuto(false)}>
-          <Text style={styles.buttonText}>OFF</Text>
-        </Pressable>
-      </View>
-      <Text style={styles.item}>Policy limits</Text>
-      <Text style={styles.fieldLabel}>Max Daily Notional</Text>
-      <TextInput value={executionMaxDaily} onChangeText={setExecutionMaxDaily} style={styles.input} placeholder="Max daily notional" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Max Orders Per Day</Text>
-      <TextInput value={executionMaxOrders} onChangeText={setExecutionMaxOrders} style={styles.input} placeholder="Max orders/day" keyboardType="numeric" />
-      <Text style={styles.fieldLabel}>Max Position Notional</Text>
-      <TextInput value={executionMaxPosition} onChangeText={setExecutionMaxPosition} style={styles.input} placeholder="Max position notional" keyboardType="numeric" />
-      <Pressable style={styles.button} onPress={proposeOrder}>
-        <Text style={styles.buttonText}>Create Intent</Text>
-      </Pressable>
-      {!!executionResult && (
-        <Text style={styles.item}>Decision: {executionResult.allow ? "APPROVED" : "BLOCKED"} | intent #{executionResult.intent_id} | reason: {executionResult.reason}</Text>
-      )}
-      <Text style={styles.cardTitle}>Recent Intents ({intents.length})</Text>
-      {(intents || []).slice(0, 12).map((i) => (
-        <Text key={String(i.id)} style={styles.item}>
-          #{i.id} {i.ticker} {i.action} ${i.notional} [{i.status}]
-        </Text>
-      ))}
-    </View>
-  );
-
+  // ====== ASSISTANT (with suggested prompts + localStorage) ======
   const renderAssistant = (compact = false) => (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>QuantFlow Assistant</Text>
@@ -2810,58 +1355,50 @@ export default function App() {
       <View style={styles.inlineRow}>
         <Text style={[styles.label, { flex: 1 }]}>Queries local QuantFlow data and suggests API automation workflows.</Text>
         <View style={styles.inlineRow}>
-          <Text style={styles.mutedText}>POST dry-run </Text>
-          <Pressable style={assistantDryRun ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantDryRun(true)}>
-            <Text style={styles.buttonText}>ON</Text>
-          </Pressable>
-          <Pressable style={!assistantDryRun ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantDryRun(false)}>
-            <Text style={styles.buttonText}>OFF</Text>
-          </Pressable>
-        </View>
-      </View>
-      <View style={styles.inlineRow}>
-        <Text style={styles.mutedText}>Auto-run safe GET actions </Text>
-        <View style={styles.inlineRow}>
-          <Pressable style={assistantAutoRunGet ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantAutoRunGet(true)}>
-            <Text style={styles.buttonText}>ON</Text>
-          </Pressable>
-          <Pressable style={!assistantAutoRunGet ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantAutoRunGet(false)}>
-            <Text style={styles.buttonText}>OFF</Text>
-          </Pressable>
+          <Text style={styles.mutedText}>Dry-run </Text>
+          <Pressable style={assistantDryRun ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantDryRun(true)}><Text style={styles.buttonText}>ON</Text></Pressable>
+          <Pressable style={!assistantDryRun ? styles.smallButton : styles.mutedButton} onPress={() => setAssistantDryRun(false)}><Text style={styles.buttonText}>OFF</Text></Pressable>
         </View>
       </View>
       {!compact && (
         <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.secondaryButton} onPress={runMcpOnboardingRunbook}>
-            <Text style={styles.secondaryButtonText}>Run MCP Onboarding Runbook</Text>
-          </Pressable>
+          <Pressable style={styles.secondaryButton} onPress={runMcpOnboardingRunbook}><Text style={styles.secondaryButtonText}>MCP Runbook</Text></Pressable>
         </View>
       )}
 
-      {/* Conversation history */}
-      {assistantConversation.length === 0 && (
-        <View style={styles.chatEmptyState}>
-          <Text style={styles.mutedText}>No messages yet. Ask anything about your portfolio, scanner results, or recommended setups.</Text>
+      {/* Suggested prompts */}
+      {!compact && (
+        <View>
+          <Pressable style={styles.mutedButton} onPress={() => setAssistantPromptsExpanded(!assistantPromptsExpanded)}>
+            <Text style={styles.buttonText}>{assistantPromptsExpanded ? "Hide" : "Show"} Suggested Prompts</Text>
+          </Pressable>
+          {assistantPromptsExpanded && (
+            <View style={styles.rowWrap}>
+              {ASSISTANT_SUGGESTED_PROMPTS.map((prompt) => (
+                <Pressable key={prompt} style={styles.chip} onPress={() => { setAssistantInput(prompt); }}>
+                  <Text style={styles.chipText}>{prompt}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
         </View>
+      )}
+
+      {assistantConversation.length === 0 && (
+        <View style={styles.chatEmptyState}><Text style={styles.mutedText}>No messages yet. Ask anything about your portfolio, scanner results, or recommended setups. Conversation persists in browser storage.</Text></View>
       )}
       {assistantConversation.map((turn, idx) => (
         <View key={String(idx)} style={turn.role === "user" ? styles.chatBubbleUser : styles.chatBubbleAssistant}>
-          <Text style={turn.role === "user" ? styles.chatLabelUser : styles.chatLabelAssistant}>
-            {turn.role === "user" ? "You" : "Assistant"}
-          </Text>
+          <Text style={turn.role === "user" ? styles.chatLabelUser : styles.chatLabelAssistant}>{turn.role === "user" ? "You" : "Assistant"}</Text>
           <Text style={turn.role === "user" ? styles.chatTextUser : styles.chatTextAssistant}>{turn.content}</Text>
-          {!!(turn.summary) && (
-            <Text style={styles.chatMeta}>Summary: {compactJson(turn.summary)}</Text>
-          )}
-          {!!(!compact && turn.suggested_tool_calls && turn.suggested_tool_calls.length > 0) && (
+          {!!turn.summary && <Text style={styles.chatMeta}>Summary: {compactJson(turn.summary)}</Text>}
+          {!!(!compact && turn.suggested_tool_calls?.length) && (
             <View style={{ marginTop: 8 }}>
               <Text style={styles.chatMeta}>Suggested actions:</Text>
               {turn.suggested_tool_calls.slice(0, 6).map((c, ci) => (
                 <View key={String(ci)} style={styles.chatToolCallRow}>
                   <Text style={styles.chatToolCallText}>{c.method} {c.path}{c.name ? ` — ${c.name}` : ""}</Text>
-                  <Pressable style={styles.smallButton} onPress={() => requestExecuteAction(c)}>
-                    <Text style={styles.buttonText}>Run</Text>
-                  </Pressable>
+                  <Pressable style={styles.smallButton} onPress={() => requestExecuteAction(c)}><Text style={styles.buttonText}>Run</Text></Pressable>
                 </View>
               ))}
             </View>
@@ -2869,350 +1406,63 @@ export default function App() {
         </View>
       ))}
 
-      {/* Confirm pending POST */}
       {!!(!compact && pendingAction) && (
-        <View style={[styles.card, { marginTop: 8 }]}>
-          <Text style={styles.cardTitle}>Confirm Action</Text>
-          <Text style={styles.item}>{(pendingAction.method || "POST").toUpperCase()} {pendingAction.path}</Text>
-          <Text style={styles.item}>{compactJson(pendingAction.payload || {}, 800)}</Text>
-          <View style={styles.inlineRow}>
-            <Pressable style={styles.smallButton} onPress={confirmPendingAction}>
-              <Text style={styles.buttonText}>Confirm</Text>
-            </Pressable>
-            <Pressable style={styles.mutedButton} onPress={cancelPendingAction}>
-              <Text style={styles.buttonText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
+        <View style={[styles.card, { marginTop: 8 }]}><Text style={styles.cardTitle}>Confirm Action</Text><Text style={styles.item}>{(pendingAction.method || "POST").toUpperCase()} {pendingAction.path}</Text><View style={styles.inlineRow}><Pressable style={styles.smallButton} onPress={confirmPendingAction}><Text style={styles.buttonText}>Confirm</Text></Pressable><Pressable style={styles.mutedButton} onPress={cancelPendingAction}><Text style={styles.buttonText}>Cancel</Text></Pressable></View></View>
       )}
-
-      {/* Action result */}
       {!!assistantActionResult && (
-        <View style={styles.chatBubbleAssistant}>
-          <Text style={styles.chatLabelAssistant}>Action Result</Text>
-          <Text style={styles.chatTextAssistant}>
-            {assistantActionResult.ok ? (assistantActionResult.dryRun ? "Dry-run — action not executed." : "Success.") : `Error: ${assistantActionResult.error}`}
-          </Text>
-          {!!assistantActionResult.ok && (
-            <Text style={styles.chatMeta}>{compactJson(assistantActionResult.result, 800)}</Text>
-          )}
-        </View>
+        <View style={styles.chatBubbleAssistant}><Text style={styles.chatLabelAssistant}>Action Result</Text><Text style={styles.chatTextAssistant}>{assistantActionResult.ok ? (assistantActionResult.dryRun ? "Dry-run — action not executed." : "Success.") : `Error: ${assistantActionResult.error}`}</Text></View>
       )}
-
       {!!assistantAutoResults.length && (
-        <View style={styles.chatBubbleAssistant}>
-          <Text style={styles.chatLabelAssistant}>Auto-Run Results</Text>
-          {!!assistantAutoSummary && (
-            <Text style={styles.chatMeta}>Last run {fmtTimestamp(assistantAutoSummary.ts)} | {assistantAutoSummary.total} calls | {assistantAutoSummary.ok} ok | {assistantAutoSummary.failed} failed</Text>
-          )}
-          {assistantAutoResults.slice(0, 5).map((row, idx) => (
-            <Text key={`auto-${String(idx)}`} style={styles.chatMeta}>
-              {row.ok ? "OK" : "ERR"} | {row.call?.method || "GET"} {row.call?.path} {row.ok ? "" : `| ${row.error}`}
-            </Text>
-          ))}
-          {assistantAutoResults.length > 5 && (
-            <Text style={styles.chatMeta}>...and {assistantAutoResults.length - 5} more entries.</Text>
-          )}
-        </View>
+        <View style={styles.chatBubbleAssistant}><Text style={styles.chatLabelAssistant}>Auto-Run Results</Text>{!!assistantAutoSummary && <Text style={styles.chatMeta}>{assistantAutoSummary.ok}/{assistantAutoSummary.total} ok</Text>}{assistantAutoResults.slice(0, 5).map((row, idx) => <Text key={`auto-${idx}`} style={styles.chatMeta}>{row.ok ? "OK" : "ERR"} | {row.call?.method} {row.call?.path}</Text>)}</View>
       )}
-
       {!!mcpRunbookReport && (
-        <View style={styles.chatBubbleAssistant}>
-          <Text style={styles.chatLabelAssistant}>MCP Onboarding Report</Text>
-          <Text style={styles.chatMeta}>Ran at: {mcpRunbookReport.ran_at}</Text>
-          <Text style={styles.chatMeta}>Overall ready: {mcpRunbookReport.overall_ready ? "yes" : "no"}</Text>
-          <Text style={styles.chatMeta}>Transport connected: {mcpRunbookReport.transport_connected ? "yes" : "no"}</Text>
-          <Text style={styles.chatMeta}>Authenticated: {mcpRunbookReport.authenticated ? "yes" : "no"}</Text>
-          <Text style={styles.chatMeta}>Positions: {mcpRunbookReport.positions_count} | Signals: {mcpRunbookReport.signals_count}</Text>
-          {!!mcpRunbookReport.blockers?.length && (
-            <>
-              <Text style={styles.warnText}>Blockers</Text>
-              {mcpRunbookReport.blockers.map((row, idx) => (
-                <Text key={`block-${String(idx)}`} style={styles.chatMeta}>- {row.label}: {row.details}</Text>
-              ))}
-            </>
-          )}
-          {!!mcpRunbookReport.warnings?.length && (
-            <>
-              <Text style={styles.warnText}>Warnings</Text>
-              {mcpRunbookReport.warnings.map((row, idx) => (
-                <Text key={`warn-${String(idx)}`} style={styles.chatMeta}>- {row.label}: {row.details}</Text>
-              ))}
-            </>
-          )}
-          {!!mcpRunbookReport.remediation?.length && (
-            <>
-              <Text style={styles.chatMeta}>Remediation steps</Text>
-              {mcpRunbookReport.remediation.slice(0, 5).map((step, idx) => (
-                <Text key={`fix-${String(idx)}`} style={styles.chatMeta}>{idx + 1}. {step}</Text>
-              ))}
-            </>
-          )}
-        </View>
+        <View style={styles.chatBubbleAssistant}><Text style={styles.chatLabelAssistant}>MCP Onboarding Report</Text><Text style={styles.chatMeta}>Ready: {mcpRunbookReport.overall_ready ? "yes" : "no"} | Blockers: {mcpRunbookReport.blockers.length} | Signals: {mcpRunbookReport.signals_count}</Text></View>
       )}
 
-      {/* Input row */}
       <View style={[styles.chatInputWrap, { marginTop: 10 }]}>
         <Text style={styles.fieldLabel}>Message</Text>
-        <TextInput
-          value={assistantInput}
-          onChangeText={setAssistantInput}
-          style={[styles.input, styles.chatInput]}
-          placeholder="Ask about setups, universe scan, backtest results…"
-          multiline
-          scrollEnabled
-        />
-        <Pressable style={[styles.button, { marginBottom: 0, alignSelf: "flex-end" }]} onPress={askAssistant}>
-          <Text style={styles.buttonText}>Send</Text>
-        </Pressable>
+        <TextInput value={assistantInput} onChangeText={setAssistantInput} style={[styles.input, styles.chatInput]} placeholder="Ask about setups, backtest results, portfolio…" multiline scrollEnabled />
+        <Pressable style={[styles.button, { marginBottom: 0, alignSelf: "flex-end" }]} onPress={askAssistant}><Text style={styles.buttonText}>Send</Text></Pressable>
       </View>
       {assistantConversation.length > 0 && (
-        <Pressable style={[styles.mutedButton, { marginTop: 6 }]} onPress={() => { setAssistantConversation([]); setAssistantActionResult(null); }}>
+        <Pressable style={[styles.mutedButton, { marginTop: 6 }]} onPress={() => { setAssistantConversation([]); setAssistantActionResult(null); AsyncStorage.removeItem("quantflow_chat").catch(() => {}); }}>
           <Text style={styles.buttonText}>Clear Chat</Text>
         </Pressable>
       )}
-
-      {!!compact && (
-        <Pressable style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => setScreen("Assistant")}>
-          <Text style={styles.secondaryButtonText}>Open Full Assistant</Text>
-        </Pressable>
-      )}
+      {!!compact && <Pressable style={[styles.secondaryButton, { marginTop: 8 }]} onPress={() => setScreen("Assistant")}><Text style={styles.secondaryButtonText}>Open Full Assistant</Text></Pressable>}
     </View>
   );
 
   const renderAuth = () => (
-    <>
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Connection & Auth Controls</Text>
-        {authBusy && <ProgressBar progress={progressValue} label="Auth action in progress" compact />}
-        <Text style={styles.item}>Use API key for token mode, or a Firebase Bearer token for user settings and Google-auth workflows.</Text>
-        <Text style={styles.item}>Google web sign-in requires EXPO_PUBLIC_FIREBASE_API_KEY, EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN, EXPO_PUBLIC_FIREBASE_PROJECT_ID, and EXPO_PUBLIC_FIREBASE_APP_ID.</Text>
-        <Text style={styles.fieldLabel}>API Key</Text>
-        <TextInput
-          value={apiKeyInput}
-          onChangeText={setApiKeyInput}
-          style={styles.input}
-          placeholder="x-api-key (optional)"
-          autoCapitalize="none"
-        />
-        <Text style={styles.fieldLabel}>Bearer Token</Text>
-        <TextInput
-          value={bearerToken}
-          onChangeText={setBearerToken}
-          style={[styles.input, styles.tokenInput]}
-          placeholder="Firebase ID token (Bearer)"
-          autoCapitalize="none"
-          multiline
-        />
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={signInWithGoogleWeb}>
-            <Text style={styles.buttonText}>Sign In With Google (Web)</Text>
-          </Pressable>
-          <Pressable style={styles.button} onPress={checkFirebaseIdentity}>
-            <Text style={styles.buttonText}>Check /auth/me</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={loadOverview}>
-            <Text style={styles.secondaryButtonText}>Refresh Overview</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.item}>Google login status: {googleSignInStatus}</Text>
-        <Text style={styles.item}>Identity: {firebaseAuthCheck ? compactJson(firebaseAuthCheck, 900) : "not checked"}</Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Robinhood MCP Runtime Auth</Text>
-        <Text style={styles.item}>Use this to let the backend access your authenticated Robinhood MCP account without relying on editor session state.</Text>
-        <Text style={styles.warnText}>Never store real broker tokens in client storage. This input is sent directly to backend runtime config and then cleared locally.</Text>
-
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={startMcpBackendOAuth}>
-            <Text style={styles.buttonText}>Robinhood Auth (Backend OAuth)</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={loadMcpStatus}>
-            <Text style={styles.secondaryButtonText}>Refresh MCP Status</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.item}>Backend OAuth status: {mcpOAuthStatus}</Text>
-        {!!mcpOAuthStartResult?.authorization_url && (
-          <Text style={styles.item}>Authorization URL prepared. A new tab should open for consent.</Text>
-        )}
-        {!!mcpOAuthStartResult?.redirect_uri && (
-          <Text style={styles.item}>Redirect URI: {mcpOAuthStartResult.redirect_uri}</Text>
-        )}
-
-        <Text style={styles.fieldLabel}>Auth Header</Text>
-        <TextInput
-          value={mcpHeaderInput}
-          onChangeText={setMcpHeaderInput}
-          style={styles.input}
-          placeholder="Authorization"
-          autoCapitalize="none"
-        />
-
-        <Text style={styles.fieldLabel}>MCP Bearer Token</Text>
-        <TextInput
-          value={mcpBearerInput}
-          onChangeText={setMcpBearerInput}
-          style={[styles.input, styles.tokenInput]}
-          placeholder="Bearer eyJ..."
-          autoCapitalize="none"
-          multiline
-        />
-
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={saveMcpRuntimeConfig}>
-            <Text style={styles.buttonText}>Save MCP Config</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={loadMcpRuntimeConfig}>
-            <Text style={styles.secondaryButtonText}>Load MCP Config</Text>
-          </Pressable>
-          <Pressable style={styles.cancelButton} onPress={clearMcpRuntimeConfig}>
-            <Text style={styles.buttonText}>Clear MCP Config</Text>
-          </Pressable>
-        </View>
-
-        <Text style={styles.item}>MCP config status: {mcpConfigStatus}</Text>
-        <Text style={styles.item}>Runtime summary: {mcpRuntimeConfig ? compactJson(mcpRuntimeConfig, 1200) : "not loaded"}</Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Firebase User Settings</Text>
-        {settingsSaveStatus === "loading" || settingsSaveStatus === "saving" ? <ProgressBar progress={progressValue} label="Saving user settings" compact /> : null}
-        <Text style={styles.item}>Reads and writes per-user settings to Firestore via /user/settings endpoints.</Text>
-        <View style={styles.inlineRowWrap}>
-          <Pressable style={styles.button} onPress={loadUserSettings}>
-            <Text style={styles.buttonText}>Load Settings</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryButton} onPress={saveUserSettings}>
-            <Text style={styles.secondaryButtonText}>Save Settings</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.item}>Status: {settingsSaveStatus}</Text>
-        <Text style={styles.fieldLabel}>User Settings JSON</Text>
-        <TextInput
-          value={userSettingsText}
-          onChangeText={setUserSettingsText}
-          style={[styles.input, styles.jsonInput]}
-          placeholder='{"watchlist": ["AAPL"], "risk_profile": "balanced"}'
-          multiline
-        />
-        <Text style={styles.item}>Server payload: {userSettingsData ? compactJson(userSettingsData, 1200) : "none"}</Text>
-      </View>
-    </>
+    <><View style={styles.card}><Text style={styles.cardTitle}>Connection & Auth Controls</Text>{authBusy && <ProgressBar progress={progressValue} label="Auth action in progress" compact />}<Text style={styles.fieldLabel}>API Key</Text><TextInput value={apiKeyInput} onChangeText={setApiKeyInput} style={styles.input} placeholder="x-api-key (optional)" autoCapitalize="none" /><Text style={styles.fieldLabel}>Bearer Token</Text><TextInput value={bearerToken} onChangeText={setBearerToken} style={[styles.input, styles.tokenInput]} placeholder="Firebase ID token (Bearer)" autoCapitalize="none" multiline /><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={signInWithGoogleWeb}><Text style={styles.buttonText}>Sign In With Google (Web)</Text></Pressable><Pressable style={styles.button} onPress={checkFirebaseIdentity}><Text style={styles.buttonText}>Check /auth/me</Text></Pressable></View><Text style={styles.item}>Google login status: {googleSignInStatus}</Text></View>
+     <View style={styles.card}><Text style={styles.cardTitle}>Robinhood MCP Runtime Auth</Text><Text style={styles.warnText}>Never store real broker tokens in client storage.</Text><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={startMcpBackendOAuth}><Text style={styles.buttonText}>Robinhood Auth (Backend OAuth)</Text></Pressable></View><Text style={styles.fieldLabel}>MCP Bearer Token</Text><TextInput value={mcpBearerInput} onChangeText={setMcpBearerInput} style={[styles.input, styles.tokenInput]} placeholder="Bearer eyJ..." autoCapitalize="none" multiline /><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={saveMcpRuntimeConfig}><Text style={styles.buttonText}>Save MCP Config</Text></Pressable><Pressable style={styles.cancelButton} onPress={clearMcpRuntimeConfig}><Text style={styles.buttonText}>Clear MCP Config</Text></Pressable></View><Text style={styles.item}>MCP config status: {mcpConfigStatus}</Text></View>
+     <View style={styles.card}><Text style={styles.cardTitle}>Firebase User Settings</Text>{settingsSaveStatus === "saving" && <ProgressBar progress={progressValue} label="Saving user settings" compact />}<View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={loadUserSettings}><Text style={styles.buttonText}>Load Settings</Text></Pressable><Pressable style={styles.secondaryButton} onPress={saveUserSettings}><Text style={styles.secondaryButtonText}>Save Settings</Text></Pressable></View><Text style={styles.fieldLabel}>User Settings JSON</Text><TextInput value={userSettingsText} onChangeText={setUserSettingsText} style={[styles.input, styles.jsonInput]} placeholder='{"watchlist": ["AAPL"]}' multiline /></View></>
   );
 
   const renderPresetsManager = () => (
-    <>
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Preset Management</Text>
-        <Text style={styles.item}>View, create, and edit finviz screener presets.</Text>
-        {presetSaveStatus === "saving" && <ProgressBar progress={progressValue} label="Saving preset" compact />}
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Available Presets</Text>
-        <Text style={styles.item}>Total: {presets.length}</Text>
-        <ScrollView horizontal style={styles.inlineRow}>
-          {presets.map((name) => (
-            <Pressable
-              key={name}
-              onPress={() => {
-                setPresetEditName(name);
-                const profile = presetDetails?.profiles?.[name] || {};
-                setPresetEditContent(JSON.stringify(profile, null, 2));
-              }}
-              style={[styles.smallButton, presetEditName === name && { backgroundColor: THEME.accentDeep }]}
-            >
-              <Text style={styles.buttonText}>{name}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Create / Edit Preset</Text>
-        <Text style={styles.fieldLabel}>Preset Name</Text>
-        <TextInput
-          value={presetEditName}
-          onChangeText={setPresetEditName}
-          style={styles.input}
-          placeholder="Preset name (e.g., weekly_momo)"
-          autoCapitalize="none"
-        />
-        <Text style={styles.fieldLabel}>Preset Filter JSON</Text>
-        <TextInput
-          value={presetEditContent}
-          onChangeText={setPresetEditContent}
-          style={[styles.input, styles.jsonInput]}
-          placeholder='{"Average Volume": "Over 300K", "Performance": "Week Up"}'
-          multiline
-        />
-        <View style={styles.inlineRowWrap}>
-          <Pressable
-            style={styles.button}
-            onPress={async () => {
-              if (!presetEditName.trim()) {
-                setPresetSaveStatus("error: preset name required");
-                return;
-              }
-              try {
-                const parsed = JSON.parse(presetEditContent);
-                setPresetSaveStatus("saving");
-                const result = await apiPost("/scanner/presets/update", {
-                  name: presetEditName.trim(),
-                  filters: parsed,
-                }, authState);
-                setPresetSaveStatus("saved");
-                setPresets([...new Set([...presets, presetEditName.trim()])]);
-                setTimeout(() => setPresetSaveStatus("idle"), 2000);
-                await loadOverview();
-              } catch (e) {
-                setPresetSaveStatus(`error: ${e.message}`);
-              }
-            }}
-          >
-            <Text style={styles.buttonText}>Save Preset</Text>
-          </Pressable>
-          <Pressable
-            style={styles.secondaryButton}
-            onPress={() => {
-              setPresetEditName("");
-              setPresetEditContent("");
-              setPresetSaveStatus("idle");
-            }}
-          >
-            <Text style={styles.secondaryButtonText}>Clear</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.item}>Status: {presetSaveStatus}</Text>
-      </View>
-    </>
+    <><View style={styles.card}><Text style={styles.cardTitle}>Preset Management</Text><Text style={styles.item}>View, create, and edit finviz screener presets.</Text></View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Available Presets ({presets.length})</Text><ScrollView horizontal style={styles.inlineRow}>{presets.map((name) => (<Pressable key={name} onPress={() => { setPresetEditName(name); const profile = presetDetails?.profiles?.[name] || {}; setPresetEditContent(JSON.stringify(profile, null, 2)); }} style={[styles.smallButton, presetEditName === name && { backgroundColor: THEME.accentDeep }]}><Text style={styles.buttonText}>{name}</Text></Pressable>))}</ScrollView></View>
+    <View style={styles.card}><Text style={styles.cardTitle}>Create / Edit Preset</Text><Text style={styles.fieldLabel}>Preset Name</Text><TextInput value={presetEditName} onChangeText={setPresetEditName} style={styles.input} placeholder="Preset name" autoCapitalize="none" /><Text style={styles.fieldLabel}>Preset Filter JSON</Text><TextInput value={presetEditContent} onChangeText={setPresetEditContent} style={[styles.input, styles.jsonInput]} placeholder='{"Average Volume": "Over 300K"}' multiline /><View style={styles.inlineRowWrap}><Pressable style={styles.button} onPress={async () => { if (!presetEditName.trim()) { setPresetSaveStatus("error: preset name required"); return; } try { setPresetSaveStatus("saving"); await apiPost("/scanner/presets/update", { name: presetEditName.trim(), filters: JSON.parse(presetEditContent) }, authState); setPresetSaveStatus("saved"); setPresets([...new Set([...presets, presetEditName.trim()])]); await loadOverview(); } catch (e) { setPresetSaveStatus(`error: ${e.message}`); } }}><Text style={styles.buttonText}>Save Preset</Text></Pressable></View></View></>
   );
 
+  // ====== APP SHELL ======
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>QuantFlow Experience</Text>
-        <Text style={styles.meta}>{baseLabel}</Text>
-        <Text style={styles.meta}>Auth key configured: {authState.apiKey ? "yes" : "no"}</Text>
-        <Text style={styles.meta}>Bearer configured: {authState.bearerToken ? "yes" : "no"}</Text>
-        <Text style={styles.meta}>Status: {status}</Text>
+        <Text style={styles.title}>QuantFlow</Text>
+        <Text style={styles.meta}>{baseLabel} | Status: {status}</Text>
         {inFlightOps > 0 && <ProgressBar progress={progressValue} label={activeTaskLabel || "Loading"} />}
+
         <View style={styles.tabRow}>
           {SURFACES.map((name) => (
-            <Pressable
-              key={name}
-              style={[styles.tab, surface === name ? styles.tabActive : null]}
-              onPress={() => setSurface(name)}
-            >
+            <Pressable key={name} style={[styles.tab, surface === name ? styles.tabActive : null]} onPress={() => setSurface(name)}>
               <Text style={[styles.tabText, surface === name ? styles.tabTextActive : null]}>{name}</Text>
             </Pressable>
           ))}
         </View>
 
         {surface === "Public" && renderLanding()}
-
         {surface === "Workspace" && !workspaceUnlocked && renderWorkspaceGate()}
 
         {surface === "Workspace" && workspaceUnlocked && (
@@ -3220,27 +1470,27 @@ export default function App() {
             <View style={styles.workspaceMain}>
               <View style={styles.tabRow}>
                 {SCREENS.map((name) => (
-                  <Pressable
-                    key={name}
-                    style={[styles.tab, screen === name ? styles.tabActive : null]}
-                    onPress={() => setScreen(name)}
-                  >
+                  <Pressable key={name} style={[styles.tab, screen === name ? styles.tabActive : null]} onPress={() => setScreen(name)}>
                     <Text style={[styles.tabText, screen === name ? styles.tabTextActive : null]}>{name}</Text>
                   </Pressable>
                 ))}
               </View>
 
               {screen === "Overview" && renderOverview()}
+              {screen === "Portfolio" && renderPortfolio()}
+              {screen === "Trade" && renderTrade()}
               {screen === "Scanner" && renderScanner()}
               {screen === "Recommend" && renderRecommend()}
               {screen === "Analytics" && renderAnalytics()}
               {screen === "Charts" && renderCharts()}
               {screen === "Options" && renderOptions()}
               {screen === "Backtest" && renderBacktest()}
+              {screen === "Market" && renderMarket()}
               {screen === "Execution" && renderExecution()}
               {screen === "Assistant" && renderAssistant()}
               {screen === "Presets" && renderPresetsManager()}
               {screen === "Auth" && renderAuth()}
+              {screen === "Settings" && renderSettings()}
             </View>
             <View style={styles.workspaceSidePanel}>
               {renderAssistant(true)}
@@ -3266,18 +1516,7 @@ const styles = StyleSheet.create({
   workspaceLayout: { flexDirection: "row", alignItems: "flex-start", gap: 12, flexWrap: "wrap" },
   workspaceMain: { flex: 1, minWidth: 320, maxWidth: 760 },
   workspaceSidePanel: { width: 300, minWidth: 280 },
-  hero: {
-    backgroundColor: THEME.panel,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: THEME.border,
-    padding: 18,
-    gap: 10,
-    shadowColor: "#000",
-    shadowOpacity: 0.05,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-  },
+  hero: { backgroundColor: THEME.panel, borderRadius: 18, borderWidth: 1, borderColor: THEME.border, padding: 18, gap: 10 },
   heroEyebrow: { color: THEME.accentDeep, fontWeight: "800", letterSpacing: 1.2, textTransform: "uppercase", fontSize: 12 },
   heroTitle: { fontSize: 28, color: THEME.text, fontWeight: "800", lineHeight: 34 },
   heroBody: { color: THEME.textMuted, lineHeight: 21, fontSize: 15 },
@@ -3302,7 +1541,7 @@ const styles = StyleSheet.create({
   buttonText: { color: "white", fontWeight: "700" },
   checkbox: { width: 20, height: 20, borderWidth: 2, borderColor: THEME.border, borderRadius: 4, marginRight: 8 },
   checkboxChecked: { backgroundColor: THEME.accent, borderColor: THEME.accent },
-  inlineRow: { gap: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  inlineRow: { gap: 8, flexDirection: "row", alignItems: "center" },
   inlineRowWrap: { gap: 8, flexDirection: "row", alignItems: "center", flexWrap: "wrap" },
   rowWrap: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 },
   chip: { paddingVertical: 5, paddingHorizontal: 10, borderRadius: 20, borderWidth: 1, borderColor: THEME.border, backgroundColor: THEME.panelAlt },
@@ -3348,7 +1587,6 @@ const styles = StyleSheet.create({
   timelineMarker: { position: "absolute", bottom: 0, alignItems: "center", marginLeft: -8, width: 16 },
   timelineDot: { width: 8, height: 8, borderRadius: 999, marginBottom: 2 },
   timelineMarkerText: { fontSize: 10, fontWeight: "800" },
-  timelineLegendRow: { gap: 4 },
   newsSummaryList: { gap: 8 },
   newsSummaryCard: { borderWidth: 1, borderColor: THEME.border, borderRadius: 12, padding: 10, backgroundColor: "#fff" },
   chatEmptyState: { padding: 16, borderRadius: 12, backgroundColor: THEME.panelAlt, marginBottom: 8 },
@@ -3364,4 +1602,7 @@ const styles = StyleSheet.create({
   chatInputWrap: { gap: 8, width: "100%" },
   chatInput: { flex: 1, width: "100%", minHeight: 48, maxHeight: 120, textAlignVertical: "top" },
   label: { color: THEME.textMuted, fontSize: 13 },
+  metricRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4 },
+  metricLabel: { color: THEME.textMuted, fontSize: 13 },
+  metricValue: { color: THEME.text, fontSize: 15, fontWeight: "700" },
 });

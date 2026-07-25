@@ -11,7 +11,7 @@ From Robinhood support guidance:
 - Desktop is required for opening/authenticating the Agentic account
 
 ## Why This Matters for QuantFlow
-Current repository integration uses robin-stocks with username/password/MFA flow. That path has historically been brittle, especially for 2FA and session handling.
+QuantFlow standardizes on Robinhood MCP and removes direct username/password/MFA brokerage handling from the app runtime.
 
 MCP-first migration benefits:
 - Officially supported connectivity path
@@ -32,12 +32,10 @@ Important constraints:
 
 ### Step 1: Introduce Broker Mode Abstraction
 Add a broker mode setting:
-- legacy_robin_stocks
 - robinhood_mcp
 
 Behavior:
-- Keep legacy mode for fallback during migration
-- Prefer MCP mode for new workflows
+- Enforce MCP-only mode for broker reads/writes
 
 ### Step 2: Add MCP Execution Adapter Layer
 Create a new adapter module that is independent from strategy logic:
@@ -121,6 +119,6 @@ This keeps explainability and control while leveraging fast agentic UX.
 
 ## Immediate Next Actions
 1. Add MCP migration section in README and TODO
-2. Implement broker mode switch and placeholder MCP adapter
+2. Finalize MCP-only broker mode and remove legacy API hooks
 3. Add execution intent logging tables
 4. Expose approval queue in Streamlit before enabling live execution

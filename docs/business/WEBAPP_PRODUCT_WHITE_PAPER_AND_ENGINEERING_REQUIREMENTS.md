@@ -150,7 +150,6 @@ Ship a reliable web-first MVP that works end-to-end with deterministic API contr
 ### Backend Requirements
 - Python FastAPI service with modular packages under quantflow.
 - Broker abstraction with selectable modes:
-  - legacy_robin_stocks
   - robinhood_mcp
 - Execution policy and audit modules must be decoupled from strategy logic.
 

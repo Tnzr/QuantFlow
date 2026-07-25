@@ -6,7 +6,7 @@ import yfinance as yf
 import concurrent.futures
 
 
-def fetch_ohlcv(ticker: str, period: str = "6m", interval: str = "1wk") -> pd.DataFrame:
+def fetch_ohlcv(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     return normalize_ohlcv(df)
 
@@ -48,7 +48,7 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def fetch_ohlcv_parallel(tickers: list[str], period: str = "6m", interval: str = "1wk", max_workers: int = 8) -> dict[str, pd.DataFrame]:
+def fetch_ohlcv_parallel(tickers: list[str], period: str = "5y", interval: str = "1d", max_workers: int = 8) -> dict[str, pd.DataFrame]:
     """
     Download OHLCV data for multiple tickers in parallel.
     Returns a dict of ticker -> DataFrame.

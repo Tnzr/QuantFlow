@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, desc
-from .persistence import get_engine, TickerSnapshot, Recommendation, ExecutionIntent, ExecutionEvent, PolicyDecision
+from .persistence import get_engine, TickerSnapshot, Recommendation, NewsArticle, AnalyticsLeaderboardEntry, ExecutionIntent, ExecutionEvent, PolicyDecision
 import pandas as pd
 
 
@@ -117,6 +118,80 @@ def latest_recommendations_per_ticker(db_path: str = "sqlite:///quantflow.db") -
         )
         rows = s.execute(q).all()
         return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+
+
+def latest_analytics_leaderboard(db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        latest_batch = s.execute(
+            select(AnalyticsLeaderboardEntry.batch_id)
+            .order_by(desc(AnalyticsLeaderboardEntry.created_at), desc(AnalyticsLeaderboardEntry.id))
+            .limit(1)
+        ).scalar()
+        if not latest_batch:
+            return pd.DataFrame()
+        q = (
+            select(
+                AnalyticsLeaderboardEntry.created_at,
+                AnalyticsLeaderboardEntry.batch_id,
+                AnalyticsLeaderboardEntry.ticker,
+                AnalyticsLeaderboardEntry.period,
+                AnalyticsLeaderboardEntry.interval,
+                AnalyticsLeaderboardEntry.bias,
+                AnalyticsLeaderboardEntry.primary_horizon,
+                AnalyticsLeaderboardEntry.price,
+                AnalyticsLeaderboardEntry.composite_score,
+                AnalyticsLeaderboardEntry.nearest_support,
+                AnalyticsLeaderboardEntry.nearest_resistance,
+                AnalyticsLeaderboardEntry.support_gap_pct,
+                AnalyticsLeaderboardEntry.resistance_gap_pct,
+                AnalyticsLeaderboardEntry.score_breakdown_json,
+                AnalyticsLeaderboardEntry.recommendations_json,
+            )
+            .where(AnalyticsLeaderboardEntry.batch_id == latest_batch)
+            .order_by(desc(AnalyticsLeaderboardEntry.composite_score), AnalyticsLeaderboardEntry.ticker)
+        )
+        rows = s.execute(q).all()
+        frame = pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+        if frame.empty:
+            return frame
+        frame["score_breakdown"] = frame["score_breakdown_json"].apply(lambda value: json.loads(value) if value else {})
+        frame["recommendations"] = frame["recommendations_json"].apply(lambda value: json.loads(value) if value else [])
+        return frame.drop(columns=["score_breakdown_json", "recommendations_json"])
+
+
+def recent_news_articles(
+    days: int = 30,
+    db_path: str = "sqlite:///quantflow.db",
+    ticker: Optional[str] = None,
+    limit: int = 250,
+) -> pd.DataFrame:
+    engine = get_engine(db_path)
+    with Session(engine) as s:
+        cutoff = func.datetime(func.datetime("now"), f"-{days} day")
+        query = select(
+            NewsArticle.id,
+            NewsArticle.created_at,
+            NewsArticle.published_at,
+            NewsArticle.source,
+            NewsArticle.source_id,
+            NewsArticle.url,
+            NewsArticle.language,
+            NewsArticle.ticker,
+            NewsArticle.tickers_json,
+            NewsArticle.title,
+            NewsArticle.summary,
+            NewsArticle.content,
+            NewsArticle.sentiment_score,
+            NewsArticle.sentiment_label,
+            NewsArticle.metadata_json,
+        ).where(NewsArticle.created_at >= cutoff)
+        if ticker:
+            ticker = ticker.upper()
+            query = query.where((NewsArticle.ticker == ticker) | (NewsArticle.tickers_json.contains(f'"{ticker}"')))
+        query = query.order_by(desc(NewsArticle.created_at)).limit(limit)
+        rows = s.execute(query).all()
+        return pd.DataFrame(rows, columns=[c.key for c in query.selected_columns])
 
 
 def recent_execution_intents(limit: int = 100, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:

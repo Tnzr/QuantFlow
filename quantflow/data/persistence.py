@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Optional, Iterable
+from uuid import uuid4
 
 from sqlalchemy import create_engine, String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
@@ -46,6 +48,64 @@ class Recommendation(Base):
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     confidence: Mapped[float] = mapped_column(Float)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class NewsArticle(Base):
+    __tablename__ = "news_articles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, index=True)
+    language: Mapped[str] = mapped_column(String(16), default="en")
+
+    ticker: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    tickers_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sentiment_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, index=True)
+    sentiment_label: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class TrainingFeatureSnapshot(Base):
+    __tablename__ = "training_feature_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    batch_id: Mapped[str] = mapped_column(String(64), index=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    period: Mapped[str] = mapped_column(String(16), index=True)
+    interval: Mapped[str] = mapped_column(String(16), index=True)
+    as_of_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    feature_json: Mapped[str] = mapped_column(Text)
+
+
+class AnalyticsLeaderboardEntry(Base):
+    __tablename__ = "analytics_leaderboard_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    batch_id: Mapped[str] = mapped_column(String(64), index=True)
+
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    period: Mapped[str] = mapped_column(String(16), index=True)
+    interval: Mapped[str] = mapped_column(String(16), index=True)
+    bias: Mapped[str] = mapped_column(String(16))
+    primary_horizon: Mapped[str] = mapped_column(String(8), index=True)
+    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    composite_score: Mapped[float] = mapped_column(Float, index=True)
+    nearest_support: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    nearest_resistance: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    support_gap_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    resistance_gap_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    score_breakdown_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class ExecutionIntent(Base):
@@ -136,6 +196,77 @@ def save_recommendations(recs: Iterable, db_path: str = "sqlite:///quantflow.db"
         s.commit()
 
 
+def save_news_articles(articles: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> int:
+    engine = get_engine(db_path)
+    saved = 0
+    with Session(engine) as s:
+        for article in articles:
+            tickers = article.get("tickers") or article.get("symbols") or []
+            if isinstance(tickers, str):
+                tickers = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+            tickers = [str(t).upper() for t in tickers if str(t).strip()]
+            ticker = article.get("ticker") or (tickers[0] if tickers else None)
+            published_at = article.get("published_at")
+            if isinstance(published_at, str) and published_at:
+                try:
+                    published_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                except Exception:
+                    published_at = None
+            rec = NewsArticle(
+                source=str(article.get("source", "manual")),
+                source_id=article.get("source_id"),
+                url=article.get("url"),
+                language=str(article.get("language", "en")),
+                ticker=str(ticker).upper() if ticker else None,
+                tickers_json=json.dumps(tickers) if tickers else None,
+                title=str(article.get("title", "")).strip(),
+                summary=article.get("summary"),
+                content=article.get("content"),
+                published_at=published_at,
+                sentiment_score=_safe_float(article.get("sentiment_score")),
+                sentiment_label=article.get("sentiment_label"),
+                metadata_json=json.dumps(article.get("metadata") or {}),
+            )
+            s.add(rec)
+            saved += 1
+        s.commit()
+    return saved
+
+
+def save_analytics_leaderboard(
+    items: Iterable[dict],
+    db_path: str = "sqlite:///quantflow.db",
+    *,
+    period: str = "2y",
+    interval: str = "1d",
+) -> str:
+    engine = get_engine(db_path)
+    batch_id = f"analytics-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    with Session(engine) as s:
+        for item in items:
+            support = item.get("support_resistance") or {}
+            s.add(
+                AnalyticsLeaderboardEntry(
+                    batch_id=batch_id,
+                    ticker=str(item.get("ticker", "")).upper(),
+                    period=period,
+                    interval=interval,
+                    bias=str(item.get("bias", "neutral")),
+                    primary_horizon=str(item.get("primary_horizon", "")),
+                    price=_safe_float(item.get("price")),
+                    composite_score=float(item.get("composite_score", 0.0)),
+                    nearest_support=_safe_float(support.get("nearest_support")),
+                    nearest_resistance=_safe_float(support.get("nearest_resistance")),
+                    support_gap_pct=_safe_float(support.get("support_gap_pct")),
+                    resistance_gap_pct=_safe_float(support.get("resistance_gap_pct")),
+                    score_breakdown_json=json.dumps(item.get("score_breakdown") or {}),
+                    recommendations_json=json.dumps(item.get("recommendations") or []),
+                )
+            )
+        s.commit()
+    return batch_id
+
+
 def save_execution_intent(
     ticker: str,
     action: str,
@@ -197,6 +328,25 @@ def save_policy_decision(
             )
         )
         s.commit()
+
+
+def save_training_features(rows: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> str:
+    engine = get_engine(db_path)
+    batch_id = f"train-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    with Session(engine) as s:
+        for row in rows:
+            s.add(
+                TrainingFeatureSnapshot(
+                    batch_id=batch_id,
+                    ticker=str(row.get("ticker", "")).upper(),
+                    period=str(row.get("period", "")),
+                    interval=str(row.get("interval", "")),
+                    as_of_date=row.get("as_of_date"),
+                    feature_json=json.dumps(row, default=str),
+                )
+            )
+        s.commit()
+    return batch_id
 
 
 def _safe_float(x):

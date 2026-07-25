@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any, List, Optional, Tuple
 import math
 
 import pandas as pd
 
+from ..features.analytics import support_resistance_from_distribution
+from ..features.analytics import forecast_prices
 from ..features.indicators import fetch_ohlcv, compute_indicators
 from ..features.seasonality import proximity_to_earnings
 from ..features.exit_rules import simple_exit_plan
@@ -90,6 +92,142 @@ class RuleEngine:
             stop = price + 1.5 * atr
             target = price - 2.5 * atr
         return stop, target
+
+    def _score_breakdown(self, df: pd.DataFrame) -> dict[str, float]:
+        last = df.iloc[-1]
+        price = float(last["adj close"])
+        sma20 = float(last["sma20"]) if not pd.isna(last["sma20"]) else price
+        sma50 = float(last["sma50"]) if not pd.isna(last["sma50"]) else price
+        sma200 = float(last["sma200"]) if not pd.isna(last["sma200"]) else price
+        rsi14 = float(last["rsi14"]) if not pd.isna(last["rsi14"]) else 50.0
+        atr14 = float(last["atr14"]) if not pd.isna(last["atr14"]) else max(price * 0.02, 0.01)
+        vol20 = float(last["vol20"]) if not pd.isna(last["vol20"]) else 0.0
+
+        ret_21 = float(df["adj close"].pct_change(21).iloc[-1]) if len(df) > 21 else 0.0
+        ret_63 = float(df["adj close"].pct_change(63).iloc[-1]) if len(df) > 63 else ret_21
+        trend_score = max(0.0, min(1.0, 0.45 * (price > sma20) + 0.25 * (price > sma50) + 0.30 * (price > sma200)))
+        momentum_score = max(0.0, min(1.0, 0.5 + 1.25 * ret_21 + 0.75 * ret_63))
+        rsi_score = max(0.0, min(1.0, 1.0 - abs(rsi14 - 58.0) / 35.0))
+        volatility_score = max(0.0, min(1.0, 1.0 - min(vol20, 0.8) / 0.8))
+        risk_score = max(0.0, min(1.0, 1.0 - min(atr14 / max(price, 0.01), 0.12) / 0.12))
+        return {
+            "trend": trend_score,
+            "momentum": momentum_score,
+            "rsi_quality": rsi_score,
+            "volatility_regime": volatility_score,
+            "atr_efficiency": risk_score,
+        }
+
+    def analyze_ticker(self, ticker: str, period: str = "2y", interval: str = "1d") -> dict[str, Any]:
+        df = fetch_ohlcv(ticker, period=period, interval=interval)
+        df = compute_indicators(df)
+        recs = self.recommend(ticker)
+        last = df.iloc[-1]
+        support_profile = support_resistance_from_distribution(df, bins=24, level_count=3)
+        breakdown = self._score_breakdown(df)
+        base_score = (
+            0.30 * breakdown["trend"]
+            + 0.25 * breakdown["momentum"]
+            + 0.15 * breakdown["rsi_quality"]
+            + 0.15 * breakdown["volatility_regime"]
+            + 0.15 * breakdown["atr_efficiency"]
+        )
+
+        nearest_support = support_profile.get("nearest_support")
+        nearest_resistance = support_profile.get("nearest_resistance")
+        current_price = float(last["adj close"])
+        support_bonus = 0.0
+        if nearest_support and current_price:
+            support_gap = max(0.0, (current_price / nearest_support) - 1.0)
+            support_bonus = max(0.0, 0.15 - support_gap)
+
+        resistance_penalty = 0.0
+        if nearest_resistance and current_price:
+            resistance_gap = max(0.0, (nearest_resistance / current_price) - 1.0)
+            resistance_penalty = max(0.0, 0.08 - resistance_gap)
+
+        composite_score = max(0.0, min(1.0, base_score + support_bonus - resistance_penalty))
+        rec_payload = [asdict(rec) for rec in recs]
+        top_rec = max(rec_payload, key=lambda rec: rec["confidence"])
+        top_bias = top_rec["bias"]
+
+        return {
+            "ticker": ticker.upper(),
+            "price": current_price,
+            "bias": top_bias,
+            "primary_horizon": top_rec["horizon"],
+            "composite_score": composite_score,
+            "score_breakdown": breakdown,
+            "support_resistance": {
+                "nearest_support": nearest_support,
+                "nearest_resistance": nearest_resistance,
+                "support_gap_pct": support_profile.get("support_gap_pct"),
+                "resistance_gap_pct": support_profile.get("resistance_gap_pct"),
+                "support_levels": support_profile.get("support_levels", []),
+                "resistance_levels": support_profile.get("resistance_levels", []),
+            },
+            "indicators": {
+                "rsi14": float(last["rsi14"]) if not pd.isna(last["rsi14"]) else None,
+                "sma20": float(last["sma20"]) if not pd.isna(last["sma20"]) else None,
+                "sma50": float(last["sma50"]) if not pd.isna(last["sma50"]) else None,
+                "sma200": float(last["sma200"]) if not pd.isna(last["sma200"]) else None,
+                "atr14": float(last["atr14"]) if not pd.isna(last["atr14"]) else None,
+                "vol20": float(last["vol20"]) if not pd.isna(last["vol20"]) else None,
+            },
+            "recommendations": rec_payload,
+        }
+
+    def training_features(self, ticker: str, period: str = "2y", interval: str = "1d", forecast_horizon: int = 20) -> dict[str, Any]:
+        df = fetch_ohlcv(ticker, period=period, interval=interval)
+        df = compute_indicators(df)
+        analysis = self.analyze_ticker(ticker, period=period, interval=interval)
+        forecast = forecast_prices(df, horizon=forecast_horizon)
+        last = df.iloc[-1]
+
+        features = {
+            "ticker": ticker.upper(),
+            "period": period,
+            "interval": interval,
+            "price": float(last["adj close"]),
+            "ret_5d": float(df["adj close"].pct_change(5).iloc[-1]) if len(df) > 5 else 0.0,
+            "ret_21d": float(df["adj close"].pct_change(21).iloc[-1]) if len(df) > 21 else 0.0,
+            "ret_63d": float(df["adj close"].pct_change(63).iloc[-1]) if len(df) > 63 else 0.0,
+            "rsi14": float(last["rsi14"]) if not pd.isna(last["rsi14"]) else None,
+            "atr14": float(last["atr14"]) if not pd.isna(last["atr14"]) else None,
+            "vol20": float(last["vol20"]) if not pd.isna(last["vol20"]) else None,
+            "distance_sma20_pct": float((last["adj close"] / last["sma20"]) - 1.0) if not pd.isna(last["sma20"]) and last["sma20"] else None,
+            "distance_sma50_pct": float((last["adj close"] / last["sma50"]) - 1.0) if not pd.isna(last["sma50"]) and last["sma50"] else None,
+            "distance_sma200_pct": float((last["adj close"] / last["sma200"]) - 1.0) if not pd.isna(last["sma200"]) and last["sma200"] else None,
+            "composite_score": float(analysis["composite_score"]),
+            "trend_score": float(analysis["score_breakdown"].get("trend", 0.0)),
+            "momentum_score": float(analysis["score_breakdown"].get("momentum", 0.0)),
+            "rsi_quality_score": float(analysis["score_breakdown"].get("rsi_quality", 0.0)),
+            "volatility_regime_score": float(analysis["score_breakdown"].get("volatility_regime", 0.0)),
+            "atr_efficiency_score": float(analysis["score_breakdown"].get("atr_efficiency", 0.0)),
+            "nearest_support": analysis["support_resistance"].get("nearest_support"),
+            "nearest_resistance": analysis["support_resistance"].get("nearest_resistance"),
+            "support_gap_pct": analysis["support_resistance"].get("support_gap_pct"),
+            "resistance_gap_pct": analysis["support_resistance"].get("resistance_gap_pct"),
+            "forecast_return_pct": float(forecast.get("forecast_return_pct", 0.0)),
+            "forecast_band_pct": float(forecast.get("confidence_band_pct", 0.0)),
+            "forecast_daily_trend_pct": float(forecast.get("daily_trend_pct", 0.0)),
+            "top_bias": analysis.get("bias"),
+            "primary_horizon": analysis.get("primary_horizon"),
+        }
+        return features
+
+    def rank_tickers(self, tickers: list[str], period: str = "2y", interval: str = "1d") -> list[dict[str, Any]]:
+        ranked = []
+        for ticker in tickers:
+            ranked.append(self.analyze_ticker(ticker, period=period, interval=interval))
+        ranked.sort(
+            key=lambda row: (
+                row["composite_score"],
+                max((rec["confidence"] for rec in row["recommendations"]), default=0.0),
+            ),
+            reverse=True,
+        )
+        return ranked
 
     def recommend(self, ticker: str) -> List[Rec]:
         df = fetch_ohlcv(ticker)

@@ -10,48 +10,47 @@ import torch.nn.functional as F
 
 @dataclass
 class LossConfig:
-    classification_weight: float = 0.50
-    regression_weight: float = 0.20
-    distance_weight: float = 0.10
-    coherence_weight: float = 0.05
-    dynamics_weight: float = 0.02
-    uncertainty_weight: float = 0.05
-    direction_weight: float = 0.05
-    ranking_weight: float = 0.03
+    regression_weight: float = 0.40
+    direction_weight: float = 0.15
+    diversity_weight: float = 0.05
+    temporal_weight: float = 0.25
+    dynamics_weight: float = 0.05
+    sigma_reg_weight: float = 0.10
 
-    classification_loss_type: str = "focal"
     regression_loss: str = "smoothl1"
+    label_smoothing: float = 0.05
+    sigma_target: float = 0.05  # target uncertainty: models should aim for ~5% sigma
+
+    # Legacy fields
+    classification_weight: float = 0.0
+    distance_weight: float = 0.0
+    coherence_weight: float = 0.0
+    ranking_weight: float = 0.0
+    uncertainty_weight: float = 0.0
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
-    label_smoothing: float = 0.05
-
     classification_temporal_boost: float = 0.5
     regression_temporal_boost: float = 1.0
     temporal_focus_tau_min: float = 5.0
     classification_temporal_max_multiplier: float = 4.0
     regression_temporal_max_multiplier: float = 3.0
-
-    # Class-imbalance strategy per methodology §6.2.1/§8.2: weights are computed
-    # DYNAMICALLY from each batch's own class frequency (inverse-frequency,
-    # clipped) rather than a hand-tuned static tuple. Stacking a static tuple on
-    # top of focal loss + temporal weighting produced a bistable system that
-    # simply moves the collapse target between classes when hand-edited (see
-    # .kilo/plans/1784792483000-collapse-and-monitoring-remediation.md).
-    class_weight_mode: str = "dynamic"  # "dynamic" | "static"
-    class_weights: tuple = (1.5, 0.7, 1.5)  # fallback only when class_weight_mode == "static"
-    dynamic_class_weight_min: float = 0.3
-    dynamic_class_weight_max: float = 4.0
+    class_weight_mode: str = "dynamic"
+    class_weights: tuple = (1.5, 0.7, 1.5)
+    dynamic_class_weight_min: float = 0.1
+    dynamic_class_weight_max: float = 12.0
+    sharpness_weight: float = 0.0
+    sharpness_weight_legacy: float = 0.0
+    dir_coherence_weight: float = 0.0
+    anti_collapse_weight: float = 0.0
 
     def normalize_weights(self) -> Dict[str, float]:
         raw = {
-            "cls": self.classification_weight,
-            "fut": self.regression_weight,
-            "dist": self.distance_weight,
-            "coh": self.coherence_weight,
-            "dyn": self.dynamics_weight,
-            "unc": self.uncertainty_weight,
+            "reg": self.regression_weight,
             "dir": self.direction_weight,
-            "rank": self.ranking_weight,
+            "div": self.diversity_weight,
+            "tmp": self.temporal_weight,
+            "dyn": self.dynamics_weight,
+            "sig": self.sigma_reg_weight,
         }
         total = sum(raw.values())
         if total == 0:
@@ -60,194 +59,88 @@ class LossConfig:
 
 
 class CompositeLoss(nn.Module):
-    """Complex Systems Engineering Loss per methodology §6.
+    """Return-forecasting loss — smooth L1 + direction penalty + diversity.
 
-    Enhanced with:
-    - Class-weighted focal loss for imbalance handling
-    - Direction-biased return prediction loss
-    - Temporal distance weighting (closer events weighted higher)
-    - Coherence between state probabilities and forecast horizon
+    No NLL (Gaussian log-likelihood) since it drives loss negative when the
+    model predicts very small sigma — this incentivizes overconfident near-zero
+    predictions (collapse to safe output). Instead, use a simple sigma
+    regularization that pulls sigma toward a target value.
     """
 
     def __init__(self, config: Optional[LossConfig] = None):
         super().__init__()
         self.config = config or LossConfig()
 
-    def _focal_loss(self, logits: torch.Tensor, targets: torch.Tensor, alpha: float = None, gamma: float = None) -> torch.Tensor:
-        alpha = alpha or self.config.focal_alpha
-        gamma = gamma or self.config.focal_gamma
-        ce = F.cross_entropy(logits, targets, reduction="none")
-        pt = torch.exp(-ce)
-        focal = alpha * (1 - pt) ** gamma * ce
-        return focal.mean()
-
-    def _compute_class_weights(self, targets: torch.Tensor, n_classes: int) -> torch.Tensor:
-        """Compute per-sample class weights.
-
-        Per methodology §6.2.1/§8.2, imbalance correction should be DYNAMIC
-        (recomputed per batch from that batch's own class frequency), not a
-        static hand-tuned constant. Falls back to `class_weights` tuple only
-        if `class_weight_mode == "static"`.
-        """
-        if self.config.class_weight_mode == "static":
-            cw = torch.tensor(self.config.class_weights, device=targets.device, dtype=torch.float32)
-            return cw[targets]
-
-        counts = torch.bincount(targets, minlength=n_classes).float()
-        total = counts.sum().clamp(min=1.0)
-        present = counts > 0
-        # Inverse-frequency, normalized so the mean weight over PRESENT classes is 1.0
-        inv_freq = torch.zeros_like(counts)
-        inv_freq[present] = total / (n_classes * counts[present])
-        inv_freq = inv_freq.clamp(
-            self.config.dynamic_class_weight_min, self.config.dynamic_class_weight_max
-        )
-        # Renormalize so the batch's mean per-sample weight stays ~1.0 (keeps the
-        # overall loss magnitude stable across batches of varying composition).
-        cw = torch.ones(n_classes, device=targets.device, dtype=torch.float32)
-        cw[present] = inv_freq[present]
-        weight_per_sample = cw[targets]
-        mean_w = weight_per_sample.mean().clamp(min=1e-6)
-        return weight_per_sample / mean_w
-
-    def _classification_loss(self, logits: torch.Tensor, targets: torch.Tensor, tau_target: torch.Tensor) -> torch.Tensor:
-        epsilon = self.config.label_smoothing
-        n_classes = logits.size(-1)
-        smooth_targets = torch.full_like(logits, epsilon / (n_classes - 1))
-        smooth_targets.scatter_(1, targets.unsqueeze(1), 1.0 - epsilon)
-        neg_log = -(smooth_targets * F.log_softmax(logits, dim=-1))
-        base_loss = neg_log.sum(dim=-1)
-
-        alpha = self.config.focal_alpha
-        gamma = self.config.focal_gamma
-        prob_true = F.softmax(logits, dim=-1).gather(1, targets.unsqueeze(1)).squeeze(1)
-        focal_factor = alpha * (1.0 - prob_true) ** gamma
-
-        class_weight_per_sample = self._compute_class_weights(targets, n_classes)
-
-        # Temporal proximity weighting is intentionally mild and additive-capped
-        # (max 4x) so it cannot compound with focal+class weighting into another
-        # bistable collapse mode.
-        tau_clamped = tau_target.clamp(1.0, 21.0)
-        temporal_weight = 1.0 + self.config.classification_temporal_boost * torch.exp(
-            -tau_clamped / max(self.config.temporal_focus_tau_min, 1e-6)
-        )
-        temporal_weight = temporal_weight.clamp(1.0, self.config.classification_temporal_max_multiplier)
-
-        loss = focal_factor * base_loss * class_weight_per_sample * temporal_weight
-        return loss.mean()
-
     def _regression_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_sq = pred.squeeze(-1) if pred.dim() > 1 else pred
         if self.config.regression_loss == "smoothl1":
-            loss = F.smooth_l1_loss(pred_sq, target, reduction="none")
-        elif self.config.regression_loss == "weighted_mse":
-            loss = (pred_sq - target) ** 2
-        else:
-            loss = (pred_sq - target) ** 2
+            return F.smooth_l1_loss(pred, target)
+        elif self.config.regression_loss == "huber":
+            return F.huber_loss(pred, target, delta=0.02)
+        return F.smooth_l1_loss(pred, target)
 
-        tau_clamped = target.clamp(1.0, 21.0)
-        temporal_weight = 1.0 + self.config.regression_temporal_boost * torch.exp(
-            -tau_clamped / max(self.config.temporal_focus_tau_min, 1e-6)
-        )
-        temporal_weight = temporal_weight.clamp(1.0, self.config.regression_temporal_max_multiplier)
+    def _direction_penalty(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_sign = torch.sign(pred)
+        true_sign = torch.sign(target)
+        mismatch = (pred_sign != true_sign).float()
+        return mismatch.mean()
 
-        return (loss * temporal_weight).mean()
+    def _diversity_loss(self, pred: torch.Tensor) -> torch.Tensor:
+        """Penalize zero-variance predictions — forces the model to produce
+        varied forecasts across samples rather than collapsing to a single value."""
+        if len(pred) < 2:
+            return torch.tensor(0.0, device=pred.device)
+        std = pred.std()
+        return F.relu(0.03 - std) * 10.0
 
-    def _distance_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_sq = pred.squeeze(-1) if pred.dim() > 1 else pred
-        diff = F.smooth_l1_loss(pred_sq, target, reduction="none")
-        tau_clamped = target.clamp(1.0, 21.0)
-        weight = 1.0 + torch.exp(-tau_clamped / max(self.config.temporal_focus_tau_min, 1e-6))
-        return (diff * weight).mean()
+    def _hold_penalty(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        in_hold = (pred.abs() < 0.01).float()
+        target_directional = (target.abs() >= 0.01).float()
+        return (in_hold * target_directional).mean()
 
-    def _coherence_loss(self, past_probs: torch.Tensor, forecast: torch.Tensor, event_targets: torch.Tensor) -> torch.Tensor:
-        inter_event_mask = event_targets == 0
-        pre_event_mask = (event_targets == 1) | (event_targets == 2)
-        forecast_sq = forecast.squeeze(-1) if forecast.dim() > 1 else forecast
+    def _temporal_loss(self, pred: torch.Tensor, target: torch.Tensor,
+                       forecast_path: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Inverse temporal distance loss: near-term forecast errors weighted
+        more heavily than far-term. This forces the model to be accurate at
+        short horizons (where prediction is feasible) while allowing flexibility
+        at longer horizons (where macro trends dominate)."""
+        if forecast_path is None or forecast_path.dim() < 2:
+            return torch.tensor(0.0, device=pred.device)
+        B, H = forecast_path.shape
+        # Linear decay: step 0 weight = 1.0, step H-1 weight = 0.2
+        weights = torch.linspace(1.0, 0.2, H, device=pred.device)
+        weights = weights / weights.mean()  # normalize so mean=1.0
+        # Compare each step to the scalar target (approximate)
+        # For a real multi-step loss, compare path[t] to the t-step forward return
+        diff = F.smooth_l1_loss(forecast_path, target.unsqueeze(-1).expand_as(forecast_path), reduction="none")
+        weighted = diff * weights
+        return weighted.mean()
 
-        loss = torch.tensor(0.0, device=past_probs.device)
-        if inter_event_mask.any():
-            forecast_norm = torch.sigmoid(forecast_sq[inter_event_mask] / 21.0)
-            past_inter_conf = past_probs[inter_event_mask, 0]
-            loss = loss + (forecast_norm.squeeze() - 1.0 + past_inter_conf).pow(2).mean()
-        if pre_event_mask.any():
-            forecast_norm = torch.sigmoid(forecast_sq[pre_event_mask] / 21.0)
-            past_pre_conf = past_probs[pre_event_mask, 1] + past_probs[pre_event_mask, 2]
-            loss = loss + (forecast_norm.squeeze() - past_pre_conf).pow(2).mean()
-        return loss * 0.5 if (inter_event_mask.any() or pre_event_mask.any()) else loss
-
-    def _direction_loss(self, forecast: torch.Tensor, target_ret: torch.Tensor) -> torch.Tensor:
-        """Direction-biased percent change loss.
-
-        Penalizes forecast direction when it differs from actual price change.
-        Target should be forward returns (e.g., target_21d).
-        """
-        forecast_sq = forecast.squeeze(-1) if forecast.dim() > 1 else forecast
-        direction_pred = torch.sign(forecast_sq - 21.0)
-        direction_true = torch.sign(target_ret)
-        mismatch = (direction_pred != direction_true).float()
-        mag = target_ret.abs()
-        return (mismatch * mag.abs()).mean() * 0.2 + F.smooth_l1_loss(
-            forecast_sq, 21.0 * (1.0 - torch.tanh(target_ret * 5.0)),
-            reduction="mean",
-        ) * 0.8
+    def _sigma_regularization(self, sigma: torch.Tensor) -> torch.Tensor:
+        """Pull sigma toward a target value — prevents overconfidence (sigma→0)
+        and excessive uncertainty (sigma→∞)."""
+        target = self.config.sigma_target
+        return F.smooth_l1_loss(sigma, torch.full_like(sigma, target))
 
     def _dynamics_loss(self, residual: torch.Tensor) -> torch.Tensor:
-        """Regularizes the state-transition residual magnitude.
-
-        NOTE: previously accepted an `h_prev` smoothness term that was always
-        called with a dummy zero tensor and therefore dead code (shape
-        mismatch guard always failed). Removed rather than fixed silently —
-        if a real hidden-state-delta smoothness penalty is wanted later, wire
-        actual consecutive-batch hidden states through here explicitly.
-        """
         return residual.pow(2).mean()
-
-    def _uncertainty_loss(self, mu: torch.Tensor, sigma: torch.Tensor, forecast: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        mu_a = mu.squeeze(-1) if mu.dim() > 1 else mu
-        sigma_a = sigma.squeeze(-1) if sigma.dim() > 1 else sigma
-        forecast_a = forecast.squeeze(-1) if forecast.dim() > 1 else forecast
-        nll = 0.5 * (torch.log(sigma_a.pow(2) + 1e-6) + (forecast_a - target).pow(2) / (sigma_a.pow(2) + 1e-6))
-        return nll.mean()
-
-    def _ranking_loss(self, forecast: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        forecast_sq = forecast.squeeze(-1) if forecast.dim() > 1 else forecast
-        if len(forecast_sq) < 2:
-            return torch.tensor(0.0, device=forecast.device)
-        f_prev = forecast_sq[:-1]
-        f_curr = forecast_sq[1:]
-        t_prev = target[:-1]
-        t_curr = target[1:]
-        rank_pred = (f_curr - f_prev)
-        rank_true = (t_curr - t_prev)
-        violations = F.relu(torch.sign(rank_true) * (-rank_pred))
-        return violations.mean()
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         weights = self.config.normalize_weights()
 
-        past_logits = outputs["past_state_logits"]
-        event_targets = targets["event_state_code"].long()
-        tau_target = targets["tau_forward"]
-        future_forecast = outputs["future_forecast"].squeeze(-1)
-        past_probs = outputs["past_state_probs"]
-        dynamics_residual = outputs["dynamics_residual"]
-        unc_mu = outputs["uncertainty_mu"].squeeze(-1)
-        unc_sigma = outputs["uncertainty_sigma"].squeeze(-1)
+        predicted_return = outputs["predicted_return"]
+        aleatoric_sigma = outputs["aleatoric_sigma"]
+        dynamics_residual = outputs.get("dynamics_residual", torch.zeros(1, device=predicted_return.device))
+        target_return = targets.get("target_return", targets.get("target_21d", torch.zeros_like(predicted_return)))
 
         losses = {}
-        losses["classification"] = weights["cls"] * self._classification_loss(past_logits, event_targets, tau_target)
-        losses["regression"] = weights["fut"] * self._regression_loss(future_forecast, tau_target)
-        losses["distance"] = weights["dist"] * self._distance_loss(future_forecast, tau_target)
-        losses["coherence"] = weights["coh"] * self._coherence_loss(past_probs, future_forecast, event_targets)
-        losses["dynamics"] = weights["dyn"] * self._dynamics_loss(dynamics_residual)
+        losses["regression"] = weights["reg"] * self._regression_loss(predicted_return, target_return)
+        losses["direction"] = weights["dir"] * self._direction_penalty(predicted_return, target_return)
+        losses["diversity"] = weights["div"] * self._diversity_loss(predicted_return)
+        losses["temporal"] = weights["tmp"] * self._temporal_loss(
+            predicted_return, target_return, outputs.get("forecast_path"))
+        losses["sigma_reg"] = weights["sig"] * self._sigma_regularization(aleatoric_sigma)
+        if weights["dyn"] > 0:
+            losses["dynamics"] = weights["dyn"] * self._dynamics_loss(dynamics_residual)
 
-        target_ret = targets.get("target_21d", torch.zeros_like(tau_target))
-        losses["direction"] = weights["dir"] * self._direction_loss(future_forecast, target_ret)
-
-        losses["uncertainty"] = weights["unc"] * self._uncertainty_loss(unc_mu, unc_sigma, future_forecast, tau_target)
-        losses["ranking"] = weights["rank"] * self._ranking_loss(future_forecast, tau_target)
         losses["total"] = sum(losses.values())
-
         return losses

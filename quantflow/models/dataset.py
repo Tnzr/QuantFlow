@@ -24,6 +24,22 @@ FEATURE_COLUMNS = [
     "composite_score", "trend_score", "momentum_score",
     "rsi_quality_score", "volatility_regime_score", "atr_efficiency_score",
     "forecast_return_pct", "forecast_band_pct", "forecast_daily_trend_pct",
+    # Raw OHLCV context — essential for the BiLSTM to learn candlestick
+    # patterns and price-action structure. Previously the encoder saw only
+    # derived indicators, which discard the microstructure that LSTMs excel
+    # at processing across temporal windows.
+    "open_log",        # log(open / close_prev)
+    "high_log",        # log(high / close_prev)
+    "low_log",         # log(low / close_prev)
+    "close_log",       # log(close / close_prev)
+    "volume_rel",      # volume / volume_20d_mean
+    "range_pct",       # (high - low) / close
+    "gap_pct",         # (open - close_prev) / close_prev
+    "body_pct",        # abs(close - open) / (high - low + eps)
+    "upper_wick_pct",  # (high - max(open,close)) / (high - low + eps)
+    "lower_wick_pct",  # (min(open,close) - low) / (high - low + eps)
+    "volume_ratio_5d",  # vol_t / mean_vol_5d
+    "price_vol_corr_5d",  # rolling 5d correlation of returns and volume
 ]
 
 LABEL_COLUMNS = [
@@ -36,24 +52,40 @@ LABEL_COLUMNS = [
 
 
 def _build_tau_forward(row: pd.Series) -> float:
-    """Synthesize tau (time-to-event) from event state and forward drawdown."""
-    code = row.get("event_state_code", 0)
-    target_21d = row.get("target_21d", 0.0) or 0.0
-    dd_21d = row.get("drawdown_21d_max", 0.0) or 0.0
+    """Synthesize tau (time-to-significant-move) from forward return magnitude.
 
-    if code == 2:
-        return max(1.0, min(5.0, -dd_21d * 100))
-    elif code == 1:
-        if target_21d < -0.01:
-            return max(3.0, min(21.0, -target_21d * 252.0))
-        return max(5.0, min(21.0, -dd_21d * 200) if dd_21d else 21.0)
-    else:
+    With directional labels (downtrend/hold/uptrend), tau represents the
+    expected holding period for a trade to reach a meaningful return.
+    Higher absolute forward return = shorter tau (signal is imminent).
+    Flat returns = long tau (no urgency).
+    """
+    code = row.get("event_state_code", 1)
+    target_21d = row.get("target_21d", 0.0) or 0.0
+
+    # Scale: closer to 0 = further from decision point
+    strength = abs(target_21d) * 252  # annualize
+    strength = min(strength, 1.0)
+
+    if code == 0:  # downtrend: urgency scales with return magnitude
+        return max(3.0, min(21.0, 21.0 * (1.0 - strength)))
+    elif code == 2:  # uptrend: urgency scales with return magnitude
+        return max(3.0, min(21.0, 21.0 * (1.0 - strength)))
+    else:  # hold: no urgency
         return 21.0
 
 
 def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Select and impute feature columns for model input."""
+    """Select and impute feature columns for model input.
+    Auto-detects when fewer than 5 FEATURE_COLUMNS match (intraday/custom)."""
     available = [c for c in FEATURE_COLUMNS if c in df.columns]
+    if len(available) < 5:
+        label_cols = {"ticker", "event_state", "event_state_code", "is_volatile",
+                      "tau_forward", "target_return", "target_5d", "target_21d",
+                      "target_1h", "target_4h", "target_return_path",
+                      "drawdown_5d_max", "drawdown_21d_max", "as_of_date",
+                      "adj_close", "close", "target_direction_5d", "target_direction_21d"}
+        available = sorted([c for c in df.columns if c not in label_cols and df[c].dtype != 'object'])
+        logger.info(f"Intraday/custom mode: {len(available)} features auto-detected")
     data = df[available].copy()
     data = data.fillna(0.0)
     data = data.replace([np.inf, -np.inf], 0.0)
@@ -86,6 +118,13 @@ class FinancialTimeSeriesDataset(Dataset):
         df = df.sort_values([ticker_col, date_col]).reset_index(drop=True)
 
         feature_df = _prepare_features(df)
+        available_features = [c for c in self.feature_cols if c in feature_df.columns]
+        if len(available_features) < 5:
+            exclude = set(self.label_cols + [ticker_col, date_col])
+            available_features = sorted([c for c in feature_df.columns
+                                        if c not in exclude and feature_df[c].dtype != 'object'])
+            logger.info(f"Auto-detected {len(available_features)} feature columns from {len(feature_df.columns)} candidates")
+        self.feature_cols = available_features
         self._samples: List[Tuple[np.ndarray, Dict[str, np.ndarray], str, str]] = []
         # (ticker, start_idx, end_idx_exclusive) into self._samples, in insertion
         # order — used by TickerBatchSampler to guarantee no batch ever spans a
@@ -121,6 +160,7 @@ class FinancialTimeSeriesDataset(Dataset):
                 label_dict = {
                     "event_state_code": np.array(int(row_labels.get("event_state_code", 0)), dtype=np.int64),
                     "tau_forward": np.array(tau, dtype=np.float32),
+                    "target_return": np.array(row_labels.get("target_21d", 0.0) or 0.0, dtype=np.float32),
                     "target_5d": np.array(row_labels.get("target_5d", 0.0) or 0.0, dtype=np.float32),
                     "target_21d": np.array(row_labels.get("target_21d", 0.0) or 0.0, dtype=np.float32),
                     "target_direction_5d": np.array(int(row_labels.get("target_direction_5d", 0)), dtype=np.int64),
@@ -267,14 +307,20 @@ def prepare_dataloaders(
     test_split: float = 0.10,
     num_workers: int = 0,
     seed: int = 42,
+    shuffle: bool = False,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
-    """Split dataset chronologically and return DataLoaders with sequential ticker ordering.
+    """Split dataset and return DataLoaders.
 
     Per §4.3 and §8.2 of the methodology:
     - Samples are grouped by ticker and presented chronologically within each ticker.
     - No random shuffling — hidden states carry across batches within a ticker.
     - Ticker order is deterministic (sorted by ticker symbol) for reproducibility.
     - Train/val/test split is done at ticker level to prevent data leakage.
+
+    When shuffle=True (Phase A of two-phase curriculum), uses plain shuffled
+    DataLoader instead of TickerBatchSampler. This breaks stateful hidden-state
+    carry and ticker-boundary safety, but enables the model to learn separable
+    features from diverse batch composition before fine-tuning chronologically.
     """
     tickers = df["ticker"].unique()
     np.random.seed(seed)
@@ -303,14 +349,17 @@ def prepare_dataloaders(
     logger.info(f"Dataset created: feature_dim={train_ds.feature_dim}, "
                 f"train_samples={len(train_ds)}, val_samples={len(val_ds)}, test_samples={len(test_ds)}")
     logger.info(f"Train class distribution: {train_ds.class_distribution}")
-    logger.info(f"Training mode: CHRONOLOGICAL per-ticker (stateful context preserved)")
 
-    # Ticker-boundary-safe batching (see TickerBatchSampler docstring) — required
-    # for methodology §4.3-compliant stateful hidden-state carry across batches.
-    train_loader = DataLoader(
-        train_ds, num_workers=num_workers,
-        batch_sampler=TickerBatchSampler(train_ds.ticker_ranges, batch_size, drop_last=True),
-    )
+    if shuffle:
+        logger.info(f"Training mode: SHUFFLED (Phase A curriculum — no ticker batching, no stateful carry)")
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=num_workers)
+    else:
+        logger.info(f"Training mode: CHRONOLOGICAL per-ticker (stateful context preserved)")
+        train_loader = DataLoader(
+            train_ds, num_workers=num_workers,
+            batch_sampler=TickerBatchSampler(train_ds.ticker_ranges, batch_size, drop_last=True),
+        )
+
     val_loader = DataLoader(
         val_ds, num_workers=num_workers,
         batch_sampler=TickerBatchSampler(val_ds.ticker_ranges, batch_size, drop_last=False),

@@ -1,0 +1,203 @@
+{
+  "db_path": "sqlite:///quantflow.db",
+  "generated_at": "2026-07-25T17:48:44.856382+00:00",
+  "overall_db_status": "REFRESH REQUIRED",
+  "runtime": {
+    "api_base": "http://127.0.0.1:3000",
+    "health": {
+      "auth_enabled": false,
+      "firebase_auth_enabled": false,
+      "status": "ok"
+    },
+    "mcp_readiness": {
+      "checks": [
+        {
+          "details": "No MCP auth token/header configured in backend env. Set QF_MCP_BEARER_TOKEN or QF_MCP_HEADERS_JSON.",
+          "id": "auth_config",
+          "label": "Backend MCP auth wiring",
+          "state": "warn"
+        },
+        {
+          "details": "No runtime MCP auth override is configured. Use PUT /broker/mcp/config for non-env secret wiring.",
+          "id": "runtime_auth",
+          "label": "Runtime secure MCP config",
+          "state": "warn"
+        },
+        {
+          "details": "No secret provider configured (vault/aws/gcp/azure).",
+          "id": "secret_provider",
+          "label": "Secret manager provider",
+          "state": "warn"
+        },
+        {
+          "details": "QuantFlow can reach Robinhood MCP transport endpoint.",
+          "id": "transport",
+          "label": "MCP transport reachable",
+          "state": "pass"
+        },
+        {
+          "details": "Authentication not complete yet (typically 401 until the agent account auth flow is completed).",
+          "id": "auth",
+          "label": "Agent account authentication",
+          "state": "fail"
+        },
+        {
+          "details": "Optional local fixture env vars are not fully set (QF_MCP_ACCOUNT_JSON and QF_MCP_POSITIONS_JSON).",
+          "id": "fixtures",
+          "label": "Local fixture fallback",
+          "state": "warn"
+        },
+        {
+          "details": "Positions are not readable yet. This is expected when auth is incomplete.",
+          "id": "positions",
+          "label": "Positions visibility",
+          "state": "warn"
+        }
+      ],
+      "next_steps": [
+        "Preferred: run backend OAuth via POST /broker/mcp/oauth/start and complete browser auth callback.",
+        "Configure MCP auth via PUT /broker/mcp/config (preferred for runtime) or env vars as fallback.",
+        "For production, point secret_refs to Vault/AWS/GCP/Azure and avoid raw token payloads.",
+        "Authenticate the Robinhood Agentic account in your MCP-capable client session (see /broker/mcp/login auth_instructions).",
+        "Re-check MCP status from Overview to confirm authenticated=yes.",
+        "Optional: set QF_MCP_ACCOUNT_JSON and QF_MCP_POSITIONS_JSON for local fixture-based testing.",
+        "Once authenticated, validate account and positions read before enabling execution pathways."
+      ],
+      "overall_ready": false,
+      "status": {
+        "account_available": false,
+        "account_error": "Robinhood MCP account read failed: MCP HTTP error 401: Unauthorized | authentication required\n",
+        "auth": {
+          "api_key_header": "X-API-Key",
+          "auth_header": "Authorization",
+          "configured": false,
+          "custom_header_keys": [],
+          "has_api_key": false,
+          "has_bearer": false,
+          "has_cookie": false,
+          "payload_mode": "jsonrpc",
+          "runtime_override_active": false,
+          "secret_provider": null,
+          "secret_ref_keys": [],
+          "secret_resolution_error": null
+        },
+        "auth_summary": {
+          "api_key_header": "X-API-Key",
+          "auth_header": "Authorization",
+          "configured": false,
+          "custom_header_keys": [],
+          "has_api_key": false,
+          "has_bearer": false,
+          "has_cookie": false,
+          "payload_mode": "jsonrpc",
+          "runtime_override_active": false,
+          "secret_provider": null,
+          "secret_ref_keys": [],
+          "secret_resolution_error": null
+        },
+        "authenticated": false,
+        "broker_mode": "robinhood_mcp",
+        "connected": true,
+        "endpoint": "https://agent.robinhood.com/mcp/trading",
+        "fixture_account_loaded": false,
+        "fixture_positions_loaded": false,
+        "positions_available": false,
+        "positions_count": 0,
+        "positions_error": "Robinhood MCP positions read failed: MCP HTTP error 401: Unauthorized | authentication required\n",
+        "runtime_auth_override": {
+          "api_key_header": "X-API-Key",
+          "auth_header": "Authorization",
+          "configured": false,
+          "custom_header_keys": [],
+          "has_api_key": false,
+          "has_bearer": false,
+          "has_cookie": false,
+          "secret_provider": null,
+          "secret_ref_keys": []
+        }
+      }
+    },
+    "mcp_status": {
+      "account_available": false,
+      "account_error": "Robinhood MCP account read failed: MCP HTTP error 401: Unauthorized | authentication required\n",
+      "auth": {
+        "api_key_header": "X-API-Key",
+        "auth_header": "Authorization",
+        "configured": false,
+        "custom_header_keys": [],
+        "has_api_key": false,
+        "has_bearer": false,
+        "has_cookie": false,
+        "payload_mode": "jsonrpc",
+        "runtime_override_active": false,
+        "secret_provider": null,
+        "secret_ref_keys": [],
+        "secret_resolution_error": null
+      },
+      "auth_summary": {
+        "api_key_header": "X-API-Key",
+        "auth_header": "Authorization",
+        "configured": false,
+        "custom_header_keys": [],
+        "has_api_key": false,
+        "has_bearer": false,
+        "has_cookie": false,
+        "payload_mode": "jsonrpc",
+        "runtime_override_active": false,
+        "secret_provider": null,
+        "secret_ref_keys": [],
+        "secret_resolution_error": null
+      },
+      "authenticated": false,
+      "broker_mode": "robinhood_mcp",
+      "connected": true,
+      "endpoint": "https://agent.robinhood.com/mcp/trading",
+      "fixture_account_loaded": false,
+      "fixture_positions_loaded": false,
+      "positions_available": false,
+      "positions_count": 0,
+      "positions_error": "Robinhood MCP positions read failed: MCP HTTP error 401: Unauthorized | authentication required\n",
+      "runtime_auth_override": {
+        "api_key_header": "X-API-Key",
+        "auth_header": "Authorization",
+        "configured": false,
+        "custom_header_keys": [],
+        "has_api_key": false,
+        "has_bearer": false,
+        "has_cookie": false,
+        "secret_provider": null,
+        "secret_ref_keys": []
+      }
+    },
+    "scraping_status": {
+      "api_endpoint": null,
+      "mode": "proxy",
+      "notes": [],
+      "provider": "smartproxy",
+      "proxy_configured": true,
+      "proxy_env_source": "QF_SCRAPING_PROXY_URL",
+      "scraping_api_key_set": true,
+      "scrapingbee_api_key_set": true
+    }
+  },
+  "stale_days": 7,
+  "tables": {
+    "execution_intents": {
+      "age_days": 38.86604875555556,
+      "count": 6,
+      "latest": "2026-06-16T21:01:38.243902+00:00"
+    },
+    "recommendations": {
+      "age_days": 38.66426348581019,
+      "count": 405,
+      "latest": "2026-06-17T01:52:12.491208+00:00",
+      "refresh_needed": true
+    },
+    "ticker_snapshots": {
+      "age_days": 37.95063171987269,
+      "count": 39350,
+      "latest": "2026-06-17T18:59:50.275785+00:00",
+      "refresh_needed": true
+    }
+  }
+}

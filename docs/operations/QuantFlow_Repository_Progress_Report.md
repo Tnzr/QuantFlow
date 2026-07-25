@@ -42,8 +42,8 @@ Current maturity level:
 ## Primary Gaps and Risks
 
 ### 1) Broker Integration Risk
-- Current Robinhood path is tied to robin-stocks credential/MFA handling
-- This has known fragility and does not align with new MCP-first ecosystem
+- Legacy robin-stocks credential/MFA handling is deprecated and removed from active broker runtime.
+- Remaining risk is MCP onboarding consistency across clients and policy-safe execution controls.
 
 ### 2) Data Reliability and Scale
 - Need centralized retry/backoff and consistent request policy

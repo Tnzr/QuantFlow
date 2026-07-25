@@ -1,6 +1,8 @@
 name: quantflow
 channels:
   - conda-forge
+  - pytorch
+  - nvidia
 dependencies:
   - python=3.11
   - pip
@@ -25,8 +27,14 @@ dependencies:
   - streamlit>=1.38
   - fastapi>=0.115
   - uvicorn>=0.30
+  - pytorch>=2.4
+  - torchvision>=0.19
+  - torchaudio>=2.4
+  - wandb>=0.18
   - pip:
       - finvizfinance>=0.14
       - yfinance>=0.2.40
       - python-dotenv>=1.0
       - firebase-admin>=6.5
+      - onnx>=1.16
+      - onnxruntime-gpu>=1.18

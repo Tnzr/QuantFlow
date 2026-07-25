@@ -1,37 +1,28 @@
+"""Simple RSI-based short-term backtest engine.
+Returns a report object with summary statistics and equity curve.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List
+from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
-
-from ..features.indicators import fetch_ohlcv, compute_indicators
-from ..features.exit_rules import simple_exit_plan
-from .utils import equity_from_returns, max_drawdown, sharpe, sortino, cagr, profit_factor
+import yfinance as yf
 
 
 @dataclass
-class Trade:
-    entry_date: pd.Timestamp
-    entry_price: float
-    exit_date: pd.Timestamp
-    exit_price: float
-    ret: float
-
-
-@dataclass
-class BacktestReport:
-    n_trades: int
-    win_rate: float
-    avg_ret: float
-    median_ret: float
-    avg_hold_days: float
-    max_dd: float
-    equity_curve: pd.Series
-    sharpe: float
-    sortino: float
-    cagr: float
-    profit_factor: float
+class ShortTermBacktestReport:
+    n_trades: int = 0
+    win_rate: float = 0.0
+    avg_ret: float = 0.0
+    median_ret: float = 0.0
+    avg_hold_days: float = 0.0
+    max_dd: float = 0.0
+    sharpe: float = 0.0
+    sortino: float = 0.0
+    cagr: float = 0.0
+    profit_factor: float = 0.0
+    equity_curve: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["date", "equity"]))
+    trades: list[dict] = field(default_factory=list)
 
 
 def backtest_short_term(
@@ -41,97 +32,185 @@ def backtest_short_term(
     entry_rsi_threshold: float = 50.0,
     max_hold_days: int = 7,
     stop_loss_pct: float = 0.0,
-    ma_filter: str = "sma20",
     take_profit_pct: float = 0.0,
+    ma_filter: str = "sma20",
     ma_trend_filter: str = "none",
-) -> BacktestReport:
-    """Simple backtest of 1w-style logic: enter on close crossing above MA and RSI filter.
-    Exit on MA cross down, optional stop-loss, take-profit, or time stop.
-    
-    Args:
-        ma_trend_filter: trend condition for entries. Options: 'none', 'above_sma50', 'above_sma200'
-    
-    Uses daily bars as proxy.
+) -> ShortTermBacktestReport:
+    """Run a short-term RSI-based backtest for a single ticker.
+
+    Strategy:
+      - Entry when RSI(14) drops below `entry_rsi_threshold` AND price is above MA
+      - Exit when max_hold_days reached OR stop_loss_pct hit OR take_profit_pct hit
     """
-    ma_col = str(ma_filter or "sma20").lower()
-    if ma_col not in {"sma20", "sma50", "sma200"}:
-        raise ValueError("ma_filter must be one of: sma20, sma50, sma200")
+    # ── Fetch data ──────────────────────────────────────────────────────
+    end_str = end if end and str(end).strip() else None
+    df = yf.download(ticker, start=start, end=end_str, progress=False, auto_adjust=True)
+    if df.empty:
+        return ShortTermBacktestReport()
 
-    if ma_trend_filter not in {"none", "above_sma50", "above_sma200"}:
-        raise ValueError("ma_trend_filter must be one of: none, above_sma50, above_sma200")
+    # Flatten MultiIndex columns if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-    df = fetch_ohlcv(ticker, period="max")
-    df = compute_indicators(df)
-    df = df[df.index >= pd.to_datetime(start)]
-    if end:
-        df = df[df.index <= pd.to_datetime(end)]
-    
-    required_cols = [ma_col, "rsi14"]
-    if ma_trend_filter != "none":
-        trend_ma = "sma50" if ma_trend_filter == "above_sma50" else "sma200"
-        required_cols.append(trend_ma)
-    
-    df = df.dropna(subset=required_cols).copy()
+    close = df["Close"].squeeze()
+    if close.empty or len(close) < 50:
+        return ShortTermBacktestReport()
 
-    stop_loss_frac = max(0.0, float(stop_loss_pct)) / 100.0
-    take_profit_frac = max(0.0, float(take_profit_pct)) / 100.0
+    # ── Compute indicators ───────────────────────────────────────────────
+    rsi = _rsi(close, 14)
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
 
-    trades: List[Trade] = []
-    in_pos = False
+    # Select MA filter
+    ma_map = {"sma20": sma20, "sma50": sma50, "sma200": sma200}
+    ma_series = ma_map.get(ma_filter, sma20)
+
+    # MA trend filter
+    trend_ok = pd.Series(True, index=close.index)
+    if ma_trend_filter == "above_sma50":
+        trend_ok = close > sma50
+    elif ma_trend_filter == "above_sma200":
+        trend_ok = close > sma200
+
+    # ── Simulate trades ──────────────────────────────────────────────────
+    equity = [1.0]
+    trades_list = []
+    in_position = False
+    entry_idx = 0
     entry_price = 0.0
-    entry_date = None
 
-    # Build daily PnL series based on entries/exits (flat when no position)
-    daily_ret = pd.Series(0.0, index=df.index, name="ret")
-
-    for i in range(1, len(df)):
-        row_prev = df.iloc[i-1]
-        row = df.iloc[i]
-
-        if not in_pos:
-            # Check entry conditions
-            ma_crossover = (row_prev["adj close"] <= row_prev[ma_col]) and (row["adj close"] > row[ma_col])
-            rsi_signal = row["rsi14"] > float(entry_rsi_threshold)
-            
-            # Apply trend filter if specified
-            trend_ok = True
-            if ma_trend_filter == "above_sma50":
-                trend_ok = row["adj close"] > row["sma50"]
-            elif ma_trend_filter == "above_sma200":
-                trend_ok = row["adj close"] > row["sma200"]
-            
-            if ma_crossover and rsi_signal and trend_ok:
-                in_pos = True
-                entry_price = float(row["adj close"])
-                entry_date = df.index[i]
+    for i in range(50, len(close)):
+        if not in_position:
+            # Entry: RSI below threshold AND price above MA AND trend OK
+            if (
+                rsi.iloc[i] < entry_rsi_threshold
+                and close.iloc[i] > ma_series.iloc[i]
+                and trend_ok.iloc[i]
+            ):
+                in_position = True
+                entry_idx = i
+                entry_price = float(close.iloc[i])
         else:
-            # mark daily return while in position
-            daily_ret.iloc[i] = row["adj close"]/row_prev["adj close"] - 1
-            # exit on close < selected MA, optional stop-loss, take-profit, or time stop
-            hold_days = (df.index[i] - entry_date).days
-            stop_loss_hit = stop_loss_frac > 0 and (float(row["adj close"]) <= entry_price * (1.0 - stop_loss_frac))
-            take_profit_hit = take_profit_frac > 0 and (float(row["adj close"]) >= entry_price * (1.0 + take_profit_frac))
-            ma_exit = row["adj close"] < row[ma_col]
-            
-            if ma_exit or stop_loss_hit or take_profit_hit or hold_days >= int(max_hold_days):
-                exit_price = float(row["adj close"])
-                trades.append(Trade(entry_date, entry_price, df.index[i], exit_price, exit_price/entry_price - 1))
-                in_pos = False
+            hold = i - entry_idx
+            current_price = float(close.iloc[i])
+            ret = (current_price - entry_price) / entry_price
+            exit_reason = None
 
-    equity = equity_from_returns(daily_ret)
-    max_dd_val = max_drawdown(equity)
-    rets = np.array([t.ret for t in trades]) if trades else np.array([])
+            # Time exit
+            if hold >= max_hold_days:
+                exit_reason = "time"
+            # Stop loss
+            elif stop_loss_pct > 0 and ret <= -stop_loss_pct:
+                exit_reason = "stop_loss"
+            # Take profit
+            elif take_profit_pct > 0 and ret >= take_profit_pct:
+                exit_reason = "take_profit"
 
-    return BacktestReport(
-        n_trades=len(trades),
-        win_rate=float((rets > 0).mean()) if rets.size else 0.0,
-        avg_ret=float(rets.mean()) if rets.size else 0.0,
-        median_ret=float(np.median(rets)) if rets.size else 0.0,
-        avg_hold_days=float(np.mean([(t.exit_date - t.entry_date).days for t in trades])) if trades else 0.0,
-        max_dd=max_dd_val,
-        equity_curve=equity,
-        sharpe=sharpe(daily_ret),
-        sortino=sortino(daily_ret),
-        cagr=cagr(equity),
-        profit_factor=profit_factor(rets) if rets.size else 0.0,
+            if exit_reason:
+                trades_list.append({
+                    "ticker": ticker,
+                    "action": "buy",
+                    "entry_price": round(entry_price, 2),
+                    "exit_price": round(current_price, 2),
+                    "return_pct": round(ret, 6),
+                    "entry_date": str(close.index[entry_idx].date()),
+                    "exit_date": str(close.index[i].date()),
+                    "hold_days": hold,
+                    "exit_reason": exit_reason,
+                    "model_sigma": 0.02 + abs(ret) * 0.5,
+                })
+                equity.append(equity[-1] * (1.0 + ret))
+                in_position = False
+                continue
+
+    # Close any open position at the end
+    if in_position:
+        current_price = float(close.iloc[-1])
+        ret = (current_price - entry_price) / entry_price
+        trades_list.append({
+            "ticker": ticker,
+            "action": "buy",
+            "entry_price": round(entry_price, 2),
+            "exit_price": round(current_price, 2),
+            "return_pct": round(ret, 6),
+            "entry_date": str(close.index[entry_idx].date()),
+            "exit_date": str(close.index[-1].date()),
+            "hold_days": len(close) - entry_idx,
+            "exit_reason": "end",
+            "model_sigma": 0.02 + abs(ret) * 0.5,
+        })
+        equity.append(equity[-1] * (1.0 + ret))
+
+    # Fill equity to match date range
+    eq_series = pd.Series(equity, index=close.index[:len(equity)])
+    eq_series = eq_series.reindex(close.index).ffill()
+    eq_df = eq_series.reset_index()
+    eq_df.columns = ["date", "equity"]
+
+    # ── Compute metrics ──────────────────────────────────────────────────
+    n_trades = len(trades_list)
+    if n_trades == 0:
+        return ShortTermBacktestReport(
+            n_trades=0,
+            equity_curve=eq_df,
+        )
+
+    returns = np.array([t["return_pct"] for t in trades_list])
+    win_rate = float(np.mean(returns > 0))
+    avg_ret = float(np.mean(returns))
+    median_ret = float(np.median(returns))
+    avg_hold = float(np.mean([t["hold_days"] for t in trades_list]))
+
+    # Daily returns for Sharpe / Sortino
+    daily = eq_series.pct_change().dropna()
+    sharpe = 0.0
+    sortino = 0.0
+    if len(daily) > 1 and daily.std() > 1e-12:
+        sharpe = float(daily.mean() / daily.std() * np.sqrt(252))
+        downside = daily[daily < 0]
+        if len(downside) > 1 and downside.std() > 1e-12:
+            sortino = float(daily.mean() / downside.std() * np.sqrt(252))
+
+    # Max drawdown
+    roll_max = eq_series.cummax()
+    dd = (eq_series - roll_max) / roll_max
+    max_dd = float(abs(dd.min())) if len(dd) > 0 else 0.0
+
+    # CAGR
+    total_days = (close.index[-1] - close.index[0]).days
+    years = total_days / 365.25
+    cagr = 0.0
+    if years > 0 and eq_series.iloc[0] > 0:
+        cagr = float((eq_series.iloc[-1] / eq_series.iloc[0]) ** (1.0 / years) - 1.0)
+
+    # Profit factor
+    gains = max(0.0, returns[returns > 0].sum())
+    losses = max(1e-12, abs(returns[returns < 0].sum()))
+    profit_factor = float(gains / losses)
+
+    return ShortTermBacktestReport(
+        n_trades=n_trades,
+        win_rate=win_rate,
+        avg_ret=avg_ret,
+        median_ret=median_ret,
+        avg_hold_days=avg_hold,
+        max_dd=max_dd,
+        sharpe=sharpe,
+        sortino=sortino,
+        cagr=cagr,
+        profit_factor=profit_factor,
+        equity_curve=eq_df,
+        trades=trades_list,
     )
+
+
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Compute RSI indicator."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100.0 - (100.0 / (1.0 + rs))
