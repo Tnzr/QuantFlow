@@ -1,6 +1,3 @@
-# Finviz screener presets configuration
-# Use human-readable filters/values expected by current finvizfinance versions.
-
 weekly_momo:
   Average Volume: Over 300K
   Option/Short: Optionable
@@ -8,14 +5,12 @@ weekly_momo:
   50-Day Simple Moving Average: Price above SMA50
   200-Day Simple Moving Average: Price above SMA200
   Price: Over $5
-
 weekly_bear:
   Average Volume: Over 300K
   Option/Short: Optionable
   Performance: Week Down
   50-Day Simple Moving Average: Price below SMA50
   Price: Over $5
-
 monthly_swing:
   Average Volume: Over 500K
   Option/Short: Optionable
@@ -24,7 +19,6 @@ monthly_swing:
   200-Day Simple Moving Average: Price above SMA200
   Beta: Over 1
   Price: Over $5
-
 monthly_bear:
   Average Volume: Over 500K
   Option/Short: Optionable
@@ -32,7 +26,6 @@ monthly_bear:
   50-Day Simple Moving Average: Price below SMA50
   Beta: Over 1
   Price: Over $5
-
 midterm_trenders:
   Average Volume: Over 500K
   Option/Short: Optionable
@@ -40,7 +33,6 @@ midterm_trenders:
   200-Day Simple Moving Average: Price above SMA200
   Beta: Over 1
   Price: Over $5
-
 midterm_bear:
   Average Volume: Over 500K
   Option/Short: Optionable
@@ -48,21 +40,18 @@ midterm_bear:
   200-Day Simple Moving Average: Price below SMA200
   Beta: Over 1
   Price: Over $5
-
 reversal_bull:
   Average Volume: Over 300K
   Option/Short: Optionable
   RSI (14): Oversold (40)
   50-Day Simple Moving Average: Price below SMA50
   Price: Over $5
-
 reversal_bear:
   Average Volume: Over 300K
   Option/Short: Optionable
   RSI (14): Overbought (60)
   50-Day Simple Moving Average: Price above SMA50
   Price: Over $5
-
 leaps_quality:
   Average Volume: Over 1M
   Option/Short: Optionable

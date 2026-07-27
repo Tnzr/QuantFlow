@@ -1,14 +1,92 @@
 from __future__ import annotations
 
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import concurrent.futures
 
 
-def fetch_ohlcv(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
+_INTERVAL_TO_ALPACA_TF = {
+    "1m": "1Min",
+    "5m": "5Min",
+    "15m": "15Min",
+    "30m": "30Min",
+    "1h": "1Hour",
+    "1d": "1Day",
+    "1wk": "1Week",
+    "1mo": "1Month",
+}
+
+_PERIOD_LOOKBACK_DAYS = {
+    "1m": 7,
+    "5m": 60,
+    "15m": 90,
+    "30m": 120,
+    "1h": 365,
+    "1d": 365 * 5,
+    "1wk": 365 * 5,
+    "1mo": 365 * 10,
+}
+
+
+def _fetch_ohlcv_alpaca(ticker: str, period: str, interval: str) -> pd.DataFrame | None:
+    """Try to fetch OHLCV via Alpaca. Returns None on failure."""
+    from quantflow.data.alpaca_client import is_configured, fetch_bars
+    from datetime import datetime, timedelta, timezone
+
+    if not is_configured():
+        return None
+
+    tf = _INTERVAL_TO_ALPACA_TF.get(interval)
+    if tf is None:
+        return None
+
+    days = _PERIOD_LOOKBACK_DAYS.get(interval, 365)
+    # honor explicit period for very long windows
+    if isinstance(period, str) and period.endswith("y"):
+        try:
+            days = int(period[:-1]) * 365
+        except ValueError:
+            pass
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    try:
+        df = fetch_bars(
+            ticker,
+            timeframe=tf,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            limit=10000,
+            feed="iex",
+        )
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    return df
+
+
+def _fetch_ohlcv_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """yfinance fallback path."""
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     return normalize_ohlcv(df)
+
+
+def fetch_ohlcv(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
+    """Fetch OHLCV with Alpaca-first, yfinance fallback.
+
+    Set ALPACA_PREFER_YFINANCE=1 to force the yfinance path.
+    """
+    prefer_yf = os.environ.get("ALPACA_PREFER_YFINANCE", "").strip() in ("1", "true", "yes")
+
+    if not prefer_yf:
+        df = _fetch_ohlcv_alpaca(ticker, period, interval)
+        if df is not None and not df.empty:
+            return normalize_ohlcv(df)
+
+    return _fetch_ohlcv_yfinance(ticker, period, interval)
 
 
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:

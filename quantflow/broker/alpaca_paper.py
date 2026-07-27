@@ -50,6 +50,13 @@ class AlpacaPaperTrading:
         self._cache_time = 0
         self._cache_ttl = 5  # seconds
 
+    def _require_keys(self) -> None:
+        if not self.enabled:
+            raise RuntimeError(
+                "Alpaca credentials missing. Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env "
+                "or QUANTFLOW_DEMO_MODE=true for offline testing."
+            )
+
     def _get(self, path: str) -> dict:
         resp = requests.get(f"{PAPER_BASE}/v2/{path}", headers=HEADERS, timeout=10)
         resp.raise_for_status()
@@ -63,13 +70,13 @@ class AlpacaPaperTrading:
     # ── Account ──────────────────────────────────────────────────────
 
     def get_account(self) -> AccountInfo:
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
+            return AccountInfo(equity=100000, cash=50000, buying_power=100000,
+                              portfolio_value=100000, day_pnl=0, day_pnl_pct=0)
+        self._require_keys()
         now = time.time()
         if self._account_cache and (now - self._cache_time) < self._cache_ttl:
             return self._account_cache
-
-        if not self.enabled:
-            return AccountInfo(equity=100000, cash=50000, buying_power=100000,
-                              portfolio_value=100000, day_pnl=0, day_pnl_pct=0)
 
         acc = self._get("account")
         self._account_cache = AccountInfo(
@@ -86,8 +93,9 @@ class AlpacaPaperTrading:
     # ── Positions ────────────────────────────────────────────────────
 
     def get_positions(self) -> List[PositionInfo]:
-        if not self.enabled:
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return []
+        self._require_keys()
 
         positions = self._get("positions")
         result = []
@@ -111,10 +119,11 @@ class AlpacaPaperTrading:
                     stop_loss_pct: Optional[float] = None,
                     take_profit_pct: Optional[float] = None) -> OrderResult:
         """Place a paper trade order."""
-        if not self.enabled:
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return OrderResult(id="demo-001", ticker=ticker, side=side,
                              qty=qty, type=order_type, status="demo_filled",
                              filled_price=100.0)
+        self._require_keys()
 
         data = {
             "symbol": ticker, "qty": str(qty), "side": side,
@@ -122,10 +131,30 @@ class AlpacaPaperTrading:
         }
         if limit_price:
             data["limit_price"] = str(limit_price)
-        if stop_loss_pct:
+
+        if stop_loss_pct or take_profit_pct:
+            entry_price = limit_price
+            if not entry_price:
+                try:
+                    quote = self.get_last_quote(ticker)
+                    entry_price = quote.get("last", quote.get("ask"))
+                except Exception:
+                    entry_price = None
+            if not entry_price or entry_price <= 0:
+                raise RuntimeError(f"Could not determine entry price for {ticker}")
+
             data["order_class"] = "bracket"
-            data["stop_loss"] = {"stop_price": str(
-                round(limit_price * (1 - stop_loss_pct), 2) if limit_price else 0)}
+            data["type"] = "limit"
+            data["limit_price"] = str(round(entry_price, 2))
+
+            if stop_loss_pct:
+                data["stop_loss"] = {
+                    "stop_price": str(round(entry_price * (1 - stop_loss_pct), 2))
+                }
+            if take_profit_pct:
+                data["take_profit"] = {
+                    "limit_price": str(round(entry_price * (1 + take_profit_pct), 2))
+                }
 
         order = self._post("orders", data)
         return OrderResult(
@@ -137,13 +166,13 @@ class AlpacaPaperTrading:
 
     def cancel_order(self, order_id: str) -> bool:
         if not self.enabled:
-            return True
+            raise RuntimeError("Alpaca credentials missing")
         resp = requests.delete(f"{PAPER_BASE}/v2/orders/{order_id}", headers=HEADERS)
         return resp.status_code == 204
 
     def get_orders(self, status: str = "all", limit: int = 50) -> List[dict]:
         if not self.enabled:
-            return []
+            raise RuntimeError("Alpaca credentials missing")
         return self._get(f"orders?status={status}&limit={limit}")
 
     # ── Market Data (snapshot, not streaming) ────────────────────────
@@ -151,27 +180,29 @@ class AlpacaPaperTrading:
     def get_last_quote(self, ticker: str) -> dict:
         """Get latest quote from Alpaca."""
         if not self.enabled:
-            return {"ticker": ticker, "bid": 195.0, "ask": 195.5, "last": 195.4}
+            raise RuntimeError("Alpaca credentials missing")
         try:
             resp = requests.get(
                 f"{DATA_BASE}/v2/stocks/{ticker}/quotes/latest",
                 headers=HEADERS, timeout=5,
             )
+            resp.raise_for_status()
             q = resp.json()["quote"]
             return {"ticker": ticker, "bid": q["bp"], "ask": q["ap"],
                     "last": (q["bp"] + q["ap"]) / 2}
-        except Exception:
-            return {"ticker": ticker, "error": "unavailable"}
+        except Exception as e:
+            return {"ticker": ticker, "error": str(e)}
 
     def get_last_trade(self, ticker: str) -> dict:
         if not self.enabled:
-            return {"ticker": ticker, "price": 195.4}
+            raise RuntimeError("Alpaca credentials missing")
         try:
             resp = requests.get(
                 f"{DATA_BASE}/v2/stocks/{ticker}/trades/latest",
                 headers=HEADERS, timeout=5,
             )
+            resp.raise_for_status()
             t = resp.json()["trade"]
             return {"ticker": ticker, "price": float(t["p"])}
-        except Exception:
-            return {"ticker": ticker, "price": 195.4}
+        except Exception as e:
+            return {"ticker": ticker, "error": str(e)}

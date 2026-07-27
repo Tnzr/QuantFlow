@@ -66,21 +66,22 @@ class PaperTradingService:
         return {"APCA-API-KEY-ID": self.key, "APCA-API-SECRET-KEY": self.secret}
 
     async def get_account(self):
-        if not self.enabled or not self.key:
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return {"equity": 100000, "cash": 50000, "buying_power": 100000,
                     "portfolio_value": 100000, "day_pnl": 0, "day_pnl_pct": 0}
+        if not self.enabled or not self.key:
+            raise HTTPException(status_code=503, detail="Alpaca credentials missing. Configure ALPACA_API_KEY and ALPACA_SECRET_KEY in .env, or set QUANTFLOW_DEMO_MODE=true for offline testing.")
         try:
             async with httpx.AsyncClient(timeout=10) as c:
                 r = await c.get(f"{self.base}/v2/account", headers=self._headers())
+                r.raise_for_status()
                 a = r.json()
                 return {"equity": float(a.get("equity", 100000)), "cash": float(a.get("cash", 50000)),
                         "buying_power": float(a.get("buying_power", 100000)),
                         "portfolio_value": float(a.get("portfolio_value", 100000)),
                         "day_pnl": 0, "day_pnl_pct": 0}
-        except Exception as e:
-            logger.warning(f"Alpaca account fetch failed: {e}")
-            return {"equity": 100000, "cash": 50000, "buying_power": 100000,
-                    "portfolio_value": 100000, "day_pnl": 0, "day_pnl_pct": 0}
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Alpaca account fetch failed: {e}")
 
     async def _get(self, path: str):
         try:
@@ -103,7 +104,8 @@ class PaperTradingService:
             return None
 
     async def get_positions(self):
-        if not self.enabled: return []
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"): return []
+        if not self.enabled: raise HTTPException(status_code=503, detail="Alpaca credentials missing")
         data = await self._get("positions")
         if data is None: return []
         result = []
@@ -117,28 +119,34 @@ class PaperTradingService:
         return result
 
     async def place_order(self, req: OrderRequest):
-        if not self.enabled:
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return {"id": f"demo-{int(time.time())}", "status": "filled",
                     "filled_price": 195.40, **req.model_dump()}
+        if not self.enabled or not self.key:
+            raise HTTPException(status_code=503, detail="Alpaca credentials missing")
         data = {"symbol": req.ticker, "qty": str(req.qty), "side": req.side,
                 "type": req.order_type, "time_in_force": "day"}
+        if req.limit_price:
+            data["limit_price"] = str(req.limit_price)
         if req.stop_loss_pct:
             data["order_class"] = "bracket"
             data["stop_loss"] = {"stop_price": str(round(
                 (req.limit_price or 100) * (1 - req.stop_loss_pct), 2))}
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(f"{self.base}/v2/orders", json=data, headers=self._headers())
+            r.raise_for_status()
             o = r.json()
             return {"id": o["id"], "status": o["status"], "ticker": req.ticker,
                     "side": req.side, "qty": req.qty,
                     "filled_price": float(o.get("filled_avg_price", 0))}
 
     async def get_quote(self, ticker: str):
-        if not self.enabled:
-            return {"ticker": ticker, "price": 195.40, "bid": 195.0, "ask": 195.5}
+        if not self.enabled or not self.key:
+            raise HTTPException(status_code=503, detail="Alpaca credentials missing")
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{self.data_base}/v2/stocks/{ticker}/trades/latest",
                            headers=self._headers())
+            r.raise_for_status()
             p = float(r.json()["trade"]["p"])
             return {"ticker": ticker, "price": p, "bid": p, "ask": p}
 
@@ -147,6 +155,7 @@ class PaperTradingService:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(f"{self.base}/v2/orders?status=all&limit={limit}",
                            headers=self._headers())
+            r.raise_for_status()
             return [{"id": o["id"], "ticker": o["symbol"], "side": o["side"],
                      "qty": o["qty"], "status": o["status"],
                      "filled_price": float(o.get("filled_avg_price",0)),

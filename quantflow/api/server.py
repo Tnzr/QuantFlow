@@ -67,6 +67,7 @@ from ..backtest.strategy_config import StrategyEvaluator, trend_following_strate
 from ..portfolio.allocator import PortfolioAllocator, AllocationConstraints, estimate_returns_from_signals, estimate_risk_from_history
 from ..ops.reporting import default_json_report_path, read_json_report
 from ..broker.alpaca_paper import AlpacaPaperTrading
+from ..data.alpaca_client import fetch_bars, fetch_latest_quote, fetch_latest_trade
 
 
 app = FastAPI(title="QuantFlow API", version="0.1.0")
@@ -1889,11 +1890,13 @@ def settings_test_alpaca(req: TestAlpacaRequest):
 class SaveSettingsRequest(BaseModel):
     risk_stop_loss_pct: Optional[float] = None
     risk_max_position_pct: Optional[float] = None
+    max_position_pct: Optional[float] = None
     daily_loss_limit: Optional[float] = None
     llm_key: Optional[str] = None
     llm_endpoint: Optional[str] = None
     alpaca_key: Optional[str] = None
     alpaca_secret: Optional[str] = None
+    model_checkpoint: Optional[str] = None
 
 
 @app.put("/settings/save")
@@ -2118,7 +2121,7 @@ def charts_performance_compare(
         frames: dict[str, pd.Series] = {}
         summary: list[dict] = []
         for name in names[:10]:
-            df = fetch_ohlcv(name, period=period, interval=interval)
+            df = fetch_ohlcv(name, period=period, interval="1d")
             if df.empty:
                 continue
             price = df["adj close"].astype(float).dropna()
@@ -2227,6 +2230,7 @@ def charts_indicators(ticker: str, period: str = "6mo", interval: str = "1d"):
         ]
         use_cols = [c for c in chart_cols if c in df.columns]
         out = df[use_cols].reset_index().copy()
+        out = out.replace([np.inf, -np.inf], np.nan).astype(object).where(pd.notnull(out), None)
         out["date"] = out["date"].astype(str)
         return {"count": len(out), "items": out.to_dict(orient="records")}
     except Exception as e:
@@ -2261,14 +2265,91 @@ def charts_price_distribution(ticker: str, period: str = "2y", interval: str = "
 @app.get("/charts/forecast")
 def charts_forecast(ticker: str, period: str = "2y", interval: str = "1d", horizon: int = 30):
     try:
-        df = fetch_ohlcv(ticker.upper(), period=period, interval=interval)
-        forecast = forecast_prices(df, horizon=horizon)
+        symbol = ticker.upper()
+        df = fetch_ohlcv(symbol, period=period, interval="1d")
+        last_price = float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns else 100.0
+        history = [{"date": str(idx.date()), "price": float(row["close"])} for idx, row in df.tail(40).iterrows()] if not df.empty else []
+
+        import requests, math
+        try:
+            resp = requests.post("http://127.0.0.1:8000/predict",
+                                 json={"ticker": symbol, "n_context": 80, "include_trajectory": True}, timeout=15)
+            if resp.status_code == 200:
+                ml = resp.json()
+                traj = ml.get("trajectory", [])
+                # interval -> minutes
+                interval_min = {"1m": 1, "5m": 5, "15m": 15, "1H": 60, "1D": 1440, "1W": 10080, "1M": 43200}.get(interval, 1440)
+                # Bounded return scaling: sqrt for long horizons, cap at +/-15% cumulative
+                ret_scale = 0.25 * math.sqrt(max(1, interval_min) / 1440.0)
+                horizon_steps = min(len(traj), horizon)
+
+                td_map = {
+                    "1m": __import__("pandas").Timedelta(minutes=1),
+                    "5m": __import__("pandas").Timedelta(minutes=5),
+                    "15m": __import__("pandas").Timedelta(minutes=15),
+                    "1H": __import__("pandas").Timedelta(hours=1),
+                    "1D": __import__("pandas").Timedelta(days=1),
+                    "1W": __import__("pandas").Timedelta(weeks=1),
+                    "1M": __import__("pandas").Timedelta(days=30),
+                }
+                td = td_map.get(interval, __import__("pandas").Timedelta(days=1))
+
+                import numpy as np
+                rng = np.random.default_rng(abs(hash(symbol + interval)) % (2**32))
+                
+                # Use proper Brownian motion: price *= exp((mu - sigma^2/2)*dt + sigma*sqrt(dt)*Z)
+                # For daily data, dt=1. For intraday, scale by interval
+                dt = interval_min / 1440.0 if interval_min > 0 else 1.0
+                sqrt_dt = math.sqrt(dt)
+                
+                # Typical daily volatility is 1-3% (0.01-0.03). Cap sigma to prevent absurd ranges.
+                # The trajectory sigma values need to be interpreted as daily volatility.
+                MAX_DAILY_VOL = 0.03  # 3% daily volatility max
+                
+                price = last_price
+                forecast = []
+                for i in range(horizon_steps):
+                    mu = float(traj[i]["mean_return"]) if i < len(traj) else 0.0
+                    sigma = float(traj[i]["sigma"]) if i < len(traj) else 0.01
+                    
+                    # Scale mu by interval (returns scale linearly with time)
+                    mu_scaled = mu * ret_scale
+                    
+                    # Cap sigma to reasonable daily volatility, then scale by sqrt(dt)
+                    # sigma from trajectory is treated as daily vol, so for intraday we scale down
+                    sigma_daily = min(sigma, MAX_DAILY_VOL)
+                    sigma_scaled = sigma_daily * sqrt_dt
+                    
+                    # Geometric Brownian motion step
+                    z = rng.standard_normal()
+                    log_return = (mu_scaled - 0.5 * sigma_scaled**2) * dt + sigma_scaled * z
+                    price *= math.exp(log_return)
+                    
+                    # Confidence band: ±2 sigma
+                    band = 2 * sigma_scaled * price
+                    forecast.append({
+                        "date": str(__import__("pandas").Timestamp.now() + td * (i + 1)),
+                        "price": round(price, 2),
+                        "lower": round(price - band, 2),
+                        "upper": round(price + band, 2),
+                    })
+                return {
+                    "ticker": symbol, "period": period, "interval": interval,
+                    "horizon": len(forecast), "history": history, "forecast": forecast,
+                    "forecast_return_pct": float(ml.get("predicted_return", 0)),
+                    "daily_trend_pct": float(ml.get("predicted_return", 0)) / max(1, len(forecast)),
+                    "confidence_band_pct": float(ml.get("aleatoric_sigma", 0)),
+                    "direction": ml.get("direction", "HOLD"),
+                    "confidence": ml.get("confidence", 0),
+                }
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            pass
+
+        forecast_result = forecast_prices(df, horizon=horizon)
         return {
-            "ticker": ticker.upper(),
-            "period": period,
-            "interval": interval,
-            "horizon": max(5, min(int(horizon), 90)),
-            **forecast,
+            "ticker": symbol, "period": period, "interval": interval,
+            "horizon": max(5, min(int(horizon), 90)), "history": history, **forecast_result,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2282,14 +2363,17 @@ def backtest_short_term_api(
     entry_rsi_threshold: float = 50.0,
     max_hold_days: int = 7,
     stop_loss_pct: float = 0.0,
-    ma_filter: str = "sma20",
+    ma_filter: str = "none",
     take_profit_pct: float = 0.0,
     ma_trend_filter: str = "none",
+    use_ml_forecast: bool = False,
+    ml_threshold: float = 0.002,
+    ml_min_confidence: float = 0.6,
 ):
     try:
-        ma_selected = str(ma_filter or "sma20").lower()
-        if ma_selected not in {"sma20", "sma50", "sma200"}:
-            raise ValueError("ma_filter must be one of: sma20, sma50, sma200")
+        ma_selected = str(ma_filter or "none").lower()
+        if ma_selected not in {"none", "sma20", "sma50", "sma200"}:
+            raise ValueError("ma_filter must be one of: none, sma20, sma50, sma200")
 
         ma_trend = str(ma_trend_filter or "none").lower()
         if ma_trend not in {"none", "above_sma50", "above_sma200"}:
@@ -2305,10 +2389,14 @@ def backtest_short_term_api(
             ma_filter=ma_selected,
             take_profit_pct=take_profit_pct,
             ma_trend_filter=ma_trend,
+            use_ml_forecast=use_ml_forecast,
+            ml_threshold=ml_threshold,
+            ml_min_confidence=ml_min_confidence,
         )
-        eq = rpt.equity_curve.reset_index()
+        eq = rpt.equity_curve.copy()
         eq.columns = ["date", "equity"]
         eq["date"] = eq["date"].astype(str)
+        eq = eq.fillna(0)
         return {
             "summary": {
                 "n_trades": rpt.n_trades,
@@ -2331,6 +2419,106 @@ def backtest_short_term_api(
                 },
             },
             "equity": eq.to_dict(orient="records"),
+            "trades": rpt.trades,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/backtest/multi")
+def backtest_multi_api(
+    tickers: str,
+    start: str = "2018-01-01",
+    end: str | None = None,
+    entry_rsi_threshold: float = 50.0,
+    max_hold_days: int = 7,
+    stop_loss_pct: float = 0.0,
+    ma_filter: str = "none",
+    take_profit_pct: float = 0.0,
+    ma_trend_filter: str = "none",
+    capital: float = 100000.0,
+    use_ml_forecast: bool = False,
+    ml_threshold: float = 0.002,
+    ml_min_confidence: float = 0.6,
+):
+    """Run backtest across multiple tickers and aggregate."""
+    try:
+        symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        if not symbols:
+            raise ValueError("At least one ticker required")
+
+        ma_selected = str(ma_filter or "none").lower()
+        if ma_selected not in {"none", "sma20", "sma50", "sma200"}:
+            raise ValueError("ma_filter must be one of: none, sma20, sma50, sma200")
+
+        ma_trend = str(ma_trend_filter or "none").lower()
+
+        results = []
+        capital_per = capital / len(symbols)
+
+        for sym in symbols:
+            try:
+                rpt = backtest_short_term(
+                    ticker=sym,
+                    start=start,
+                    end=end,
+                    entry_rsi_threshold=entry_rsi_threshold,
+                    max_hold_days=max_hold_days,
+                    stop_loss_pct=stop_loss_pct,
+                    ma_filter=ma_selected,
+                    take_profit_pct=take_profit_pct,
+                    ma_trend_filter=ma_trend,
+                    use_ml_forecast=use_ml_forecast,
+                    ml_threshold=ml_threshold,
+                    ml_min_confidence=ml_min_confidence,
+                )
+                eq = rpt.equity_curve.copy()
+                if not eq.empty:
+                    eq["equity"] = eq["equity"] * capital_per
+                    eq["date"] = eq["date"].astype(str)
+                results.append({
+                    "ticker": sym,
+                    "n_trades": rpt.n_trades,
+                    "win_rate": rpt.win_rate,
+                    "avg_ret": rpt.avg_ret,
+                    "sharpe": rpt.sharpe,
+                    "max_dd": rpt.max_dd,
+                    "cagr": rpt.cagr,
+                    "profit_factor": rpt.profit_factor,
+                    "equity": eq.to_dict(orient="records") if not eq.empty else [],
+                })
+            except Exception as ex:
+                results.append({"ticker": sym, "error": str(ex)})
+
+        if not results:
+            return {"tickers": symbols, "results": [], "portfolio_equity": []}
+
+        portfolio_equity = []
+        all_eq_dates = set()
+        for r in results:
+            for pt in r.get("equity", []):
+                all_eq_dates.add(pt.get("date", ""))
+
+        if all_eq_dates:
+            sorted_dates = sorted(all_eq_dates)
+            for d in sorted_dates:
+                total = 0.0
+                for r in results:
+                    match = next((pt for pt in r.get("equity", []) if pt.get("date") == d), None)
+                    if match:
+                        total += match.get("equity", 0)
+                    elif portfolio_equity:
+                        total += portfolio_equity[-1].get("equity", capital / len(symbols) * len(results))
+                    else:
+                        total += capital_per
+                portfolio_equity.append({"date": d, "equity": total})
+
+        return {
+            "tickers": symbols,
+            "results": results,
+            "portfolio_equity": portfolio_equity,
+            "capital": capital,
+            "capital_per_ticker": capital_per,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2431,6 +2619,15 @@ def market_series_cache(
         if not symbol:
             raise ValueError("ticker is required")
 
+        # Auto-adjust period for minute-level data (yfinance restrictions)
+        interval_lower = interval.lower().strip()
+        if interval_lower in ("1m",):
+            period = "5d"
+        elif interval_lower in ("5m", "15m"):
+            period = "30d"
+        elif interval_lower in ("1h",):
+            period = "6mo"
+
         df = fetch_ohlcv(symbol, period=period, interval=interval)
         df = compute_indicators(df)
         if df.empty:
@@ -2464,5 +2661,76 @@ def market_series_cache(
             "path": file_path,
             "items": items_df.to_dict(orient="records"),
         }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Alpaca Live Market Data ────────────────────────────────────────────
+
+@app.get("/market/alpaca/quote/{ticker}")
+def alpaca_quote(ticker: str):
+    try:
+        quote = fetch_latest_quote(ticker.upper())
+        trade = fetch_latest_trade(ticker.upper())
+        return {"ticker": ticker.upper(), "quote": quote, "trade": trade}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/market/alpaca/bars/{ticker}")
+def alpaca_bars(
+    ticker: str,
+    timeframe: str = "1Day",
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 200,
+    feed: str = "iex",
+):
+    try:
+        if not start:
+            from datetime import datetime, timedelta, timezone
+            start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        df = fetch_bars(ticker.upper(), timeframe=timeframe, start=start, end=end, limit=limit, feed=feed)
+        if df is None or df.empty:
+            return {"ticker": ticker.upper(), "bars": [], "count": 0}
+        out = df.reset_index()
+        out.columns = [str(c).lower() for c in out.columns]
+        timestamp_col = next((c for c in out.columns if c in ("timestamp", "datetime", "index")), out.columns[0])
+        out = out.rename(columns={timestamp_col: "date"})
+        out["date"] = out["date"].astype(str)
+        return {
+            "ticker": ticker.upper(),
+            "timeframe": timeframe,
+            "count": len(out),
+            "bars": out.to_dict(orient="records"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/market/alpaca/bars/batch")
+def alpaca_bars_batch(
+    tickers: list[str],
+    timeframe: str = "1Day",
+    limit: int = 200,
+    feed: str = "iex",
+):
+    try:
+        result = {}
+        for sym in tickers:
+            try:
+                df = fetch_bars(sym.upper(), timeframe=timeframe, limit=limit, feed=feed)
+                if not df.empty:
+                    out = df.reset_index()
+                    out.columns = [c.lower() for c in out.columns]
+                    if "timestamp" in out.columns:
+                        out["date"] = out["timestamp"].astype(str)
+                        out = out.drop(columns=["timestamp"])
+                    result[sym.upper()] = out.to_dict(orient="records")
+                else:
+                    result[sym.upper()] = []
+            except Exception as e:
+                result[sym.upper()] = {"error": str(e)}
+        return {"tickers": tickers, "bars": result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

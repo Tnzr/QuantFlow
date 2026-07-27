@@ -88,8 +88,28 @@ secrets.*
 # Ignore OS files
 Icon?
 
+# Frontend build artifacts
+frontend-expo/.expo/
+frontend-expo/dist/
+frontend-expo/.env
+
 # ML model checkpoints and binaries
 checkpoints/
 *.pt
 *.pth
 *.ckpt
+
+.pids/
+
+# QA screenshots and debug artifacts
+qa-screenshot-*.png
+tests/qa-screenshot-*.png
+tests/test-*.mjs
+
+# Plan files (local only)
+.kilo/plans/
+
+# Data files
+data/*.parquet
+data/database/
+

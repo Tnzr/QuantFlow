@@ -197,6 +197,16 @@ def _launch_local(mode, paper_trading):
         )
         cprint("  ✓ ML Engine started on :8000", "green")
 
+    # Start frontend (serve web export)
+    frontend_dist = PROJECT_ROOT / "frontend-expo" / "dist"
+    if mode in ("full", "client") and frontend_dist.is_dir():
+        subprocess.Popen(
+            [sys.executable, "-m", "http.server", "8080",
+             "--directory", str(frontend_dist)],
+            cwd=PROJECT_ROOT,
+        )
+        cprint("  ✓ Frontend started on :8080", "green")
+
 
 def _health_check(mode):
     """Verify all services are responding."""
@@ -207,7 +217,7 @@ def _health_check(mode):
         checks.append(("Backend", "http://localhost:3000/health"))
         checks.append(("ML Engine", "http://localhost:8000/health"))
     if mode in ("full", "client"):
-        checks.append(("Frontend", "http://localhost/"))
+        checks.append(("Frontend", "http://localhost:8080/"))
 
     for name, url in checks:
         try:
@@ -220,7 +230,7 @@ def _health_check(mode):
 def _print_urls(mode):
     print(f"\n{C['bold']}Access your platform:{C['reset']}")
     if mode in ("full", "client"):
-        print(f"  Frontend:  {C['cyan']}http://localhost{C['reset']}")
+        print(f"  Frontend:  {C['cyan']}http://localhost:8080{C['reset']}")
     if mode in ("full", "server"):
         print(f"  API:       {C['cyan']}http://localhost:3000/docs{C['reset']}")
         print(f"  ML Engine: {C['cyan']}http://localhost:8000/health{C['reset']}")

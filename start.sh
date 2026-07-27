@@ -3,7 +3,7 @@
 # Usage: bash start.sh
 set -e
 
-PROJECT=/mnt/d/Dev/QuantFlow
+PROJECT=/media/tnzr/HDD11/Dev/QuantFlow
 PYTHON=/root/miniforge3/envs/quantflow/bin/python
 export PYTHONPATH=$PROJECT
 

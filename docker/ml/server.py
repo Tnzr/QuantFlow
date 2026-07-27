@@ -21,11 +21,14 @@ ticker_cache = {}
 
 class PredictRequest(BaseModel):
     ticker: str; bars: Optional[List[List[float]]] = None; n_context: int = 80
+    include_trajectory: bool = False
 class PredictResponse(BaseModel):
     ticker: str; predicted_return: float; aleatoric_sigma: float
     direction: str; confidence: float; inference_ms: float
+    trajectory: Optional[List[dict]] = None
 class BatchRequest(BaseModel):
     tickers: List[str]; n_context: int = 80
+    include_trajectory: bool = False
 class BatchResponse(BaseModel):
     predictions: List[PredictResponse]; total_ms: float
 
@@ -101,9 +104,47 @@ async def predict(req: PredictRequest):
     direction = "BUY" if pred_ret > 0.002 else "SELL" if pred_ret < -0.002 else "HOLD"
     confidence = 1.0 / (1.0 + 2.0 * sigma)
 
+    trajectory = None
+    if req.include_trajectory:
+        # Prefer the direct path head (mu_y) — its mean is `predicted_return`, so its
+        # individual steps share the same scale (~0.01) and don't need re-normalization.
+        # mu_ar can be ~100x larger due to AR recurrence; if used, anchor its first step
+        # to predicted_return and scale the rest by the same ratio.
+        mu_y = out.get("mu_y")
+        sigma_y = out.get("sigma_y")
+        mu_ar = out.get("mu_ar")
+        sigma_ar = out.get("sigma_ar")
+        if mu_y is not None:
+            mu_flat = mu_y.cpu().numpy().flatten().tolist()
+            s_flat = sigma_y.cpu().numpy().flatten().tolist() if sigma_y is not None else [sigma] * len(mu_flat)
+        elif mu_ar is not None:
+            mu_ar_flat = mu_ar.cpu().numpy().flatten()
+            ar_first = float(mu_ar_flat[0]) if len(mu_ar_flat) > 0 else 0.0
+            # Calibrate: align mu_ar's first step to predicted_return magnitude
+            if abs(ar_first) > 1e-8 and abs(pred_ret) < 1.0:
+                scale = pred_ret / ar_first
+            else:
+                scale = 1.0
+            mu_flat = (mu_ar_flat * scale).tolist()
+            s_flat = sigma_ar.cpu().numpy().flatten().tolist() if sigma_ar is not None else [sigma] * len(mu_flat)
+        else:
+            mu_flat = []
+            s_flat = []
+        if mu_flat:
+            # de-smooth: add tiny step variation if model returns near constant
+            if len(mu_flat) > 3 and float(np.std(mu_flat)) < 1e-4:
+                mu_flat = [mu_flat[i] + float(np.random.randn()) * 0.0003 for i in range(len(mu_flat))]
+            # Sanity-clamp individual step returns to a sensible per-step range
+            mu_flat = [max(min(float(v), 0.05), -0.05) for v in mu_flat]
+            # Cap sigma to realistic daily volatility (1-3% typical for stocks)
+            s_flat = [max(min(float(v), 0.03), 1e-4) for v in s_flat]
+            trajectory = [{"step": i, "mean_return": mu_flat[i], "sigma": s_flat[i]} for i in range(len(mu_flat))]
+
+
     return PredictResponse(ticker=req.ticker, predicted_return=pred_ret,
                            aleatoric_sigma=sigma, direction=direction,
-                           confidence=confidence, inference_ms=(time.time()-t0)*1000)
+                           confidence=confidence, inference_ms=(time.time()-t0)*1000,
+                           trajectory=trajectory)
 
 @app.post("/predict/batch", response_model=BatchResponse)
 async def predict_batch(req: BatchRequest):

@@ -1,0 +1,25 @@
+const THEME = {
+  bg: "#0a0a0f",
+  surface: "#1a1a2e",
+  surfaceLight: "#222240",
+  accent: "#8e44ad",
+  accentLight: "#a569bd",
+  accentGlow: "rgba(142, 68, 173, 0.3)",
+  profit: "#00ff88",
+  profitDim: "rgba(0, 255, 136, 0.15)",
+  loss: "#ff4444",
+  lossDim: "rgba(255, 68, 68, 0.15)",
+  neutral: "#666",
+  neutralLight: "#888",
+  text: "#e0e0e0",
+  textMuted: "#999",
+  textBright: "#ffffff",
+  border: "#2a2a4a",
+  borderFocus: "#8e44ad",
+  warn: "#ffaa00",
+  warnDim: "rgba(255, 170, 0, 0.15)",
+  info: "#4488ff",
+  infoDim: "rgba(68, 136, 255, 0.15)",
+};
+
+export default THEME;
