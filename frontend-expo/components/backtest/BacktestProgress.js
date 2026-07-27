@@ -1,12 +1,11 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
-import {
-  ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
-} from "recharts";
+import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer } from "recharts";
 import THEME from "../../theme/colors";
+import ErrorBoundary from "../shared/ErrorBoundary";
 
-const SPEEDS = { 1: 60, 2: 15, 4: 5, 16: 1 };
-const CHART_H = 260;
+const SPEEDS = { 0.5: 100, 1: 50, 2: 25, 4: 12 };
+const WINDOW_SIZE = 120;
 
 function Candle(props) {
   const { x, y, width, height, payload } = props;
@@ -58,13 +57,52 @@ function Candle(props) {
   );
 }
 
-export default function BacktestProgress({ equityCurve, trades, running, onComplete, ticker, token }) {
+function formatDate(d) {
+  if (!d) return "";
+  const s = String(d);
+  if (s.length >= 10) return s.slice(5, 10);
+  return s;
+}
+
+export default function BacktestProgress({ equityCurve, trades, signals, rsiSeries, running, onComplete, ticker, token }) {
   const [currentBar, setCurrentBar] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [paused, setPaused] = useState(false);
   const [priceData, setPriceData] = useState([]);
+  const [mlSignal, setMlSignal] = useState(null);
+  const [mlForecast, setMlForecast] = useState(null);
   const timerRef = useRef(null);
   const completedRef = useRef(false);
+
+  // Fetch ML signal for this ticker
+  const loadMlSignal = useCallback(async () => {
+    if (!ticker) return;
+    try {
+      const base = typeof process !== "undefined" && process.env?.EXPO_PUBLIC_ML_ENGINE_URL || "http://127.0.0.1:8000";
+      const res = await fetch(`${base}/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker, include_trajectory: false }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMlSignal(data);
+      }
+    } catch {}
+    try {
+      const apiBase = typeof process !== "undefined" && process.env?.EXPO_PUBLIC_API_BASE_URL || "http://127.0.0.1:3000";
+      const fcRes = await fetch(`${apiBase}/charts/forecast?ticker=${encodeURIComponent(ticker)}&interval=1D`, {
+        headers: { "Content-Type": "application/json" },
+        ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+      });
+      if (fcRes.ok) {
+        const fcData = await fcRes.json();
+        setMlForecast(fcData.forecast || []);
+      }
+    } catch {}
+  }, [ticker, token]);
+
+  useEffect(() => { loadMlSignal(); }, [loadMlSignal]);
 
   const loadPriceData = useCallback(async () => {
     if (!ticker || priceData.length > 0) return;
@@ -95,7 +133,7 @@ export default function BacktestProgress({ equityCurve, trades, running, onCompl
     const delay = SPEEDS[speed] || 50;
     timerRef.current = setInterval(() => {
       setCurrentBar((prev) => {
-        const next = prev + 1;
+        const next = prev + 2; // advance 2 bars at a time for speed
         if (next >= equityCurve.length) {
           clearInterval(timerRef.current);
           if (!completedRef.current) { completedRef.current = true; setTimeout(() => onComplete?.(), 500); }
@@ -109,182 +147,245 @@ export default function BacktestProgress({ equityCurve, trades, running, onCompl
 
   const currentDate = equityCurve[currentBar]?.date || "";
 
-  const WINDOW_SIZE = 80;
+  // Build full chart data (no scrolling window - show all with playhead)
   const fullBars = useMemo(() => {
     try {
-      if (!priceData || priceData.length === 0) return [];
-      const eqMap = {};
-      if (equityCurve) equityCurve.forEach(e => { eqMap[String(e.date).slice(0, 10)] = e.equity; });
-      const tradeMap = {};
-      if (trades) {
-        trades.forEach(t => {
-          const ed = String(t.entry_date || "").slice(0, 10);
-          const xd = String(t.exit_date || "").slice(0, 10);
-          if (ed) tradeMap[ed] = { ...t, type: "entry" };
-          if (xd) tradeMap[xd] = { ...t, type: "exit" };
+      // Use equityCurve dates as the time axis
+      // Generate synthetic OHLC from equity (since we don't have real price data in backtest)
+      const eqData = equityCurve || [];
+      const sigMap = {};
+      if (signals) {
+        signals.forEach(s => {
+          const sd = String(s.date).slice(0, 10);
+          sigMap[sd] = s;
         });
       }
-      return priceData.map((d, i) => {
-        const o = Number(d.open || d.close || 0);
-        const c = Number(d.close || 0);
-        const h = Number(d.high || c);
-        const l = Number(d.low || c);
+      return eqData.map((d, i) => {
         const dk = String(d.date).slice(0, 10);
-        const t = tradeMap[dk];
-        return { idx: i, date: dk, open: o, close: c, high: h, low: l, equity: eqMap[dk] || null, tradeEntry: t?.type === "entry" || null, tradeExit: t?.type === "exit" || null, _dMin: 0 };
+        const sig = sigMap[dk];
+        const eq = Number(d.equity) || 1;
+        // Synthesize OHLC from equity value (scale around 100 for readability)
+        const price = eq * 100; // scale to look like real prices
+        const spread = price * 0.01;
+        return {
+          idx: i,
+          date: dk,
+          open: price - spread * 0.5,
+          close: price + spread * 0.5,
+          high: price + spread,
+          low: price - spread,
+          equity: eq,
+          tradeEntry: sig?.type === "buy" || null,
+          tradeExit: sig?.type === "sell" || null,
+          signalReason: sig?.reason || null,
+          _dMin: 0,
+        };
       });
     } catch (e) {
       console.error("fullBars error:", e);
       return [];
     }
-  }, [priceData, equityCurve, trades]);
-
-  const visibleBars = useMemo(() => {
-    try {
-      if (!fullBars || fullBars.length <= WINDOW_SIZE) return fullBars || [];
-      const start = Math.max(0, currentBar - WINDOW_SIZE + 10);
-      return fullBars.slice(start, start + WINDOW_SIZE);
-    } catch (e) {
-      console.error("visibleBars error:", e);
-      return [];
-    }
-  }, [fullBars, currentBar]);
+  }, [equityCurve, signals]);
 
   const chartData = useMemo(() => {
     try {
-      if (!visibleBars || visibleBars.length === 0) return [];
-      const sVals = visibleBars.flatMap(d => {
-        const vals = [d.high, d.low, d.open, d.close].map(v => Number(v) || 0);
-        return vals.filter(v => isFinite(v));
-      });
-      if (sVals.length === 0) return [];
+      if (!fullBars || fullBars.length === 0) return [];
+      const sVals = fullBars.flatMap(d => [d.high, d.low, d.open, d.close]);
       const vMin = Math.min(...sVals);
       const vMax = Math.max(...sVals);
       const vRng = (vMax - vMin) || 1;
-      return visibleBars.map(d => ({ ...d, _dMin: vMin - vRng * 0.02 }));
+      return fullBars.map(d => ({ ...d, _dMin: vMin - vRng * 0.02 }));
     } catch (e) {
-      console.error("chartData error:", e);
       return [];
     }
-  }, [visibleBars]);
+  }, [fullBars]);
 
   const eqData = useMemo(() => {
     try {
-      return (equityCurve || []).slice(0, currentBar + 1).map((d, i) => ({
+      return (equityCurve || []).map((d, i) => ({
         idx: i, date: d.date, equity: Number(d.equity) || 0
       }));
     } catch (e) {
       return [];
     }
-  }, [equityCurve, currentBar]);
+  }, [equityCurve]);
 
-  const tradeCount = useMemo(() => {
-    if (!trades || !equityCurve.length) return 0;
-    const seenDates = new Set(equityCurve.slice(0, currentBar + 1).map(e => String(e.date).slice(0,10)));
-    return trades.filter(t => seenDates.has(String(t.entry_date||'').slice(0,10)) || seenDates.has(String(t.exit_date||'').slice(0,10))).length;
-  }, [trades, equityCurve, currentBar]);
+  // Find current rsi
+  const currentRsi = useMemo(() => {
+    if (!rsiSeries || currentBar >= rsiSeries.length) return null;
+    return rsiSeries[currentBar]?.rsi;
+  }, [rsiSeries, currentBar]);
 
-  const visibleTrade = useMemo(() => {
-    if (!trades || !equityCurve.length) return [];
-    const seenDates = new Set(equityCurve.slice(0, currentBar + 1).map(e => String(e.date).slice(0,10)));
-    return trades.filter(t => seenDates.has(String(t.entry_date||'').slice(0,10)) || seenDates.has(String(t.exit_date||'').slice(0,10))).slice(-3);
-  }, [trades, equityCurve, currentBar]);
+  // Find current signal
+  const currentSignal = useMemo(() => {
+    if (!signals) return null;
+    const curDate = String(equityCurve?.[currentBar]?.date || "").slice(0, 10);
+    return signals.find(s => String(s.date).slice(0, 10) === curDate);
+  }, [signals, currentBar, equityCurve]);
 
   const formatDate = (d) => d ? String(d).split("-").slice(1, 3).join("/") : "";
-  const priceStep = Math.max(1, Math.floor((chartData?.length || 0) / 5));
+  const priceStep = Math.max(1, Math.floor((chartData?.length || 0) / 6));
   const eqIsUp = (eqData?.length || 0) >= 2 && eqData[eqData.length - 1].equity >= eqData[0].equity;
+
+  const buySignalCount = (signals || []).filter(s => s.type === "buy").length;
+  const sellSignalCount = (signals || []).filter(s => s.type === "sell").length;
 
   if (!chartData.length) return null;
 
   return (
-    <View style={styles.wrap}>
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>Live Trading Playback</Text>
-          <Text style={styles.sub}>
-            {ticker || ""} · Daily · Bar {currentBar + 1}/{equityCurve.length} · {tradeCount} sig · {formatDate(currentDate)}
-          </Text>
-        </View>
-        <View style={styles.controls}>
-          {Object.keys(SPEEDS).map(s => (
-            <Pressable key={s} style={[styles.sb, speed === Number(s) && styles.sbOn]} onPress={() => setSpeed(Number(s))}>
-              <Text style={[styles.st, speed === Number(s) && styles.stOn]}>{s}x</Text>
+    <ErrorBoundary>
+      <View style={styles.wrap}>
+        <View style={styles.header}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.title}>Live Trading Playback</Text>
+            <Text style={styles.sub}>
+              {ticker || ""} · Bar {Math.min(currentBar + 1, equityCurve.length)}/{equityCurve.length} · {buySignalCount} buy / {sellSignalCount} sell
+            </Text>
+          </View>
+          <View style={styles.controls}>
+            {Object.keys(SPEEDS).map(s => (
+              <Pressable key={s} style={[styles.sb, speed === Number(s) && styles.sbOn]} onPress={() => setSpeed(Number(s))}>
+                <Text style={[styles.st, speed === Number(s) && styles.stOn]}>{s}x</Text>
+              </Pressable>
+            ))}
+            <Pressable style={[styles.pb, paused && styles.pbOn]} onPress={() => setPaused(v => !v)}>
+              <Text style={styles.pt}>{paused ? "▶" : "⏸"}</Text>
             </Pressable>
-          ))}
-          <Pressable style={[styles.pb, paused && styles.pbOn]} onPress={() => setPaused(v => !v)}>
-            <Text style={styles.pt}>{paused ? "▶" : "⏸"}</Text>
-          </Pressable>
+          </View>
         </View>
-      </View>
 
-      <Text style={styles.cl}>Price & Signals</Text>
-      <View style={styles.chart}>
-        <ResponsiveContainer width="100%" height={CHART_H}>
-          <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 20, left: 0 }}>
-            <XAxis dataKey="idx" tickFormatter={(i) => {
-              try { return i % priceStep === 0 ? formatDate(chartData[i]?.date) : ""; }
-              catch { return ""; }
-            }} tick={{ fill: THEME.textMuted, fontSize: 9 }} axisLine={{ stroke: THEME.border }} tickLine={false} />
-            <YAxis domain={['dataMin - 1', 'dataMax + 1']} tick={{ fill: THEME.textMuted, fontSize: 9 }} axisLine={{ stroke: THEME.border }} tickLine={false} tickFormatter={(v) => { try { return `$${Number(v).toFixed(0)}`; } catch { return ""; } }} width={55} />
-            <Tooltip contentStyle={{ background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 4, fontSize: 11 }} labelFormatter={(i) => { try { return formatDate(chartData[i]?.date); } catch { return ""; } }} />
-            <Bar dataKey="close" shape={<Candle />} isAnimationActive={false} maxBarSize={10} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </View>
-
-      <Text style={styles.cl}>Equity Curve</Text>
-      <View style={styles.chart}>
-        <ResponsiveContainer width="100%" height={120}>
-          <ComposedChart data={eqData} margin={{ top: 2, right: 5, bottom: 20, left: 0 }}>
-            <XAxis dataKey="idx" tickFormatter={(i) => { try { return i % priceStep === 0 ? formatDate(eqData[i]?.date) : ""; } catch { return ""; } }} tick={{ fill: THEME.textMuted, fontSize: 9 }} axisLine={{ stroke: THEME.border }} tickLine={false} />
-            <YAxis hide domain={['dataMin - 0.001', 'dataMax + 0.001']} />
-            <Tooltip contentStyle={{ background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 4, fontSize: 11 }} />
-            <defs>
-              <linearGradient id="eqLG" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={eqIsUp ? THEME.profit : THEME.loss} stopOpacity={0.3} />
-                <stop offset="100%" stopColor={eqIsUp ? THEME.profit : THEME.loss} stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <Area type="monotone" dataKey="equity" stroke={eqIsUp ? THEME.profit : THEME.loss} strokeWidth={2} fill="url(#eqLG)" isAnimationActive={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </View>
-
-      {visibleTrade.length > 0 && (
-        <View style={styles.trades}>
-          <Text style={styles.cl}>Recent Trades</Text>
-          {visibleTrade.map((t, i) => {
-            const ret = (t.return_pct || 0);
-            return (
-              <View key={i} style={styles.tr}>
-                <Text style={[styles.tt, { color: ret >= 0 ? THEME.profit : THEME.loss }]}>{ret >= 0 ? "+" : ""}{(ret * 100).toFixed(1)}%</Text>
-                <Text style={styles.td}>{String(t.entry_date || "").slice(0, 10)}→{String(t.exit_date || "").slice(0, 10)}</Text>
+        {currentRsi != null && (
+          <View style={styles.indicatorRow}>
+            <View style={styles.indicatorBox}>
+              <Text style={styles.indicatorLabel}>RSI</Text>
+              <Text style={[styles.indicatorValue, { color: currentRsi < 30 ? THEME.profit : currentRsi > 70 ? THEME.loss : THEME.text }]}>
+                {currentRsi.toFixed(1)}
+              </Text>
+            </View>
+            {currentSignal && (
+              <View style={[styles.indicatorBox, { backgroundColor: currentSignal.type === "buy" ? THEME.profitDim : THEME.lossDim }]}>
+                <Text style={styles.indicatorLabel}>Signal</Text>
+                <Text style={[styles.indicatorValue, { color: currentSignal.type === "buy" ? THEME.profit : THEME.loss }]}>
+                  {currentSignal.type.toUpperCase()}
+                </Text>
+                <Text style={styles.indicatorSub}>{currentSignal.reason}</Text>
               </View>
-            );
-          })}
+            )}
+          </View>
+        )}
+
+        {mlSignal && (
+          <View style={[styles.indicatorRow, { marginTop: 4 }]}>
+            <View style={[styles.indicatorBox, {
+              backgroundColor: mlSignal.direction === "BUY" ? THEME.profitDim : mlSignal.direction === "SELL" ? THEME.lossDim : THEME.surfaceLight,
+              borderColor: mlSignal.direction === "BUY" ? THEME.profit : mlSignal.direction === "SELL" ? THEME.loss : THEME.border,
+            }]}>
+              <Text style={styles.indicatorLabel}>ML Signal</Text>
+              <Text style={[styles.indicatorValue, {
+                color: mlSignal.direction === "BUY" ? THEME.profit : mlSignal.direction === "SELL" ? THEME.loss : THEME.textMuted,
+              }]}>
+                {mlSignal.direction || "HOLD"} {(mlSignal.confidence * 100).toFixed(0)}%
+              </Text>
+              <Text style={styles.indicatorSub}>Predicted: {((mlSignal.predicted_return || 0) * 100).toFixed(2)}%</Text>
+            </View>
+            {mlForecast && mlForecast.length > 0 && (
+              <View style={styles.indicatorBox}>
+                <Text style={styles.indicatorLabel}>ML Forecast</Text>
+                <Text style={[styles.indicatorValue, { color: mlForecast[mlForecast.length - 1]?.price > mlForecast[0]?.price ? THEME.profit : THEME.loss }]}>
+                  ${mlForecast[mlForecast.length - 1]?.price?.toFixed(2) || "—"}
+                </Text>
+                <Text style={styles.indicatorSub}>21-step projection</Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        <Text style={styles.cl}>Price &amp; Signals (Full History)</Text>
+        <View style={styles.chart}>
+          <ResponsiveContainer width="100%" height={CHART_H}>
+            <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 25, left: 0 }}>
+              <XAxis
+                dataKey="idx"
+                tickFormatter={(i) => i % priceStep === 0 ? formatDate(chartData[i]?.date) : ""}
+                tick={{ fill: THEME.textMuted, fontSize: 9 }}
+                axisLine={{ stroke: THEME.border }}
+                tickLine={false}
+                interval={0}
+              />
+              <YAxis domain={['dataMin - 1', 'dataMax + 1']} tick={{ fill: THEME.textMuted, fontSize: 9 }} axisLine={{ stroke: THEME.border }} tickLine={false} tickFormatter={(v) => { try { return `$${Number(v).toFixed(0)}`; } catch { return ""; } }} width={55} />
+              <Tooltip contentStyle={{ background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 4, fontSize: 11 }} labelFormatter={(i) => { try { return formatDate(chartData[i]?.date); } catch { return ""; } }} />
+              <Bar dataKey="close" shape={<Candle />} isAnimationActive={false} maxBarSize={8} />
+              <ReferenceLine x={currentBar} stroke={THEME.accent} strokeWidth={1.5} strokeDasharray="3 2" label={{ value: "NOW", fill: THEME.accent, fontSize: 8, position: "top" }} />
+            </ComposedChart>
+          </ResponsiveContainer>
         </View>
-      )}
-    </View>
+
+        <Text style={styles.cl}>Equity Curve</Text>
+        <View style={styles.chart}>
+          <ResponsiveContainer width="100%" height={120}>
+            <ComposedChart data={eqData} margin={{ top: 2, right: 5, bottom: 25, left: 0 }}>
+              <XAxis dataKey="idx" tickFormatter={(i) => i % priceStep === 0 ? formatDate(eqData[i]?.date) : ""} tick={{ fill: THEME.textMuted, fontSize: 9 }} axisLine={{ stroke: THEME.border }} tickLine={false} interval={0} />
+              <YAxis hide domain={['dataMin - 0.001', 'dataMax + 0.001']} />
+              <Tooltip contentStyle={{ background: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 4, fontSize: 11 }} labelFormatter={(i) => formatDate(eqData[i]?.date)} />
+              <defs>
+                <linearGradient id="eqLG" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={eqIsUp ? THEME.profit : THEME.loss} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={eqIsUp ? THEME.profit : THEME.loss} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <Area type="monotone" dataKey="equity" stroke={eqIsUp ? THEME.profit : THEME.loss} strokeWidth={2} fill="url(#eqLG)" isAnimationActive={false} />
+              <ReferenceLine x={currentBar} stroke={THEME.accent} strokeWidth={1.5} strokeDasharray="3 2" />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </View>
+
+        {signals && signals.length > 0 && (
+          <View style={styles.signalsList}>
+            <Text style={styles.cl}>All Signals ({signals.length})</Text>
+            {signals.slice(0, 10).map((s, i) => (
+              <View key={i} style={styles.signalRow}>
+                <Text style={[styles.signalIcon, { color: s.type === "buy" ? THEME.profit : THEME.loss }]}>
+                  {s.type === "buy" ? "▲" : "▼"}
+                </Text>
+                <Text style={styles.signalDate}>{String(s.date).slice(0, 10)}</Text>
+                <Text style={styles.signalPrice}>${s.price}</Text>
+                <Text style={styles.signalReason}>{s.reason}</Text>
+              </View>
+            ))}
+            {signals.length > 10 && <Text style={styles.more}>+ {signals.length - 10} more</Text>}
+          </View>
+        )}
+      </View>
+    </ErrorBoundary>
   );
 }
 
+const CHART_H = 220;
 const styles = StyleSheet.create({
   wrap: { marginBottom: 16, backgroundColor: THEME.surface, borderRadius: 10, padding: 12, borderLeftWidth: 3, borderLeftColor: THEME.accent },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 },
   title: { color: THEME.text, fontSize: 14, fontWeight: "800" },
   sub: { color: THEME.textMuted, fontSize: 10, marginTop: 2 },
-  controls: { flexDirection: "row", gap: 4, alignItems: "center" },
-  sb: { paddingHorizontal: 7, paddingVertical: 4, borderRadius: 3, backgroundColor: THEME.surfaceLight, borderWidth: 1, borderColor: THEME.border },
+  controls: { flexDirection: "row", gap: 3, alignItems: "center" },
+  sb: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 3, borderWidth: 1, borderColor: THEME.border, backgroundColor: THEME.bg },
   sbOn: { backgroundColor: THEME.accentGlow, borderColor: THEME.accent },
-  st: { color: THEME.textMuted, fontSize: 10, fontWeight: "600" },
+  st: { color: THEME.textMuted, fontSize: 9, fontWeight: "600" },
   stOn: { color: THEME.accent },
-  pb: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 3, backgroundColor: THEME.surfaceLight, borderWidth: 1, borderColor: THEME.border },
-  pbOn: { backgroundColor: THEME.accent, borderColor: THEME.accent },
-  pt: { color: THEME.text, fontSize: 12 },
-  cl: { color: THEME.textMuted, fontSize: 10, fontWeight: "600", textTransform: "uppercase", marginBottom: 4 },
-  chart: { backgroundColor: THEME.bg, borderRadius: 6, padding: 4, marginBottom: 8 },
-  trades: { marginTop: 4 },
-  tr: { flexDirection: "row", alignItems: "center", paddingVertical: 2, gap: 8 },
-  tt: { fontWeight: "800", fontSize: 12, minWidth: 50 },
-  td: { color: THEME.textMuted, fontSize: 10 },
+  pb: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 3, backgroundColor: THEME.bg, borderWidth: 1, borderColor: THEME.border, marginLeft: 2 },
+  pbOn: { backgroundColor: THEME.accentGlow, borderColor: THEME.accent },
+  pt: { color: THEME.text, fontSize: 10 },
+  indicatorRow: { flexDirection: "row", gap: 6, marginBottom: 8 },
+  indicatorBox: { flex: 1, backgroundColor: THEME.surfaceLight, borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: THEME.border },
+  indicatorLabel: { color: THEME.textMuted, fontSize: 9, fontWeight: "600", textTransform: "uppercase" },
+  indicatorValue: { fontSize: 16, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  indicatorSub: { color: THEME.textMuted, fontSize: 8, marginTop: 1 },
+  cl: { color: THEME.textMuted, fontSize: 10, fontWeight: "600", textTransform: "uppercase", marginTop: 8, marginBottom: 4 },
+  chart: { backgroundColor: THEME.surfaceLight, borderRadius: 6, padding: 4 },
+  signalsList: { marginTop: 8, padding: 8, backgroundColor: THEME.surfaceLight, borderRadius: 6 },
+  signalRow: { flexDirection: "row", alignItems: "center", paddingVertical: 2, gap: 8 },
+  signalIcon: { fontSize: 12, fontWeight: "800", minWidth: 12 },
+  signalDate: { color: THEME.textMuted, fontSize: 10, minWidth: 70, fontVariant: ["tabular-nums"] },
+  signalPrice: { color: THEME.text, fontSize: 10, minWidth: 50, fontVariant: ["tabular-nums"] },
+  signalReason: { color: THEME.textMuted, fontSize: 9, flex: 1 },
+  more: { color: THEME.textMuted, fontSize: 9, marginTop: 4, fontStyle: "italic" },
 });

@@ -19,6 +19,8 @@ export default function BacktestScreen({ token }) {
     config,
     equityCurve,
     trades,
+    signals,
+    rsiSeries,
     summary,
     multiResults,
     portfolioEquity,
@@ -66,6 +68,8 @@ export default function BacktestScreen({ token }) {
           <BacktestProgress
             equityCurve={equityCurve}
             trades={trades}
+            signals={signals}
+            rsiSeries={rsiSeries}
             running={true}
             onComplete={handleAnimationComplete}
             ticker={config.tickers?.[0]}
@@ -93,7 +97,7 @@ export default function BacktestScreen({ token }) {
                 </Pressable>
               </View>
               <View style={styles.chartWrap}>
-                <ResponsiveContainer width="100%" height={180}>
+                <ResponsiveContainer width="100%" height={220}>
                   <AreaChart data={(() => {
                     const mapped = equityCurve.map((d, i) => ({
                       i, label: String(d.date).slice(0, 10),
@@ -102,7 +106,13 @@ export default function BacktestScreen({ token }) {
                     const vals = mapped.map(d => d.value);
                     return { mapped, min: Math.min(...vals), max: Math.max(...vals) };
                   })().mapped}>
-                    <XAxis dataKey="label" hide />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fill: THEME.textMuted, fontSize: 9 }}
+                      axisLine={{ stroke: THEME.border }}
+                      tickLine={false}
+                      interval={Math.floor(equityCurve.length / 6)}
+                    />
                     <YAxis hide domain={['dataMin - 0.001', 'dataMax + 0.001']} />
                     <Tooltip contentStyle={{ backgroundColor: THEME.surface, border: `1px solid ${THEME.border}`, borderRadius: 4 }} labelStyle={{ color: THEME.textMuted, fontSize: 11 }} formatter={(val) => [Number(val).toFixed(4)]} />
                     <defs>

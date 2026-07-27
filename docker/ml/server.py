@@ -100,9 +100,15 @@ async def predict(req: PredictRequest):
     with torch.no_grad():
         out = model(xc, yc, n_steps=21, teacher_forcing=False, raw_features=rf_window)
     pred_ret = float(out["predicted_return"])
-    sigma = float(out["aleatoric_sigma"])
+    sigma_raw = float(out["aleatoric_sigma"])
+    sigma = min(sigma_raw, 0.05)  # cap for meaningful confidence
     direction = "BUY" if pred_ret > 0.002 else "SELL" if pred_ret < -0.002 else "HOLD"
-    confidence = 1.0 / (1.0 + 2.0 * sigma)
+    # Confidence: stronger signal (larger |pred_ret|) = higher confidence
+    # Combined with inverse uncertainty
+    signal_strength = min(abs(pred_ret) / 0.02, 1.0)  # 2% return = max signal
+    uncertainty = 1.0 / (1.0 + 20.0 * sigma)  # scale sigma more aggressively
+    confidence = 0.3 + 0.7 * signal_strength * uncertainty
+    confidence = max(0.1, min(0.95, confidence))
 
     trajectory = None
     if req.include_trajectory:

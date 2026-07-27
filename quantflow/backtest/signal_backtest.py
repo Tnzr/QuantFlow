@@ -23,6 +23,8 @@ class ShortTermBacktestReport:
     profit_factor: float = 0.0
     equity_curve: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["date", "equity"]))
     trades: list[dict] = field(default_factory=list)
+    rsi_series: list[dict] = field(default_factory=list)  # [{date, rsi, signal}]
+    signals: list[dict] = field(default_factory=list)  # [{date, type: "buy"/"sell", price, reason}]
 
 
 def _load_backtest_bars(ticker: str, start: str, end: str | None) -> pd.DataFrame:
@@ -138,7 +140,32 @@ def backtest_short_term(
     sma50 = close.rolling(50).mean()
     sma200 = close.rolling(200).mean()
 
-    # ── ML forecast (one-time call) ──────────────────────────────────────
+    # Select MA filter — "none" means skip MA check
+    # For mean-reversion (RSI-based) strategy: we WANT price below MA when entering
+    # (buying the dip). So the MA filter checks that price is NOT in a strong uptrend
+    # (i.e., price should be near or below MA for a pullback entry).
+    use_ma = ma_filter and ma_filter.lower() != "none"
+    ma_map = {"sma20": sma20, "sma50": sma50, "sma200": sma200}
+    ma_series = ma_map.get(ma_filter, sma20) if use_ma else None
+
+    # MA trend filter
+    trend_ok = pd.Series(True, index=close.index)
+    if ma_trend_filter == "above_sma50":
+        trend_ok = (close > sma50).fillna(False)
+    elif ma_trend_filter == "above_sma200":
+        trend_ok = (close > sma200).fillna(False)
+
+    # ── Simulate trades ──────────────────────────────────────────────────
+    # Track equity at every bar so the curve is continuous
+    equity = [1.0]  # equity at bar 0
+    trades_list = []
+    in_position = False
+    entry_idx = 0
+    entry_price = 0.0
+    current_equity = 1.0  # tracks portfolio value bar-by-bar
+
+    # Pre-compute ML signals for the backtest period
+    # For short backtests, call ML periodically; for long ones, use a single call
     ml_pred = None
     if use_ml_forecast:
         try:
@@ -150,56 +177,61 @@ def backtest_short_term(
         except Exception:
             ml_pred = None
 
-    # Select MA filter — "none" means skip MA check
-    use_ma = ma_filter and ma_filter.lower() != "none"
-    ma_map = {"sma20": sma20, "sma50": sma50, "sma200": sma200}
-    ma_series = ma_map.get(ma_filter, sma20) if use_ma else None
+    # Use a local RSI threshold that adapts to ML direction
+    # When ML says BUY: be more aggressive (higher RSI threshold = easier entry)
+    # When ML says SELL: be very conservative (much lower threshold)
+    # When ML says HOLD: use base threshold
+    ml_dir = (ml_pred or {}).get("direction", "HOLD")
+    ml_conf = float((ml_pred or {}).get("confidence", 0) or 0)
 
-    # MA trend filter
-    trend_ok = pd.Series(True, index=close.index)
-    if ma_trend_filter == "above_sma50":
-        trend_ok = close > sma50
-    elif ma_trend_filter == "above_sma200":
-        trend_ok = close > sma200
+    if ml_dir == "BUY":
+        # ML bullish: easier to enter (higher threshold)
+        effective_rsi_threshold = entry_rsi_threshold * 1.5
+    elif ml_dir == "SELL":
+        # ML bearish: much harder to enter (very low threshold)
+        effective_rsi_threshold = entry_rsi_threshold * 0.3
+    else:
+        # HOLD: use base threshold
+        effective_rsi_threshold = entry_rsi_threshold
 
-    # ── Simulate trades ──────────────────────────────────────────────────
-    # Track equity at every bar so the curve is continuous
-    equity = [1.0]  # equity at bar 0
-    trades_list = []
-    in_position = False
-    entry_idx = 0
-    entry_price = 0.0
-    current_equity = 1.0  # tracks portfolio value bar-by-bar
+    # Track signals and RSI for visualization
+    signals_list = []
+    rsi_series_list = []
 
     for i in range(50, len(close)):
+        # Record RSI for this bar
+        rsi_val = float(rsi.iloc[i]) if not pd.isna(rsi.iloc[i]) else 50.0
+        bar_date = str(close.index[i].date())
+        rsi_series_list.append({"date": bar_date, "rsi": round(rsi_val, 2)})
+
         if not in_position:
             # Entry: RSI condition, optionally filtered by ML direction
-            # RSI entry with ML-adjusted threshold or pure ML signal
-            if use_ml_forecast and ml_pred:
-                ml_dir = ml_pred.get("direction", "HOLD")
-                ml_conf = float(ml_pred.get("confidence", 0) or 0)
-                if ml_dir == "SELL":
-                    entry_threshold = entry_rsi_threshold * 0.5
-                    rsi_ok = rsi.iloc[i] < entry_threshold and ml_conf < 0.55
-                elif ml_dir == "BUY":
-                    if ml_conf >= ml_min_confidence and abs(float(ml_pred.get("predicted_return",0))) > ml_threshold:
-                        rsi_ok = True
-                    else:
-                        rsi_ok = rsi.iloc[i] < entry_rsi_threshold * 1.4
-                else:
-                    rsi_ok = rsi.iloc[i] < entry_rsi_threshold
+            rsi_ok = rsi.iloc[i] < effective_rsi_threshold
+
+            # MA filter: allow entry when price is near or below MA (pullback)
+            # This makes sense for mean-reversion RSI strategy
+            if ma_series is not None and not pd.isna(ma_series.iloc[i]):
+                # Allow entry if price is within 5% above MA or below MA
+                ma_val = ma_series.iloc[i]
+                price = close.iloc[i]
+                ma_ok = price <= ma_val * 1.05  # near or below MA
             else:
-                entry_threshold = entry_rsi_threshold
-                rsi_ok = rsi.iloc[i] < entry_threshold
+                ma_ok = True
 
             if (
                 rsi_ok
-                and (ma_series is None or close.iloc[i] > ma_series.iloc[i])
+                and ma_ok
                 and trend_ok.iloc[i]
             ):
                 in_position = True
                 entry_idx = i
                 entry_price = float(close.iloc[i])
+                signals_list.append({
+                    "date": bar_date,
+                    "type": "buy",
+                    "price": round(entry_price, 2),
+                    "reason": f"RSI {rsi_val:.1f} < {effective_rsi_threshold:.0f}" + (f" + ML {ml_dir}" if use_ml_forecast else ""),
+                })
         else:
             hold = i - entry_idx
             current_price = float(close.iloc[i])
@@ -227,6 +259,12 @@ def backtest_short_term(
                     "model_sigma": 0.02 + abs(ret) * 0.5,
                     "ml_direction": ml_pred.get("direction") if ml_pred else None,
                     "ml_confidence": ml_pred.get("confidence") if ml_pred else None,
+                })
+                signals_list.append({
+                    "date": bar_date,
+                    "type": "sell",
+                    "price": round(current_price, 2),
+                    "reason": f"{exit_reason} ({ret*100:+.1f}%)",
                 })
                 current_equity = current_equity * (1.0 + ret)
                 in_position = False
@@ -260,6 +298,12 @@ def backtest_short_term(
         current_equity = current_equity * (1.0 + ret)
         if equity:
             equity[-1] = current_equity
+        signals_list.append({
+            "date": str(close.index[-1].date()),
+            "type": "sell",
+            "price": round(current_price, 2),
+            "reason": f"end ({ret*100:+.1f}%)",
+        })
 
     # Build equity series aligned to close index
     # equity[0] = 1.0 at bar 0, equity[i] tracks portfolio value at bar i+50 (first tradable bar)
@@ -280,6 +324,8 @@ def backtest_short_term(
         return ShortTermBacktestReport(
             n_trades=0,
             equity_curve=eq_df,
+            rsi_series=rsi_series_list,
+            signals=signals_list,
         )
 
     returns = np.array([t["return_pct"] for t in trades_list])
@@ -328,6 +374,8 @@ def backtest_short_term(
         profit_factor=profit_factor,
         equity_curve=eq_df,
         trades=trades_list,
+        rsi_series=rsi_series_list,
+        signals=signals_list,
     )
 
 

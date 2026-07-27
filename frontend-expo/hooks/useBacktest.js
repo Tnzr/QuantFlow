@@ -5,6 +5,8 @@ export default function useBacktest(token) {
   const [config, setConfig] = useState({});
   const [equityCurve, setEquityCurve] = useState([]);
   const [trades, setTrades] = useState([]);
+  const [signals, setSignals] = useState([]);
+  const [rsiSeries, setRsiSeries] = useState([]);
   const [summary, setSummary] = useState(null);
   const [multiResults, setMultiResults] = useState([]);
   const [portfolioEquity, setPortfolioEquity] = useState([]);
@@ -28,6 +30,8 @@ export default function useBacktest(token) {
       setConfig(cfg);
       setMultiResults([]);
       setPortfolioEquity([]);
+      setSignals([]);
+      setRsiSeries([]);
       setAnimating(false);
 
       try {
@@ -76,6 +80,8 @@ export default function useBacktest(token) {
         } else {
           setEquityCurve(data.equity || []);
           setTrades(data.trades || []);
+          setSignals(data.signals || []);
+          setRsiSeries(data.rsi_series || []);
           setSummary(data.summary || null);
           setSigmaBuckets(data.sigma_buckets || data.sigma || null);
         }
@@ -95,6 +101,8 @@ export default function useBacktest(token) {
     config,
     equityCurve,
     trades,
+    signals,
+    rsiSeries,
     summary,
     multiResults,
     portfolioEquity,

@@ -2434,6 +2434,8 @@ def backtest_short_term_api(
             },
             "equity": eq.to_dict(orient="records"),
             "trades": rpt.trades,
+            "signals": rpt.signals,
+            "rsi_series": rpt.rsi_series,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
