@@ -28,34 +28,33 @@ export default function useRobinhood(token) {
   const connect = useCallback(async () => {
     setError(null);
     try {
-      const { url, workspace_id } = await apiGet("/robinhood/oauth/url", token);
-      // In a real React Native app this would open the URL in a browser.
-      // For web, we open a new window and listen for the callback.
+      // Check current demo status first
+      const status = await apiGet("/robinhood/status", token);
+      if (status.demo_mode) {
+        // In demo mode: auto-complete OAuth without opening popup
+        // This skips the Robinhood login flow and uses simulated data
+        await apiPost("/robinhood/oauth/callback", { code: "demo_code_" + Date.now() }, token);
+        await refreshStatus();
+        return;
+      }
+      // Real OAuth: open Robinhood in new window, poll for completion
+      const { url } = await apiGet("/robinhood/oauth/url", token);
       if (typeof window !== "undefined") {
         const popup = window.open(url, "_blank", "width=600,height=700");
-        // Poll for completion (popup will close after OAuth completes)
+        if (!popup) {
+          setError("Popup blocked. Please allow popups for Robinhood OAuth.");
+          return;
+        }
+        // Poll for popup close
         const pollInterval = setInterval(async () => {
           if (popup && popup.closed) {
             clearInterval(pollInterval);
-            // For demo mode, auto-complete with a code
-            await completeWithDemoCode();
+            await refreshStatus();
           }
-        }, 500);
+        }, 1000);
       } else {
-        // Native: would use Linking
         console.log("Open this URL to connect:", url);
       }
-    } catch (e) {
-      setError(e.message);
-    }
-  }, [token]);
-
-  const completeWithDemoCode = useCallback(async () => {
-    // For demo mode: directly complete OAuth with a simulated code
-    try {
-      await apiPost("/robinhood/oauth/callback", { code: "demo_code_" + Date.now() }, token);
-      await refreshStatus();
-      await fetchPortfolio();
     } catch (e) {
       setError(e.message);
     }

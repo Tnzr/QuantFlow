@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, Pressable, StyleSheet, Switch, Alert } from "react-native";
+import { View, Text, Pressable, StyleSheet, Switch } from "react-native";
 import THEME from "../../theme/colors";
 
 /**
@@ -18,6 +18,9 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
 
   const [tradeEnabled, setTradeEnabled] = useState(false);
   const [importStatus, setImportStatus] = useState(null);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
 
   useEffect(() => {
     if (status?.scopes) {
@@ -28,20 +31,36 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
   const isConnected = status?.connected;
   const isDemo = status?.demo_mode;
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     if (isConnected) {
-      Alert.alert(
-        "Disconnect Robinhood?",
-        "This will revoke access to your Robinhood account data.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Disconnect", style: "destructive", onPress: disconnect },
-        ]
-      );
-    } else {
-      // For demo: directly complete OAuth
-      connect();
+      setConfirmingDisconnect(true);
+      return;
     }
+    setConnecting(true);
+    setError(null);
+    try {
+      await connect();
+    } catch (e) {
+      // error handled in hook
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const confirmDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await disconnect();
+      setConfirmingDisconnect(false);
+    } catch (e) {
+      // error handled in hook
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  const cancelDisconnect = () => {
+    setConfirmingDisconnect(false);
   };
 
   const handleTradeToggle = async (value) => {
@@ -50,14 +69,17 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
   };
 
   const handleImportWatchlist = async () => {
-    setImportStatus("importing");
+    setImportStatus({ type: "loading", text: "Importing..." });
     const result = await importWatchlist();
     if (result) {
-      setImportStatus(`Imported ${result.count} tickers: ${result.imported.join(", ")}`);
+      setImportStatus({
+        type: "success",
+        text: `Imported ${result.count} tickers: ${result.imported.join(", ")}`,
+      });
     } else {
-      setImportStatus("import failed");
+      setImportStatus({ type: "error", text: "Import failed. Is Robinhood connected?" });
     }
-    setTimeout(() => setImportStatus(null), 5000);
+    setTimeout(() => setImportStatus(null), 6000);
   };
 
   return (
@@ -104,14 +126,46 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
         </View>
       )}
 
-      <Pressable
-        style={[styles.btn, isConnected ? styles.btnDisconnect : styles.btnConnect]}
-        onPress={handleConnect}
-      >
-        <Text style={styles.btnText}>
-          {isConnected ? "Disconnect Robinhood" : "Connect Robinhood Account"}
-        </Text>
-      </Pressable>
+      {confirmingDisconnect ? (
+        <View style={styles.confirmBox}>
+          <Text style={styles.confirmTitle}>Disconnect Robinhood?</Text>
+          <Text style={styles.confirmHelp}>
+            This will revoke access to your Robinhood account data and clear the watchlist sync.
+          </Text>
+          <View style={styles.confirmRow}>
+            <Pressable style={styles.confirmCancel} onPress={cancelDisconnect} disabled={disconnecting}>
+              <Text style={styles.confirmCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.confirmDanger, disconnecting && { opacity: 0.5 }]}
+              onPress={confirmDisconnect}
+              disabled={disconnecting}
+            >
+              <Text style={styles.confirmDangerText}>
+                {disconnecting ? "Disconnecting..." : "Disconnect"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable
+          style={[
+            styles.btn,
+            isConnected ? styles.btnDisconnect : styles.btnConnect,
+            connecting && { opacity: 0.5 },
+          ]}
+          onPress={handleConnect}
+          disabled={connecting}
+        >
+          <Text style={styles.btnText}>
+            {isConnected
+              ? "Disconnect Robinhood"
+              : connecting
+              ? "Connecting..."
+              : "Connect Robinhood Account"}
+          </Text>
+        </Pressable>
+      )}
 
       {isConnected && (
         <>
@@ -134,7 +188,17 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
             <Text style={styles.secondaryBtnText}>Import Watchlist from Robinhood</Text>
           </Pressable>
           {importStatus && (
-            <Text style={styles.importStatus}>{importStatus}</Text>
+            <View style={[
+              styles.importStatusBox,
+              importStatus.type === "error" ? styles.importStatusError : styles.importStatusOk
+            ]}>
+              <Text style={[
+                styles.importStatusText,
+                importStatus.type === "error" && { color: THEME.loss }
+              ]}>
+                {importStatus.text}
+              </Text>
+            </View>
           )}
         </>
       )}
@@ -232,6 +296,49 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   secondaryBtnText: { color: THEME.text, fontWeight: "600", fontSize: 11 },
-  importStatus: { color: THEME.profit, fontSize: 10, marginTop: 6, fontStyle: "italic" },
+  importStatusBox: {
+    padding: 8,
+    borderRadius: 4,
+    marginTop: 6,
+    borderWidth: 1,
+  },
+  importStatusOk: {
+    backgroundColor: THEME.profitDim,
+    borderColor: THEME.profit,
+  },
+  importStatusError: {
+    backgroundColor: THEME.lossDim,
+    borderColor: THEME.loss,
+  },
+  importStatusText: { fontSize: 10 },
+  confirmBox: {
+    backgroundColor: THEME.surfaceLight,
+    borderRadius: 6,
+    padding: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: THEME.loss,
+  },
+  confirmTitle: { color: THEME.loss, fontSize: 13, fontWeight: "700" },
+  confirmHelp: { color: THEME.textMuted, fontSize: 11, marginTop: 4, marginBottom: 8 },
+  confirmRow: { flexDirection: "row", gap: 8 },
+  confirmCancel: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 4,
+    backgroundColor: THEME.bg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    alignItems: "center",
+  },
+  confirmCancelText: { color: THEME.text, fontWeight: "600", fontSize: 12 },
+  confirmDanger: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 4,
+    backgroundColor: THEME.loss,
+    alignItems: "center",
+  },
+  confirmDangerText: { color: THEME.textBright, fontWeight: "700", fontSize: 12 },
   error: { color: THEME.loss, fontSize: 11, marginTop: 6 },
 });
