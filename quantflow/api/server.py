@@ -9,11 +9,10 @@ import hashlib
 import base64
 import json
 import html
-import time
-import secrets
-import hashlib
-import base64
-import json
+import os
+import math
+import asyncio
+import httpx
 import html
 from threading import Lock, Thread
 from datetime import datetime, timezone
@@ -23,8 +22,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import yaml
-
-import os
 
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -68,6 +65,7 @@ from ..portfolio.allocator import PortfolioAllocator, AllocationConstraints, est
 from ..ops.reporting import default_json_report_path, read_json_report
 from ..broker.alpaca_paper import AlpacaPaperTrading
 from ..data.alpaca_client import fetch_bars, fetch_latest_quote, fetch_latest_trade
+from ..mcp import get_mcp_manager, _demo_portfolio, _demo_quote, is_demo_mode as mcp_demo_mode
 
 
 app = FastAPI(title="QuantFlow API", version="0.1.0")
@@ -2752,3 +2750,455 @@ def alpaca_bars_batch(
         return {"tickers": tickers, "bars": result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Robinhood MCP Integration
+# ═══════════════════════════════════════════════════════════════════════
+
+def _get_workspace_id(token: Optional[str]) -> str:
+    """Extract workspace ID from auth token (future-proofed for multi-user)."""
+    if not token:
+        return "default"
+    # In production: decode JWT and extract workspace_id claim
+    # For now: hash the token for a stable per-user workspace ID
+    import hashlib
+    return "ws_" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+@app.get("/robinhood/status")
+async def robinhood_status(token: Optional[str] = None):
+    """Get Robinhood connection status for current workspace."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    client = mgr.get_client(wid)
+    return {
+        "connected": client.enabled and client.is_authenticated,
+        "enabled": client.enabled,
+        "authenticated": client.is_authenticated,
+        "scopes": client.scopes,
+        "last_sync": client.last_sync,
+        "last_error": client.last_error,
+        "workspace_id": wid,
+        "demo_mode": mcp_demo_mode(),
+        "agentic_account_id": client.agentic_account_id,
+    }
+
+
+@app.get("/robinhood/oauth/url")
+async def robinhood_oauth_url(token: Optional[str] = None, state: Optional[str] = None):
+    """Get OAuth authorization URL for Robinhood connection."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    return {
+        "url": mgr.get_oauth_url(wid, state=state),
+        "workspace_id": wid,
+    }
+
+
+class OAuthCallbackRequest(BaseModel):
+    code: str
+    state: Optional[str] = None
+
+
+@app.post("/robinhood/oauth/callback")
+async def robinhood_oauth_callback(req: OAuthCallbackRequest, token: Optional[str] = None):
+    """Complete OAuth flow with authorization code."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    client = mgr.complete_oauth(wid, req.code)
+    return {
+        "connected": True,
+        "workspace_id": wid,
+        "scopes": client.scopes,
+    }
+
+
+@app.post("/robinhood/disconnect")
+async def robinhood_disconnect(token: Optional[str] = None):
+    """Disconnect Robinhood account."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    mgr.disconnect(wid)
+    return {"disconnected": True, "workspace_id": wid}
+
+
+class TradeOptInRequest(BaseModel):
+    enable: bool
+
+
+@app.post("/robinhood/trading/opt-in")
+async def robinhood_trading_opt_in(req: TradeOptInRequest, token: Optional[str] = None):
+    """Opt-in or opt-out of trade execution via Robinhood."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if req.enable:
+        client = mgr.enable_trading(wid)
+    else:
+        client = mgr.disable_trading(wid)
+    return {"trade_enabled": "trade" in client.scopes, "scopes": client.scopes}
+
+
+@app.get("/robinhood/portfolio")
+async def robinhood_portfolio(token: Optional[str] = None):
+    """Fetch user's Robinhood portfolio (positions, account info, orders)."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return data
+    result = await mgr.get_portfolio(wid)
+    positions = await mgr.get_positions(wid)
+    account = await mgr.get_account_info(wid)
+    orders = await mgr.get_orders(wid, limit=20)
+    return {
+        "workspace_id": wid,
+        "account": account.get("result", {}),
+        "positions": positions.get("result", {}).get("positions", []),
+        "orders": orders.get("result", {}).get("orders", []),
+    }
+
+
+@app.get("/robinhood/positions")
+async def robinhood_positions(token: Optional[str] = None):
+    """Fetch user's current Robinhood positions."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return {"positions": data.get("positions", [])}
+    result = await mgr.get_positions(wid)
+    return result.get("result", {})
+
+
+@app.get("/robinhood/orders")
+async def robinhood_orders(token: Optional[str] = None, limit: int = 50):
+    """Fetch user's Robinhood order history."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return {"orders": data.get("orders", [])[:limit]}
+    result = await mgr.get_orders(wid, limit=limit)
+    return result.get("result", {})
+
+
+@app.get("/robinhood/watchlist")
+async def robinhood_watchlist(token: Optional[str] = None):
+    """Fetch user's Robinhood watchlist."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return {"watchlist": data.get("watchlist", [])}
+    result = await mgr.get_watchlist(wid)
+    return result.get("result", {})
+
+
+class WatchlistAddRequest(BaseModel):
+    ticker: str
+
+
+@app.post("/robinhood/watchlist/add")
+async def robinhood_watchlist_add(req: WatchlistAddRequest, token: Optional[str] = None):
+    """Add ticker to Robinhood watchlist."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        return {"demo": True, "ticker": req.ticker.upper(), "added": True}
+    result = await mgr.add_to_watchlist(wid, req.ticker.upper())
+    return result.get("result", {})
+
+
+class WatchlistRemoveRequest(BaseModel):
+    ticker: str
+
+
+@app.post("/robinhood/watchlist/remove")
+async def robinhood_watchlist_remove(req: WatchlistRemoveRequest, token: Optional[str] = None):
+    """Remove ticker from Robinhood watchlist."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        return {"demo": True, "ticker": req.ticker.upper(), "removed": True}
+    result = await mgr.remove_from_watchlist(wid, req.ticker.upper())
+    return result.get("result", {})
+
+
+@app.post("/robinhood/watchlist/import")
+async def robinhood_watchlist_import(token: Optional[str] = None):
+    """Import Robinhood watchlist into local QuantFlow watchlist."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        watchlist = data.get("watchlist", [])
+    else:
+        result = await mgr.get_watchlist(wid)
+        watchlist = result.get("result", {}).get("watchlist", [])
+    return {"imported": watchlist, "count": len(watchlist)}
+
+
+@app.get("/robinhood/quote/{ticker}")
+async def robinhood_quote(ticker: str, token: Optional[str] = None):
+    """Get real-time equity quote via Robinhood."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        data = await _demo_quote(wid, ticker)
+        return data
+    result = await mgr.get_quote(wid, ticker.upper())
+    return result.get("result", {})
+
+
+class ReviewOrderRequest(BaseModel):
+    ticker: str
+    side: str  # "buy" or "sell"
+    qty: float
+    order_type: str = "market"
+    limit_price: Optional[float] = None
+
+
+@app.post("/robinhood/order/review")
+async def robinhood_review_order(req: ReviewOrderRequest, token: Optional[str] = None):
+    """Preview an order before execution (no actual trade)."""
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        return {
+            "demo": True,
+            "preview": {
+                "ticker": req.ticker.upper(),
+                "side": req.side,
+                "qty": req.qty,
+                "order_type": req.order_type,
+                "limit_price": req.limit_price,
+                "estimated_cost": req.qty * (100.0 if req.order_type == "market" else (req.limit_price or 100.0)),
+                "warnings": [],
+            }
+        }
+    result = await mgr.review_equity_order(
+        wid, req.ticker.upper(), req.side, req.qty,
+        order_type=req.order_type, limit_price=req.limit_price
+    )
+    return result.get("result", {})
+
+
+class PlaceOrderRequest(BaseModel):
+    ticker: str
+    side: str
+    qty: float
+    order_type: str = "market"
+    limit_price: Optional[float] = None
+
+
+@app.post("/robinhood/order/place")
+async def robinhood_place_order(req: PlaceOrderRequest, token: Optional[str] = None):
+    """Place a trade in the user's agentic account.
+
+    Requires 'trade' scope (opt-in). Otherwise returns trade_not_enabled error.
+    """
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    if mcp_demo_mode():
+        return {
+            "demo": True,
+            "order_id": f"demo-{uuid.uuid4().hex[:8]}",
+            "ticker": req.ticker.upper(),
+            "side": req.side,
+            "qty": req.qty,
+            "status": "demo_filled",
+            "filled_price": 100.0,
+        }
+    result = await mgr.place_equity_order(
+        wid, req.ticker.upper(), req.side, req.qty,
+        order_type=req.order_type, limit_price=req.limit_price
+    )
+    return result.get("result", {})
+
+
+@app.get("/robinhood/personalized/forecast")
+async def robinhood_personalized_forecast(token: Optional[str] = None):
+    """Generate personalized forecasts for the user's actual portfolio.
+
+    Fetches user's positions, runs ML predictions on each, and returns
+    actionable insights specific to their holdings.
+    """
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+
+    # Get portfolio
+    if mcp_demo_mode():
+        portfolio = await _demo_portfolio(wid)
+    else:
+        portfolio_resp = await mgr.get_portfolio(wid)
+        portfolio = portfolio_resp.get("result", {})
+
+    positions = portfolio.get("positions", [])
+    forecasts = []
+
+    for pos in positions:
+        ticker = pos.get("symbol") or pos.get("ticker")
+        if not ticker:
+            continue
+        try:
+            # Call ML engine for this ticker
+            ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
+            resp = httpx.post(
+                f"{ml_url}/predict",
+                json={"ticker": ticker, "include_trajectory": False},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                pred = resp.json()
+                current = pos.get("current_price") or pos.get("last_price") or 0
+                target = current * (1 + pred.get("predicted_return", 0))
+                position_value = current * pos.get("quantity", 0)
+                pnl_forecast = (target - current) * pos.get("quantity", 0)
+                forecasts.append({
+                    "ticker": ticker,
+                    "shares": pos.get("quantity", 0),
+                    "current_price": current,
+                    "target_price": round(target, 2),
+                    "predicted_return": pred.get("predicted_return", 0),
+                    "direction": pred.get("direction", "HOLD"),
+                    "confidence": pred.get("confidence", 0),
+                    "position_value": round(position_value, 2),
+                    "projected_pnl": round(pnl_forecast, 2),
+                    "action": (
+                        "STRONG SELL" if pred.get("direction") == "SELL" and pred.get("confidence", 0) > 0.5 else
+                        "SELL" if pred.get("direction") == "SELL" else
+                        "STRONG BUY" if pred.get("direction") == "BUY" and pred.get("confidence", 0) > 0.5 else
+                        "BUY" if pred.get("direction") == "BUY" else
+                        "HOLD"
+                    ),
+                })
+        except Exception as e:
+            forecasts.append({
+                "ticker": ticker,
+                "error": str(e),
+            })
+
+    # Compute portfolio-level insights
+    total_value = sum(f.get("position_value", 0) for f in forecasts if "position_value" in f)
+    total_projected = sum(f.get("projected_pnl", 0) for f in forecasts if "projected_pnl" in f)
+    bullish = [f for f in forecasts if f.get("direction") == "BUY"]
+    bearish = [f for f in forecasts if f.get("direction") == "SELL"]
+
+    return {
+        "workspace_id": wid,
+        "portfolio_value": round(total_value, 2),
+        "projected_change": round(total_projected, 2),
+        "projected_change_pct": round(total_projected / total_value * 100, 2) if total_value > 0 else 0,
+        "forecasts": forecasts,
+        "summary": {
+            "bullish_count": len(bullish),
+            "bearish_count": len(bearish),
+            "top_bullish": bullish[0]["ticker"] if bullish else None,
+            "top_bearish": bearish[0]["ticker"] if bearish else None,
+            "recommendation": (
+                f"Consider taking profits on {bearish[0]['ticker']}" if bearish and bearish[0].get("confidence", 0) > 0.4 else
+                f"Consider adding to {bullish[0]['ticker']}" if bullish and bullish[0].get("confidence", 0) > 0.4 else
+                "Hold current positions - no strong signals"
+            ),
+        },
+        "demo": mcp_demo_mode(),
+    }
+
+
+class LLMResearchRequest(BaseModel):
+    query: str
+    include_portfolio: bool = True
+
+
+@app.post("/robinhood/llm/research")
+async def robinhood_llm_research(req: LLMResearchRequest, token: Optional[str] = None):
+    """LLM-powered financial research with portfolio context.
+
+    Combines user's actual portfolio + market data + ML forecasts
+    into a personalized research response.
+    """
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+
+    context = {
+        "query": req.query,
+        "workspace_id": wid,
+    }
+
+    if req.include_portfolio:
+        if mcp_demo_mode():
+            portfolio = await _demo_portfolio(wid)
+        else:
+            portfolio_resp = await mgr.get_portfolio(wid)
+            portfolio = portfolio_resp.get("result", {})
+
+        positions = portfolio.get("positions", [])
+        if positions:
+            tickers = [p.get("symbol") for p in positions if p.get("symbol")]
+            context["portfolio"] = {
+                "total_value": sum(
+                    (p.get("current_price", 0) or 0) * (p.get("quantity", 0) or 0)
+                    for p in positions
+                ),
+                "positions": [
+                    {
+                        "ticker": p.get("symbol"),
+                        "shares": p.get("quantity"),
+                        "value": (p.get("current_price", 0) or 0) * (p.get("quantity", 0) or 0),
+                        "unrealized_pl": p.get("unrealized_pl", 0),
+                    }
+                    for p in positions
+                ],
+            }
+
+    # Build a structured research response based on the query
+    # In production: call LLM with this context
+    response = {
+        "query": req.query,
+        "context": context,
+        "response": _generate_research_response(req.query, context),
+        "demo": mcp_demo_mode(),
+    }
+    return response
+
+
+def _generate_research_response(query: str, context: dict) -> str:
+    """Generate a structured research response.
+
+    In production this would call an LLM with the context. For now,
+    we return a structured response based on the portfolio.
+    """
+    portfolio = context.get("portfolio", {})
+    positions = portfolio.get("positions", [])
+    total_value = portfolio.get("total_value", 0)
+
+    q = query.lower()
+
+    if "diversif" in q or "risk" in q:
+        if positions:
+            top = max(positions, key=lambda p: p.get("value", 0))
+            top_pct = (top.get("value", 0) / total_value * 100) if total_value > 0 else 0
+            return (
+                f"Your portfolio is concentrated in {top['ticker']} ({top_pct:.0f}%). "
+                f"Consider diversifying into uncorrelated assets. "
+                f"You have {len(positions)} positions with total value ${total_value:,.2f}."
+            )
+    elif "buy" in q or "invest" in q:
+        return (
+            f"Based on your ${total_value:,.2f} portfolio, consider adding exposure to "
+            f"underrepresented sectors. Your current holdings: " +
+            ", ".join(p.get("ticker", "?") for p in positions[:5])
+        )
+    elif "sell" in q or "trim" in q:
+        if positions:
+            losers = sorted(positions, key=lambda p: p.get("unrealized_pl", 0))[:2]
+            return (
+                f"Positions with largest unrealized losses: " +
+                ", ".join(f"{p['ticker']} (${p.get('unrealized_pl', 0):.2f})" for p in losers)
+            )
+    else:
+        return (
+            f"Portfolio summary: {len(positions)} positions, total value ${total_value:,.2f}. "
+            f"Ask me about diversification, risk, buying, or selling."
+        )

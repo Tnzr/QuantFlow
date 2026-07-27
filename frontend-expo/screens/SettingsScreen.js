@@ -5,6 +5,8 @@ import { getMlEngineUrl } from "../services/config";
 import { saveAlpacaKeys, getAlpacaKeys } from "../services/auth";
 import { storageSet, storageGet } from "../services/storage";
 import ScreenTitle from "../components/shared/ScreenTitle";
+import RobinhoodSettings from "../components/robinhood/RobinhoodSettings";
+import useRobinhood from "../hooks/useRobinhood";
 import THEME from "../theme/colors";
 
 export default function SettingsScreen({ token }) {
@@ -109,6 +111,7 @@ export default function SettingsScreen({ token }) {
   return (
     <ScrollView style={styles.wrap} contentContainerStyle={styles.content}>
       <ScreenTitle title="Settings" subtitle="API keys, risk params, and model selection" icon="S" />
+      <RobinhoodSettings useRobinhood={useRobinhood} token={token} />
       <Text style={styles.heading}>Alpaca Connection</Text>
       {backendAlpacaConfigured !== null && (
         <View style={[styles.statusBanner, { backgroundColor: backendAlpacaConfigured ? THEME.profitDim : THEME.lossDim, borderColor: backendAlpacaConfigured ? THEME.profit : THEME.loss }]}>
