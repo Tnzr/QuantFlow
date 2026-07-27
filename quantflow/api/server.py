@@ -2279,8 +2279,11 @@ def charts_forecast(ticker: str, period: str = "2y", interval: str = "1d", horiz
                 traj = ml.get("trajectory", [])
                 # interval -> minutes
                 interval_min = {"1m": 1, "5m": 5, "15m": 15, "1H": 60, "1D": 1440, "1W": 10080, "1M": 43200}.get(interval, 1440)
-                # Bounded return scaling: sqrt for long horizons, cap at +/-15% cumulative
-                ret_scale = 0.25 * math.sqrt(max(1, interval_min) / 1440.0)
+                # Return scaling: trajectory values are per-day returns.
+                # For intraday, scale down by fraction of day. For daily+, use as-is.
+                dt = interval_min / 1440.0 if interval_min > 0 else 1.0
+                # For 1D (dt=1), ret_scale=1.0. For 1H (dt=0.042), ret_scale=0.042.
+                ret_scale = min(1.0, dt)
                 horizon_steps = min(len(traj), horizon)
 
                 td_map = {
@@ -2296,35 +2299,46 @@ def charts_forecast(ticker: str, period: str = "2y", interval: str = "1d", horiz
 
                 import numpy as np
                 rng = np.random.default_rng(abs(hash(symbol + interval)) % (2**32))
-                
+
                 # Use proper Brownian motion: price *= exp((mu - sigma^2/2)*dt + sigma*sqrt(dt)*Z)
-                # For daily data, dt=1. For intraday, scale by interval
-                dt = interval_min / 1440.0 if interval_min > 0 else 1.0
                 sqrt_dt = math.sqrt(dt)
-                
+
                 # Typical daily volatility is 1-3% (0.01-0.03). Cap sigma to prevent absurd ranges.
                 # The trajectory sigma values need to be interpreted as daily volatility.
                 MAX_DAILY_VOL = 0.03  # 3% daily volatility max
-                
+
+                # The model outputs predicted_return as the MEAN per-step return over the horizon.
+                # The total predicted return over the full horizon is the sum of trajectory values.
+                # We use the trajectory sum as the total return target.
+                traj_sum = sum(float(t["mean_return"]) for t in traj[:horizon_steps]) if traj else 0
+                if not traj or abs(traj_sum) < 1e-8:
+                    # Fallback to predicted_return * horizon_steps
+                    total_predicted_return = float(ml.get("predicted_return", 0)) * horizon_steps
+                else:
+                    total_predicted_return = traj_sum
+
+                # Distribute the total return evenly across steps as the drift
+                step_drift = total_predicted_return / max(1, horizon_steps)
+
                 price = last_price
                 forecast = []
                 for i in range(horizon_steps):
-                    mu = float(traj[i]["mean_return"]) if i < len(traj) else 0.0
+                    # Use step drift (total return / horizon) for realistic compounding
+                    mu = step_drift
                     sigma = float(traj[i]["sigma"]) if i < len(traj) else 0.01
-                    
-                    # Scale mu by interval (returns scale linearly with time)
-                    mu_scaled = mu * ret_scale
-                    
+
+                    # For intraday, scale mu by dt (fraction of day)
+                    mu_step = mu * ret_scale
+
                     # Cap sigma to reasonable daily volatility, then scale by sqrt(dt)
-                    # sigma from trajectory is treated as daily vol, so for intraday we scale down
                     sigma_daily = min(sigma, MAX_DAILY_VOL)
                     sigma_scaled = sigma_daily * sqrt_dt
-                    
+
                     # Geometric Brownian motion step
                     z = rng.standard_normal()
-                    log_return = (mu_scaled - 0.5 * sigma_scaled**2) * dt + sigma_scaled * z
+                    log_return = (mu_step - 0.5 * sigma_scaled**2) * dt + sigma_scaled * z
                     price *= math.exp(log_return)
-                    
+
                     # Confidence band: ±2 sigma
                     band = 2 * sigma_scaled * price
                     forecast.append({
@@ -2556,11 +2570,17 @@ def portfolio_allocate(req: AllocatePortfolioRequest):
         allocator = PortfolioAllocator(constraints=constraints)
 
         # Optimize based on method
+        # Compute historical means for all methods (needed for expected return)
+        historical_means = {}
+        for ticker in ohlcv_dict.keys():
+            df = ohlcv_dict[ticker]
+            all_rets = df["close"].pct_change().dropna()
+            historical_means[ticker] = all_rets.mean() * 252 if len(all_rets) > 0 else 0.05
+
         if req.method == "mean_variance":
             # Estimate returns using recent signals + forecast
             signals_dict = {}
             forecasts_dict = {}
-            historical_means = {}
             
             for ticker in ohlcv_dict.keys():
                 df = ohlcv_dict[ticker]
@@ -2570,20 +2590,16 @@ def portfolio_allocate(req: AllocatePortfolioRequest):
                 
                 # Forecast: mean reversion assumption
                 forecasts_dict[ticker] = -0.01 if recent_ret > 0.15 else 0.02
-                
-                # Historical mean
-                all_rets = df["close"].pct_change().dropna()
-                historical_means[ticker] = all_rets.mean() * 252 if len(all_rets) > 0 else 0.05
 
             expected_returns = estimate_returns_from_signals(signals_dict, forecasts_dict, historical_means)
             result = allocator.optimize_mean_variance(expected_returns, risk_metrics, risk_free_rate=req.risk_free_rate)
 
         elif req.method == "hrp":
-            result = allocator.optimize_hrp(risk_metrics)
+            result = allocator.optimize_hrp(risk_metrics, historical_means=historical_means, risk_free_rate=req.risk_free_rate)
         elif req.method == "volatility_scaled":
-            result = allocator.optimize_volatility_scaled(risk_metrics)
+            result = allocator.optimize_volatility_scaled(risk_metrics, historical_means=historical_means, risk_free_rate=req.risk_free_rate)
         else:  # equal_weight
-            result = allocator.optimize_equal_weight(list(ohlcv_dict.keys()))
+            result = allocator.optimize_equal_weight(list(ohlcv_dict.keys()), historical_means=historical_means, risk_free_rate=req.risk_free_rate)
 
         # Validate weights sum to 1
         weight_sum = sum(result.weights.values())

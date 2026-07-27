@@ -4,15 +4,15 @@ import THEME from "../../theme/colors";
 import EmptyState from "../shared/EmptyState";
 
 function PositionRow({ item }) {
-  const pnl = item.unrealizedPnl || item.unrealized_pl || item.unrealized_intraday_pl || 0;
-  const pnlPct = item.unrealizedPnlPct || item.unrealized_plpc || item.unrealized_intraday_plpc || 0;
+  const pnl = item.unrealized_pnl || item.unrealizedPnl || item.unrealized_intraday_pl || 0;
+  const pnlPct = item.unrealized_pnl_pct || item.unrealizedPnlPct || item.unrealized_intraday_plpc || 0;
   const isPositive = pnl >= 0;
 
   return (
     <View style={styles.row}>
       <View style={styles.left}>
-        <Text style={styles.ticker}>{item.symbol || item.asset_id}</Text>
-        <Text style={styles.shares}>{item.qty || item.shares} shares</Text>
+        <Text style={styles.ticker}>{item.ticker || item.symbol || item.asset_id}</Text>
+        <Text style={styles.shares}>{item.shares || item.qty} shares</Text>
       </View>
       <View style={styles.right}>
         <Text style={[styles.pnl, { color: isPositive ? THEME.profit : THEME.loss }]}>

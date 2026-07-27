@@ -140,6 +140,8 @@ class PortfolioAllocator:
     def optimize_hrp(
         self,
         risk_metrics: RiskMetrics,
+        historical_means: Dict[str, float] = None,
+        risk_free_rate: float = 0.03,
     ) -> AllocationResult:
         """Hierarchical Risk Parity allocation.
 
@@ -152,11 +154,14 @@ class PortfolioAllocator:
         n = len(tickers)
 
         if n < 2:
+            hist_ret = (historical_means or {}).get(tickers[0], 0.0) if historical_means else 0.0
+            port_vol = risk_metrics.volatilities[tickers[0]]
+            sharpe = (hist_ret - risk_free_rate) / (port_vol + 1e-8) if port_vol > 0 else 0.0
             return AllocationResult(
                 {tickers[0]: 1.0},
-                0.0,
-                risk_metrics.volatilities[tickers[0]],
-                0.0,
+                hist_ret,
+                port_vol,
+                sharpe,
                 "hrp",
                 "Single asset."
             )
@@ -177,11 +182,18 @@ class PortfolioAllocator:
         weights_dict = {tickers[i]: float(weights[i]) for i in range(n)}
         port_vol = np.sqrt(np.sum([weights[i]**2 * vols[i]**2 for i in range(n)]))
 
+        # Compute expected return from historical means weighted by allocation
+        if historical_means:
+            port_ret = sum(weights_dict[t] * historical_means.get(t, 0.0) for t in tickers)
+        else:
+            port_ret = 0.0
+        sharpe = (port_ret - risk_free_rate) / (port_vol + 1e-8) if port_vol > 0 else 0.0
+
         return AllocationResult(
             weights=weights_dict,
-            expected_return=0.0,
+            expected_return=port_ret,
             expected_volatility=port_vol,
-            sharpe_ratio=0.0,
+            sharpe_ratio=sharpe,
             method="hrp",
             rationale="Hierarchical Risk Parity: equal risk per cluster, robust to correlation estimation error.",
         )
@@ -189,15 +201,24 @@ class PortfolioAllocator:
     def optimize_equal_weight(
         self,
         tickers: List[str],
+        historical_means: Dict[str, float] = None,
+        risk_free_rate: float = 0.03,
     ) -> AllocationResult:
         """Simple equal-weight allocation."""
         weight = 1.0 / len(tickers)
         weights = {t: weight for t in tickers}
+        if historical_means:
+            port_ret = sum(weight * historical_means.get(t, 0.0) for t in tickers)
+        else:
+            port_ret = 0.0
+        # Equal weight has no specific volatility from risk_metrics, estimate from historical
+        port_vol = 0.0
+        sharpe = 0.0
         return AllocationResult(
             weights=weights,
-            expected_return=0.0,
-            expected_volatility=0.0,
-            sharpe_ratio=0.0,
+            expected_return=port_ret,
+            expected_volatility=port_vol,
+            sharpe_ratio=sharpe,
             method="equal_weight",
             rationale="Equal-weight baseline: 1/N allocation.",
         )
@@ -205,6 +226,8 @@ class PortfolioAllocator:
     def optimize_volatility_scaled(
         self,
         risk_metrics: RiskMetrics,
+        historical_means: Dict[str, float] = None,
+        risk_free_rate: float = 0.03,
     ) -> AllocationResult:
         """Allocate inverse to volatility (risk parity approximation)."""
         tickers = list(risk_metrics.volatilities.keys())
@@ -221,11 +244,18 @@ class PortfolioAllocator:
         weights_dict = {tickers[i]: float(weights_constrained[i]) for i in range(len(tickers))}
         port_vol = np.sqrt(np.sum([weights_constrained[i]**2 * vols[i]**2 for i in range(len(tickers))]))
 
+        # Compute expected return from historical means
+        if historical_means:
+            port_ret = sum(weights_constrained[i] * historical_means.get(tickers[i], 0.0) for i in range(len(tickers)))
+        else:
+            port_ret = 0.0
+        sharpe = (port_ret - risk_free_rate) / (port_vol + 1e-8) if port_vol > 0 else 0.0
+
         return AllocationResult(
             weights=weights_dict,
-            expected_return=0.0,
+            expected_return=port_ret,
             expected_volatility=port_vol,
-            sharpe_ratio=0.0,
+            sharpe_ratio=sharpe,
             method="volatility_scaled",
             rationale="Risk parity approximation: allocate inverse to volatility.",
         )

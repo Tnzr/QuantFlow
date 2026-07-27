@@ -68,7 +68,7 @@ function MarketTile({ ticker, timeframe, token, onRemove }) {
       {error && <ErrorBanner message={error} onRetry={load} />}
       {loading && !ohlcv.length && <LoadingSpinner />}
       {(ohlcv.length > 0 && (
-        <CandlestickChart data={ohlcv} forecast={forecast?.forecast} showForecast={showForecast} />
+        <CandlestickChart data={ohlcv} forecast={forecast?.forecast} showForecast={showForecast} signal={mlSignal} />
       )) || (loading && <LoadingSpinner />)}
     </View>
   );

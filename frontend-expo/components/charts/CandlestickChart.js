@@ -50,15 +50,39 @@ function Candlestick(props) {
   const bodyTop = isUp ? pClose : pOpen;
   const bodyH = Math.max(1, Math.abs(pClose - pOpen));
 
+  // Render signal marker if present
+  const signal = payload.signal;
+  let signalMarker = null;
+  if (signal === "BUY") {
+    // Green up arrow below the candle
+    const arrowY = pLow + 12;
+    signalMarker = (
+      <g>
+        <polygon points={`${centerX},${arrowY - 8} ${centerX + 5},${arrowY} ${centerX - 5},${arrowY}`} fill={THEME.profit} />
+        <text x={centerX} y={arrowY + 10} textAnchor="middle" fill={THEME.profit} fontSize={9} fontWeight="800">BUY</text>
+      </g>
+    );
+  } else if (signal === "SELL") {
+    // Red down arrow above the candle
+    const arrowY = pHigh - 12;
+    signalMarker = (
+      <g>
+        <polygon points={`${centerX},${arrowY + 8} ${centerX + 5},${arrowY} ${centerX - 5},${arrowY}`} fill={THEME.loss} />
+        <text x={centerX} y={arrowY - 4} textAnchor="middle" fill={THEME.loss} fontSize={9} fontWeight="800">SELL</text>
+      </g>
+    );
+  }
+
   return (
     <g>
       <line x1={centerX} y1={pHigh} x2={centerX} y2={pLow} stroke={color} strokeWidth={1} />
       <rect x={centerX - bodyWidth / 2} y={bodyTop} width={bodyWidth} height={bodyH} fill={color} />
+      {signalMarker}
     </g>
   );
 }
 
-export default function CandlestickChart({ data, forecast, showForecast }) {
+export default function CandlestickChart({ data, forecast, showForecast, signal }) {
   const chartData = useMemo(() => {
     if (!data || data.length === 0) return { combined: [], dMin: 0, dMax: 1, actualBars: [] };
 
@@ -73,7 +97,16 @@ export default function CandlestickChart({ data, forecast, showForecast }) {
       sma20: d.sma20 != null ? Number(d.sma20) : null,
       sma50: d.sma50 != null ? Number(d.sma50) : null,
       barType: "actual",
+      signal: null,
     }));
+
+    // Mark the last bar with the ML signal if provided
+    if (signal && raw.length > 0) {
+      const sigDir = signal.direction || signal.signal;
+      if (sigDir === "BUY" || sigDir === "SELL" || sigDir === "HOLD") {
+        raw[raw.length - 1].signal = sigDir;
+      }
+    }
 
     let allPrices = raw.flatMap(d => [d.high, d.low, d.open, d.close]);
 
@@ -93,6 +126,7 @@ export default function CandlestickChart({ data, forecast, showForecast }) {
         pred: Number(f.price) || 0,
         upper: f.upper != null ? Number(f.upper) : null,
         lower: f.lower != null ? Number(f.lower) : null,
+        signal: null,
       }));
       allPrices = [...allPrices, ...fData.flatMap(d => [d.high, d.low, d.open, d.close, d.pred || 0, d.upper || 0, d.lower || 0])];
     }
@@ -109,7 +143,7 @@ export default function CandlestickChart({ data, forecast, showForecast }) {
     }));
 
     return { combined: result, dMin, dMax, actualBars: raw };
-  }, [data, forecast, showForecast]);
+  }, [data, forecast, showForecast, signal]);
 
   const { combined, dMin, dMax, actualBars } = chartData;
 

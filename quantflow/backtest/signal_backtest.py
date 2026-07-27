@@ -163,11 +163,13 @@ def backtest_short_term(
         trend_ok = close > sma200
 
     # ── Simulate trades ──────────────────────────────────────────────────
-    equity = [1.0]
+    # Track equity at every bar so the curve is continuous
+    equity = [1.0]  # equity at bar 0
     trades_list = []
     in_position = False
     entry_idx = 0
     entry_price = 0.0
+    current_equity = 1.0  # tracks portfolio value bar-by-bar
 
     for i in range(50, len(close)):
         if not in_position:
@@ -176,20 +178,12 @@ def backtest_short_term(
             if use_ml_forecast and ml_pred:
                 ml_dir = ml_pred.get("direction", "HOLD")
                 ml_conf = float(ml_pred.get("confidence", 0) or 0)
-                # Design decision: When ML direction is SELL, we use a very strict RSI threshold (0.5x)
-                # to avoid going long against a bearish signal. This may result in 0 trades for some tickers.
-                # Users who want more trades can:
-                #   1. Use RSI-only mode (use_ml_forecast=False)
-                #   2. Increase entry_rsi_threshold parameter
-                #   3. Modify the 0.5 multiplier to 0.7 (allows RSI < 21 instead of < 15)
                 if ml_dir == "SELL":
-                    # ML bearish: only enter on deep oversold
                     entry_threshold = entry_rsi_threshold * 0.5
                     rsi_ok = rsi.iloc[i] < entry_threshold and ml_conf < 0.55
                 elif ml_dir == "BUY":
-                    # ML bullish: enter on mild pullback or even pure ML when confidence high
                     if ml_conf >= ml_min_confidence and abs(float(ml_pred.get("predicted_return",0))) > ml_threshold:
-                        rsi_ok = True  # pure ML entry
+                        rsi_ok = True
                     else:
                         rsi_ok = rsi.iloc[i] < entry_rsi_threshold * 1.4
                 else:
@@ -212,13 +206,10 @@ def backtest_short_term(
             ret = (current_price - entry_price) / entry_price
             exit_reason = None
 
-            # Time exit
             if hold >= max_hold_days:
                 exit_reason = "time"
-            # Stop loss
             elif stop_loss_pct > 0 and ret <= -stop_loss_pct:
                 exit_reason = "stop_loss"
-            # Take profit
             elif take_profit_pct > 0 and ret >= take_profit_pct:
                 exit_reason = "take_profit"
 
@@ -237,9 +228,16 @@ def backtest_short_term(
                     "ml_direction": ml_pred.get("direction") if ml_pred else None,
                     "ml_confidence": ml_pred.get("confidence") if ml_pred else None,
                 })
-                equity.append(equity[-1] * (1.0 + ret))
+                current_equity = current_equity * (1.0 + ret)
                 in_position = False
-                continue
+
+        # Track equity at every bar
+        if in_position:
+            unrealized = (float(close.iloc[i]) - entry_price) / entry_price
+            bar_equity = current_equity * (1.0 + unrealized)
+        else:
+            bar_equity = current_equity
+        equity.append(bar_equity)
 
     # Close any open position at the end
     if in_position:
@@ -259,10 +257,19 @@ def backtest_short_term(
                     "ml_direction": ml_pred.get("direction") if ml_pred else None,
                     "ml_confidence": ml_pred.get("confidence") if ml_pred else None,
         })
-        equity.append(equity[-1] * (1.0 + ret))
+        current_equity = current_equity * (1.0 + ret)
+        if equity:
+            equity[-1] = current_equity
 
-    # Fill equity to match date range
-    eq_series = pd.Series(equity, index=close.index[:len(equity)])
+    # Build equity series aligned to close index
+    # equity[0] = 1.0 at bar 0, equity[i] tracks portfolio value at bar i+50 (first tradable bar)
+    eq_index = close.index[:50] if len(close) >= 50 else close.index
+    eq_values = [1.0] * len(eq_index)
+    for i, val in enumerate(equity[1:]):
+        bar_idx = 50 + i
+        if bar_idx < len(close.index):
+            eq_values.append(val)
+    eq_series = pd.Series(equity[:len(close.index)], index=close.index[:len(equity)])
     eq_series = eq_series.reindex(close.index).ffill()
     eq_df = eq_series.reset_index()
     eq_df.columns = ["date", "equity"]
