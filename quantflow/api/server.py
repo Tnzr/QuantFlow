@@ -2865,26 +2865,64 @@ async def robinhood_status(token: Optional[str] = None):
 
 @app.get("/robinhood/oauth/url")
 async def robinhood_oauth_url(token: Optional[str] = None, state: Optional[str] = None):
-    """Get OAuth authorization URL for Robinhood connection."""
+    """Get OAuth authorization URL for Robinhood connection.
+
+    Returns URL to open in browser, plus PKCE state for callback verification.
+    """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
+    oauth_info = mgr.get_oauth_url(wid, state=state)
     return {
-        "url": mgr.get_oauth_url(wid, state=state),
+        "url": oauth_info["url"],
+        "state": oauth_info["state"],
+        "code_verifier": oauth_info["code_verifier"],
+        "redirect_uri": oauth_info["redirect_uri"],
         "workspace_id": wid,
+        "client_id_configured": oauth_info["client_id_configured"],
     }
 
 
 class OAuthCallbackRequest(BaseModel):
     code: str
     state: Optional[str] = None
+    code_verifier: Optional[str] = None
 
 
 @app.post("/robinhood/oauth/callback")
 async def robinhood_oauth_callback(req: OAuthCallbackRequest, token: Optional[str] = None):
-    """Complete OAuth flow with authorization code."""
+    """Complete OAuth flow with authorization code.
+
+    If code_verifier is provided and Robinhood credentials are configured,
+    exchanges the code for a real access token. Otherwise uses simulated token.
+    """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
-    client = mgr.complete_oauth(wid, req.code)
+    client = await mgr.complete_oauth(wid, req.code, code_verifier=req.code_verifier)
+    return {
+        "connected": client.enabled,
+        "workspace_id": wid,
+        "scopes": client.scopes,
+        "authenticated": client.is_authenticated,
+        "error": client.last_error,
+    }
+
+
+class ManualTokenRequest(BaseModel):
+    access_token: str
+    refresh_token: Optional[str] = None
+    expires_in: int = 3600
+
+
+@app.post("/robinhood/oauth/manual-token")
+async def robinhood_oauth_manual_token(req: ManualTokenRequest, token: Optional[str] = None):
+    """Set a manually provided OAuth token.
+
+    Used when the user completes OAuth externally (e.g., via browser)
+    and pastes the token into the app.
+    """
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+    client = mgr.set_manual_token(wid, req.access_token, refresh_token=req.refresh_token, expires_in=req.expires_in)
     return {
         "connected": True,
         "workspace_id": wid,

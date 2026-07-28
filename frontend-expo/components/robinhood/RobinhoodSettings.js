@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, Pressable, StyleSheet, Switch } from "react-native";
+import { View, Text, Pressable, StyleSheet, Switch, TextInput } from "react-native";
 import THEME from "../../theme/colors";
 
 /**
  * Robinhood MCP connection panel for Settings.
- * Handles OAuth flow, connection status, trade opt-in, watchlist import.
+ * Handles OAuth flow (popup), manual token entry, connection status, trade opt-in.
  */
 export default function RobinhoodSettings({ useRobinhood, token }) {
   const {
@@ -15,6 +15,7 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
     importWatchlist,
     error,
     setError: setRobinhoodError,
+    setManualToken,
   } = useRobinhood(token);
 
   const [tradeEnabled, setTradeEnabled] = useState(false);
@@ -22,6 +23,10 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [showManualToken, setShowManualToken] = useState(false);
+  const [manualAccessToken, setManualAccessToken] = useState("");
+  const [manualRefreshToken, setManualRefreshToken] = useState("");
+  const [manualSubmitting, setManualSubmitting] = useState(false);
 
   useEffect(() => {
     if (status?.scopes) {
@@ -53,6 +58,27 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
     }
     // Auto-reset connecting state after 3 seconds if not already reset
     setTimeout(() => setConnecting(false), 3000);
+  };
+
+  const handleManualToken = async () => {
+    setManualSubmitting(true);
+    setRobinhoodError(null);
+    try {
+      const ok = await setManualToken(
+        manualAccessToken.trim(),
+        manualRefreshToken.trim() || null,
+        3600,
+      );
+      if (ok) {
+        setShowManualToken(false);
+        setManualAccessToken("");
+        setManualRefreshToken("");
+      }
+    } catch (e) {
+      // error handled in hook
+    } finally {
+      setManualSubmitting(false);
+    }
   };
 
   const confirmDisconnect = async () => {
@@ -183,6 +209,59 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
               : "Connect Robinhood Account"}
           </Text>
         </Pressable>
+      )}
+
+      {!isConnected && (
+        <View style={styles.oauthSection}>
+          <Pressable
+            style={styles.manualTokenToggle}
+            onPress={() => setShowManualToken(!showManualToken)}
+          >
+            <Text style={styles.manualTokenToggleText}>
+              {showManualToken ? "▼ Hide Manual Token Entry" : "▶ Have an OAuth token? Enter it manually"}
+            </Text>
+          </Pressable>
+          {showManualToken && (
+            <View style={styles.manualTokenBox}>
+              <Text style={styles.manualTokenTitle}>Manual OAuth Token</Text>
+              <Text style={styles.manualTokenHelp}>
+                Complete OAuth in your browser, then paste the access token here.
+                Get your token from robinhood.com → Settings → Agentic Trading → Connect Agent.
+              </Text>
+              <Text style={styles.label}>Access Token</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Paste access token here"
+                placeholderTextColor={THEME.neutral}
+                value={manualAccessToken}
+                onChangeText={setManualAccessToken}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Text style={styles.label}>Refresh Token (optional)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Paste refresh token here"
+                placeholderTextColor={THEME.neutral}
+                value={manualRefreshToken}
+                onChangeText={setManualRefreshToken}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Pressable
+                style={[styles.manualTokenBtn, manualSubmitting && { opacity: 0.5 }]}
+                onPress={handleManualToken}
+                disabled={manualSubmitting || !manualAccessToken.trim()}
+              >
+                <Text style={styles.manualTokenBtnText}>
+                  {manualSubmitting ? "Saving..." : "Save Token"}
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
       )}
 
       {isConnected && (
@@ -362,4 +441,67 @@ const styles = StyleSheet.create({
   },
   confirmDangerText: { color: THEME.textBright, fontWeight: "700", fontSize: 12 },
   error: { color: THEME.loss, fontSize: 11, marginTop: 6 },
+  oauthSection: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: THEME.border,
+  },
+  manualTokenToggle: {
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  manualTokenToggleText: {
+    color: THEME.accent,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  manualTokenBox: {
+    backgroundColor: THEME.surfaceLight,
+    borderRadius: 6,
+    padding: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: THEME.border,
+  },
+  manualTokenTitle: {
+    color: THEME.text,
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  manualTokenHelp: {
+    color: THEME.textMuted,
+    fontSize: 10,
+    marginBottom: 10,
+    lineHeight: 14,
+  },
+  label: {
+    color: THEME.textMuted,
+    fontSize: 11,
+    fontWeight: "600",
+    marginBottom: 4,
+  },
+  input: {
+    backgroundColor: THEME.bg,
+    borderWidth: 1,
+    borderColor: THEME.border,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: THEME.text,
+    fontSize: 12,
+    marginBottom: 10,
+  },
+  manualTokenBtn: {
+    backgroundColor: THEME.accent,
+    borderRadius: 6,
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  manualTokenBtnText: {
+    color: THEME.textBright,
+    fontWeight: "700",
+    fontSize: 12,
+  },
 });

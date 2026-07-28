@@ -37,13 +37,18 @@ export default function useRobinhood(token) {
         await refreshStatus();
         return true;
       }
-      // Real OAuth: open Robinhood in new window, poll for completion
-      const { url } = await apiGet("/robinhood/oauth/url", token);
+      // Real OAuth: get URL with PKCE, open in popup, poll for callback
+      const oauthInfo = await apiGet("/robinhood/oauth/url", token);
       if (typeof window !== "undefined") {
-        const popup = window.open(url, "_blank", "width=600,height=700");
+        const popup = window.open(oauthInfo.url, "_blank", "width=600,height=700");
         if (!popup) {
           setError("Popup blocked. Please allow popups for Robinhood OAuth.");
           return false;
+        }
+        // Store PKCE info for callback
+        if (oauthInfo.code_verifier) {
+          localStorage.setItem("robinhood_code_verifier", oauthInfo.code_verifier);
+          localStorage.setItem("robinhood_state", oauthInfo.state);
         }
         // Poll for popup close
         const pollInterval = setInterval(async () => {
@@ -55,11 +60,50 @@ export default function useRobinhood(token) {
         // Auto-stop polling after 5 minutes
         setTimeout(() => clearInterval(pollInterval), 300000);
       } else {
-        console.log("Open this URL to connect:", url);
+        console.log("Open this URL to connect:", oauthInfo.url);
       }
       return true;
     } catch (e) {
       setError(e.message || "Connection failed");
+      return false;
+    }
+  }, [token, refreshStatus]);
+
+  // Handle OAuth callback (called from popup redirect)
+  const handleOAuthCallback = useCallback(async (code, codeVerifier) => {
+    try {
+      setError(null);
+      const payload = { code };
+      if (codeVerifier) payload.code_verifier = codeVerifier;
+      const result = await apiPost("/robinhood/oauth/callback", payload, token);
+      if (result.connected) {
+        localStorage.removeItem("robinhood_code_verifier");
+        localStorage.removeItem("robinhood_state");
+        await refreshStatus();
+        return true;
+      } else {
+        setError(result.error || "OAuth callback failed");
+        return false;
+      }
+    } catch (e) {
+      setError(e.message || "OAuth callback failed");
+      return false;
+    }
+  }, [token, refreshStatus]);
+
+  // Manual token entry (for OAuth completed externally)
+  const setManualToken = useCallback(async (accessToken, refreshToken = null, expiresIn = 3600) => {
+    try {
+      setError(null);
+      await apiPost("/robinhood/oauth/manual-token", {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        expires_in: expiresIn,
+      }, token);
+      await refreshStatus();
+      return true;
+    } catch (e) {
+      setError(e.message || "Failed to set token");
       return false;
     }
   }, [token, refreshStatus]);
@@ -216,5 +260,7 @@ export default function useRobinhood(token) {
     llmResearch,
     refreshStatus,
     setError,
+    handleOAuthCallback,
+    setManualToken,
   };
 }

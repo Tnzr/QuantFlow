@@ -121,32 +121,122 @@ class RobinhoodMCPManager:
             self._clients[workspace_id] = WorkspaceMCPClient(workspace_id=workspace_id)
         return self._clients[workspace_id]
 
-    def get_oauth_url(self, workspace_id: str, state: Optional[str] = None) -> str:
-        """Generate OAuth authorization URL.
+    def get_oauth_url(self, workspace_id: str, state: Optional[str] = None) -> dict:
+        """Generate OAuth authorization URL with PKCE.
 
-        In production this would use Robinhood's actual OAuth client_id.
-        For local dev / sandbox, we return a placeholder URL.
+        Returns dict with:
+        - url: the authorization URL to open in browser
+        - state: the state parameter for CSRF protection
+        - code_verifier: PKCE code verifier (must be sent to callback)
+        - redirect_uri: the callback URL to register
         """
-        state = state or str(uuid.uuid4())
-        # Real OAuth URL would be:
-        # https://robinhood.com/oauth/authorize?client_id=...&redirect_uri=...&scope=read+trade&state=...
-        return f"https://robinhood.com/oauth/authorize?client_id=quantflow&redirect_uri=quantflow://robinhood/callback&scope=read&state={state}&workspace={workspace_id}"
+        import secrets
+        import base64
+        import hashlib
 
-    def complete_oauth(self, workspace_id: str, code: str) -> WorkspaceMCPClient:
+        state = state or secrets.token_urlsafe(32)
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode("utf-8")
+
+        # Robinhood OAuth endpoints (from their Agentic Trading docs)
+        # The redirect_uri must be registered in your Robinhood Agentic account
+        redirect_uri = os.environ.get("ROBINHOOD_REDIRECT_URI", "quantflow://robinhood/callback")
+        client_id = os.environ.get("ROBINHOOD_CLIENT_ID", "")
+
+        if client_id:
+            # Real OAuth with registered client
+            params = {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "read watchlist trade",
+                "state": state,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "workspace": workspace_id,
+            }
+            from urllib.parse import urlencode
+            url = f"https://robinhood.com/oauth/authorize?{urlencode(params)}"
+        else:
+            # No client_id configured — provide manual instructions
+            url = f"https://robinhood.com/oauth/authorize?response_type=code&scope=read+watchlist&state={state}"
+
+        return {
+            "url": url,
+            "state": state,
+            "code_verifier": code_verifier,
+            "redirect_uri": redirect_uri,
+            "client_id_configured": bool(client_id),
+        }
+
+    async def complete_oauth(self, workspace_id: str, code: str, code_verifier: Optional[str] = None) -> WorkspaceMCPClient:
         """Exchange OAuth code for access token.
 
-        In production: POST to https://api.robinhood.com/oauth/token
-        For now: simulated token with 1-hour expiry
+        In production: POST to Robinhood's token endpoint with PKCE.
         """
         client = self.get_client(workspace_id)
-        # Simulated token exchange. In production:
-        # resp = httpx.post("https://api.robinhood.com/oauth/token", json={
-        #   "grant_type": "authorization_code", "code": code,
-        #   "client_id": ..., "client_secret": ..., "redirect_uri": ...
-        # })
+        redirect_uri = os.environ.get("ROBINHOOD_REDIRECT_URI", "quantflow://robinhood/callback")
+        client_id = os.environ.get("ROBINHOOD_CLIENT_ID", "")
+        client_secret = os.environ.get("ROBINHOOD_CLIENT_SECRET", "")
+
+        if client_id and client_secret and code_verifier:
+            # Real token exchange with PKCE
+            try:
+                resp = httpx.post(
+                    "https://api.robinhood.com/oauth/token",
+                    json={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "code_verifier": code_verifier,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    token_data = resp.json()
+                    client.access_token = token_data.get("access_token")
+                    client.refresh_token = token_data.get("refresh_token")
+                    client.expires_at = time.time() + token_data.get("expires_in", 3600)
+                    client.enabled = True
+                    client.scopes = ["read", "watchlist"]
+                    if "trade" in (token_data.get("scope", "") or ""):
+                        client.scopes.append("trade")
+                    client.last_sync = time.time()
+                    client.last_error = None
+                    self._save_tokens()
+                    return client
+                else:
+                    client.last_error = f"OAuth exchange failed: {resp.status_code} {resp.text[:200]}"
+                    return client
+            except Exception as e:
+                client.last_error = f"OAuth exchange error: {str(e)}"
+                return client
+
+        # No credentials configured — simulated token for local dev
         client.access_token = f"rh_sim_{uuid.uuid4().hex[:16]}"
         client.refresh_token = f"rh_ref_{uuid.uuid4().hex[:16]}"
         client.expires_at = time.time() + 3600  # 1 hour
+        client.enabled = True
+        client.scopes = ["read", "watchlist"]
+        client.last_sync = time.time()
+        client.last_error = None
+        self._save_tokens()
+        return client
+
+    def set_manual_token(self, workspace_id: str, access_token: str, refresh_token: Optional[str] = None, expires_in: int = 3600) -> WorkspaceMCPClient:
+        """Set a manually provided OAuth token.
+
+        Used when the user completes OAuth externally (e.g., via browser)
+        and pastes the token into the app.
+        """
+        client = self.get_client(workspace_id)
+        client.access_token = access_token
+        client.refresh_token = refresh_token
+        client.expires_at = time.time() + expires_in
         client.enabled = True
         client.scopes = ["read", "watchlist"]
         client.last_sync = time.time()
