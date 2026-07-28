@@ -2882,6 +2882,66 @@ class OAuthCallbackRequest(BaseModel):
     code_verifier: str
 
 
+@app.get("/robinhood/oauth/callback")
+async def robinhood_oauth_callback_get(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    token: Optional[str] = None,
+):
+    """OAuth callback handler for GET requests (from Robinhood redirect).
+
+    Robinhood redirects here with ?code=xxx&state=yyy after user authorization.
+    We need to exchange the code for a token and then redirect the user back
+    to the app with a success/failure message.
+    """
+    wid = _get_workspace_id(token)
+    mgr = get_mcp_manager()
+
+    # If there's an error from Robinhood
+    if error:
+        return {
+            "connected": False,
+            "error": f"OAuth authorization failed: {error}",
+            "workspace_id": wid,
+        }
+
+    # If no code, this is not a valid callback
+    if not code:
+        return {
+            "connected": False,
+            "error": "No authorization code received",
+            "workspace_id": wid,
+        }
+
+    # Retrieve code_verifier from PKCE store (stored during challenge)
+    code_verifier = ""
+    if state:
+        pkce_data = mgr._pkce_store.get(state)
+        if pkce_data:
+            code_verifier = pkce_data.get("code_verifier", "")
+
+    # Exchange code for token
+    client = await mgr.complete_oauth(wid, code, state or "", code_verifier)
+
+    # Redirect back to app with result
+    if client.enabled:
+        # In a real app, we'd redirect to a success page
+        # For now, return JSON that the popup can read
+        return {
+            "connected": True,
+            "workspace_id": wid,
+            "scopes": client.scopes,
+            "message": "OAuth completed successfully. You can close this window.",
+        }
+    else:
+        return {
+            "connected": False,
+            "workspace_id": wid,
+            "error": client.last_error or "Token exchange failed",
+        }
+
+
 @app.post("/robinhood/oauth/callback")
 async def robinhood_oauth_callback(req: OAuthCallbackRequest, token: Optional[str] = None):
     """Complete OAuth flow with authorization code.

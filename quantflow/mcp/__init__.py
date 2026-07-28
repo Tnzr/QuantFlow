@@ -124,6 +124,7 @@ class RobinhoodMCPManager:
     def __init__(self):
         self._clients: Dict[str, WorkspaceMCPClient] = {}
         self._cached_client_id: Optional[str] = None
+        self._pkce_store: Dict[str, Dict[str, Any]] = {}
         self._load_tokens()
         self._load_client_id()
 
@@ -271,6 +272,13 @@ class RobinhoodMCPManager:
             hashlib.sha256(code_verifier.encode()).digest()
         ).rstrip(b"=").decode("utf-8")
 
+        # Store code_verifier keyed by state for later retrieval in callback
+        self._pkce_store[state] = {
+            "code_verifier": code_verifier,
+            "workspace_id": workspace_id,
+            "created_at": time.time(),
+        }
+
         # Construct authorize URL using Robinhood's actual endpoint
         params = {
             "client_id": client_id,
@@ -300,6 +308,14 @@ class RobinhoodMCPManager:
         """
         client = self.get_client(workspace_id)
         client_id = await self._register_client()
+
+        # Retrieve code_verifier from store if not provided
+        if not code_verifier and state:
+            pkce_data = self._pkce_store.get(state)
+            if pkce_data:
+                code_verifier = pkce_data.get("code_verifier")
+                # Clean up after use
+                del self._pkce_store[state]
 
         try:
             async with httpx.AsyncClient(timeout=15) as http:
