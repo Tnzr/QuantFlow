@@ -26,8 +26,8 @@ export default function useRobinhood(token) {
   }, [token]);
 
   const connect = useCallback(async () => {
-    setError(null);
     try {
+      setError(null);
       // Check current demo status first
       const status = await apiGet("/robinhood/status", token);
       if (status.demo_mode) {
@@ -35,7 +35,7 @@ export default function useRobinhood(token) {
         // This skips the Robinhood login flow and uses simulated data
         await apiPost("/robinhood/oauth/callback", { code: "demo_code_" + Date.now() }, token);
         await refreshStatus();
-        return;
+        return true;
       }
       // Real OAuth: open Robinhood in new window, poll for completion
       const { url } = await apiGet("/robinhood/oauth/url", token);
@@ -43,7 +43,7 @@ export default function useRobinhood(token) {
         const popup = window.open(url, "_blank", "width=600,height=700");
         if (!popup) {
           setError("Popup blocked. Please allow popups for Robinhood OAuth.");
-          return;
+          return false;
         }
         // Poll for popup close
         const pollInterval = setInterval(async () => {
@@ -52,11 +52,15 @@ export default function useRobinhood(token) {
             await refreshStatus();
           }
         }, 1000);
+        // Auto-stop polling after 5 minutes
+        setTimeout(() => clearInterval(pollInterval), 300000);
       } else {
         console.log("Open this URL to connect:", url);
       }
+      return true;
     } catch (e) {
-      setError(e.message);
+      setError(e.message || "Connection failed");
+      return false;
     }
   }, [token, refreshStatus]);
 
@@ -211,5 +215,6 @@ export default function useRobinhood(token) {
     placeOrder,
     llmResearch,
     refreshStatus,
+    setError,
   };
 }

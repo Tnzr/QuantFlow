@@ -14,6 +14,7 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
     setTradeOptIn,
     importWatchlist,
     error,
+    setError: setRobinhoodError,
   } = useRobinhood(token);
 
   const [tradeEnabled, setTradeEnabled] = useState(false);
@@ -28,6 +29,13 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
     }
   }, [status]);
 
+  // Auto-reset connecting state when connection completes
+  useEffect(() => {
+    if (connecting && (status?.connected || status?.last_error)) {
+      setConnecting(false);
+    }
+  }, [status, connecting]);
+
   const isConnected = status?.connected;
   const isDemo = status?.demo_mode;
 
@@ -37,14 +45,14 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
       return;
     }
     setConnecting(true);
-    setError(null);
+    setRobinhoodError(null);
     try {
       await connect();
     } catch (e) {
       // error handled in hook
-    } finally {
-      setConnecting(false);
     }
+    // Auto-reset connecting state after 3 seconds if not already reset
+    setTimeout(() => setConnecting(false), 3000);
   };
 
   const confirmDisconnect = async () => {
@@ -104,8 +112,18 @@ export default function RobinhoodSettings({ useRobinhood, token }) {
 
       {isDemo && (
         <View style={styles.demoBanner}>
+          <Text style={styles.demoTitle}>⚠ Demo Mode</Text>
           <Text style={styles.demoText}>
-            ⚠ Demo Mode — using simulated portfolio data. Set ROBINHOOD_MCP_DEMO=false and configure OAuth credentials for real connections.
+            Using simulated portfolio data. The "Connect" button will auto-complete OAuth with demo credentials — no real Robinhood login required.
+          </Text>
+          <Text style={styles.demoSetupTitle}>For real Robinhood connection:</Text>
+          <Text style={styles.demoSetupText}>
+            1. Register as a developer at robinhood.com/us/en/support/agentic-trading{"\n"}
+            2. Add to your .env file:{"\n"}
+               {"   "}ROBINHOOD_MCP_DEMO=false{"\n"}
+               {"   "}ROBINHOOD_CLIENT_ID=your_client_id{"\n"}
+               {"   "}ROBINHOOD_CLIENT_SECRET=your_client_secret{"\n"}
+            3. Restart with: make down && make up
           </Text>
         </View>
       )}
@@ -253,7 +271,10 @@ const styles = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: THEME.warn,
   },
-  demoText: { color: THEME.warn, fontSize: 10, lineHeight: 14 },
+  demoTitle: { color: THEME.warn, fontSize: 12, fontWeight: "700", marginBottom: 4 },
+  demoText: { color: THEME.textMuted, fontSize: 10, lineHeight: 14, marginBottom: 6 },
+  demoSetupTitle: { color: THEME.text, fontSize: 10, fontWeight: "700", marginBottom: 2 },
+  demoSetupText: { color: THEME.textMuted, fontSize: 9, lineHeight: 13, fontFamily: "monospace" },
   detailsBox: {
     backgroundColor: THEME.bg,
     borderRadius: 6,
