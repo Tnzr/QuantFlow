@@ -200,7 +200,6 @@ export default function useRobinhood(token) {
     connect,
     disconnect,
     setTradeOptIn,
-    completeWithDemoCode,
     fetchPortfolio,
     fetchOrders,
     fetchWatchlist,
