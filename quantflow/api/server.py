@@ -71,6 +71,84 @@ from ..mcp import get_mcp_manager, _demo_portfolio, _demo_quote, is_demo_mode as
 app = FastAPI(title="QuantFlow API", version="0.1.0")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Persistent Error Log
+# ═══════════════════════════════════════════════════════════════════════
+
+import logging
+import threading
+
+_error_log: list[dict] = []
+_error_log_lock = threading.Lock()
+MAX_ERROR_LOG_SIZE = 500
+
+_error_logger = logging.getLogger("quantflow.api.errors")
+_error_logger.setLevel(logging.WARNING)
+if not _error_logger.handlers:
+    try:
+        _err_log_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "logs", "api_errors.log",
+        )
+        os.makedirs(os.path.dirname(_err_log_path), exist_ok=True)
+        _fh = logging.FileHandler(_err_log_path)
+        _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _error_logger.addHandler(_fh)
+    except Exception:
+        pass
+
+
+def log_api_error(endpoint: str, error: Exception, workspace_id: str = "default", extra: dict = None):
+    """Record an API error to both the in-memory ring buffer and the file log."""
+    import traceback as _tb
+    entry = {
+        "ts": _utc_now_iso(),
+        "endpoint": endpoint,
+        "workspace_id": workspace_id,
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "traceback": _tb.format_exc(),
+        "extra": extra or {},
+    }
+    with _error_log_lock:
+        _error_log.append(entry)
+        while len(_error_log) > MAX_ERROR_LOG_SIZE:
+            _error_log.pop(0)
+    try:
+        _error_logger.warning(f"{endpoint} [{workspace_id}] {type(error).__name__}: {error}")
+    except Exception:
+        pass
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler that logs and returns a sanitized 500."""
+    wid = _get_workspace_id(request.headers.get("Authorization", "").replace("Bearer ", "").strip() or None)
+    log_api_error(f"{request.method} {request.url.path}", exc, wid)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error_type": type(exc).__name__},
+    )
+
+
+@app.get("/errors/recent")
+def errors_recent(limit: int = 50, workspace_id: Optional[str] = None):
+    """Return recent API errors (for debugging). Optionally filtered by workspace."""
+    with _error_log_lock:
+        items = list(_error_log)
+    if workspace_id:
+        items = [e for e in items if e.get("workspace_id") == workspace_id]
+    return {"count": len(items[:limit]), "items": items[-limit:][::-1]}
+
+
+@app.post("/errors/clear")
+def errors_clear():
+    """Clear the in-memory error log."""
+    with _error_log_lock:
+        _error_log.clear()
+    return {"cleared": True}
+
+
 def _safe_records(df: "pd.DataFrame") -> list[dict]:
     """Convert a DataFrame to JSON-safe records (replacing NaN/Infinity with None)."""
     clean = df.replace([np.inf, -np.inf], np.nan).astype(object).where(pd.notnull(df.replace([np.inf, -np.inf], np.nan)), None)
@@ -3157,24 +3235,99 @@ async def robinhood_llm_research(req: LLMResearchRequest, token: Optional[str] =
     response = {
         "query": req.query,
         "context": context,
-        "response": _generate_research_response(req.query, context),
+        "response": await _generate_research_response(req.query, context),
         "demo": mcp_demo_mode(),
     }
     return response
 
 
-def _generate_research_response(query: str, context: dict) -> str:
-    """Generate a structured research response.
+def _load_llm_config() -> dict:
+    """Read saved LLM settings from configs/user_settings.json."""
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "configs", "user_settings.json",
+        )
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = json.load(f)
+            return {
+                "endpoint": cfg.get("llm_endpoint") or os.environ.get("LLM_ENDPOINT", ""),
+                "key": cfg.get("llm_key") or os.environ.get("LLM_KEY", ""),
+            }
+    except Exception:
+        pass
+    return {"endpoint": "", "key": ""}
 
-    In production this would call an LLM with the context. For now,
-    we return a structured response based on the portfolio.
+
+async def _call_llm(prompt: str, system: str = "", max_tokens: int = 600) -> str:
+    """Call OpenAI-compatible chat completions API (DeepSeek, OpenAI, etc).
+
+    Returns empty string on failure so callers can fall back gracefully.
+    """
+    cfg = _load_llm_config()
+    endpoint = (cfg.get("endpoint") or "").rstrip("/")
+    api_key = cfg.get("key") or ""
+    if not endpoint or not api_key:
+        return ""
+
+    url = f"{endpoint}/v1/chat/completions" if not endpoint.endswith("/chat/completions") else endpoint
+    try:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        async with httpx.AsyncClient(timeout=20) as http:
+            resp = await http.post(
+                url,
+                json={"model": "deepseek-chat", "messages": messages, "max_tokens": max_tokens, "temperature": 0.4},
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception:
+        return ""
+
+
+async def _generate_research_response(query: str, context: dict) -> str:
+    """Generate a personalized research response.
+
+    If an LLM is configured (DeepSeek/OpenAI), call it with the portfolio
+    context. Otherwise fall back to a rule-based structured response.
     """
     portfolio = context.get("portfolio", {})
     positions = portfolio.get("positions", [])
     total_value = portfolio.get("total_value", 0)
 
-    q = query.lower()
+    # Build a compact context string for the LLM
+    pos_summary = ", ".join(
+        f"{p.get('ticker','?')} ({p.get('shares',0)} shares, "
+        f"${p.get('value',0):,.0f}, P&L ${p.get('unrealized_pl',0):+,.0f})"
+        for p in positions[:8]
+    ) or "no positions"
 
+    system = (
+        "You are a concise, data-driven financial research assistant for the QuantFlow platform. "
+        "Answer in 2-4 short sentences. Cite concrete numbers from the user's portfolio. "
+        "Never invent tickers or numbers not in the context. If the question is unclear, "
+        "ask a brief clarifying question."
+    )
+    user_prompt = (
+        f"User question: {query}\n\n"
+        f"Portfolio context:\n"
+        f"- Total value: ${total_value:,.2f}\n"
+        f"- Holdings: {pos_summary}\n\n"
+        f"Provide a brief, actionable answer specific to this portfolio."
+    )
+
+    llm_reply = await _call_llm(user_prompt, system=system, max_tokens=400)
+    if llm_reply:
+        return llm_reply.strip()
+
+    # Fallback: rule-based response
+    q = query.lower()
     if "diversif" in q or "risk" in q:
         if positions:
             top = max(positions, key=lambda p: p.get("value", 0))

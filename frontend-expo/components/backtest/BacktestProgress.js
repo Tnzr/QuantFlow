@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet } from "react-native";
 import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer } from "recharts";
 import THEME from "../../theme/colors";
 import ErrorBoundary from "../shared/ErrorBoundary";
+import { formatChartDate } from "../../utils/dateFormat";
 
 const SPEEDS = { 0.5: 100, 1: 50, 2: 25, 4: 12 };
 const WINDOW_SIZE = 120;
@@ -58,10 +59,7 @@ function Candle(props) {
 }
 
 function formatDate(d) {
-  if (!d) return "";
-  const s = String(d);
-  if (s.length >= 10) return s.slice(5, 10);
-  return s;
+  return formatChartDate(d, "short");
 }
 
 export default function BacktestProgress({ equityCurve, trades, signals, rsiSeries, running, onComplete, ticker, token }) {

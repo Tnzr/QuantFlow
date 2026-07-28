@@ -13,6 +13,7 @@ import {
   Cell,
 } from "recharts";
 import THEME from "../../theme/colors";
+import { formatChartDate, formatTooltipDate, getTimezoneAbbr } from "../../utils/dateFormat";
 
 const CHART_H = 280;
 const MARGIN = { top: 5, right: 5, bottom: 20, left: 0 };
@@ -155,12 +156,7 @@ export default function CandlestickChart({ data, forecast, showForecast, signal 
     );
   }
 
-  const formatDate = (d) => {
-    if (!d) return "";
-    const parts = String(d).split("-");
-    if (parts.length === 3) return `${parts[1]}/${parts[2]}`;
-    return String(d).slice(0, 10);
-  };
+  const formatDate = (d) => formatChartDate(d, "short");
 
   const priceStep = Math.max(1, Math.floor(combined.length / 5));
   const volStep = Math.max(1, Math.floor(actualBars.length / 5));

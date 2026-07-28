@@ -2,6 +2,7 @@ import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import MetricCard from "../shared/MetricCard";
 import THEME from "../../theme/colors";
+import { getTimezoneAbbr } from "../../utils/dateFormat";
 
 export default function AccountSummary({ account }) {
   if (!account) {
@@ -20,7 +21,10 @@ export default function AccountSummary({ account }) {
 
   return (
     <View style={styles.wrap}>
-      <Text style={styles.heading}>Account</Text>
+      <View style={styles.headerRow}>
+        <Text style={styles.heading}>Account</Text>
+        <Text style={styles.tz}>Times in {getTimezoneAbbr()}</Text>
+      </View>
       <View style={styles.row}>
         <MetricCard label="Equity" value={equity} prefix="$" large />
         <MetricCard label="Cash" value={cash} prefix="$" />
@@ -40,7 +44,9 @@ export default function AccountSummary({ account }) {
 
 const styles = StyleSheet.create({
   wrap: { marginBottom: 16 },
-  heading: { color: THEME.text, fontSize: 14, fontWeight: "700", marginBottom: 8 },
+  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  heading: { color: THEME.text, fontSize: 14, fontWeight: "700" },
+  tz: { color: THEME.textMuted, fontSize: 9, fontStyle: "italic" },
   row: { flexDirection: "row", gap: 8, marginBottom: 8 },
   na: { color: THEME.textMuted, fontSize: 13, textAlign: "center", paddingVertical: 16 },
 });

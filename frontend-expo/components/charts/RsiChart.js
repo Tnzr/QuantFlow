@@ -2,6 +2,7 @@ import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer } from "recharts";
 import THEME from "../../theme/colors";
+import { formatChartDate } from "../../utils/dateFormat";
 
 export default function RsiChart({ data }) {
   if (!data || data.length === 0) {
@@ -25,12 +26,7 @@ export default function RsiChart({ data }) {
     );
   }
 
-  const formatDate = (d) => {
-    if (!d) return "";
-    const parts = String(d).split("-");
-    if (parts.length === 3) return `${parts[1]}/${parts[2]}`;
-    return String(d).slice(0, 10);
-  };
+  const formatDate = (d) => formatChartDate(d, "short");
 
   const step = Math.max(1, Math.floor(chartData.length / 5));
 

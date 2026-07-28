@@ -51,7 +51,7 @@ up:
 		nohup $(PYTHON) -m uvicorn quantflow.api.server:app --host 0.0.0.0 --port 3000 \
 		> /tmp/qf_backend.log 2>&1 & echo $$! > $(PID_DIR)/api.pid; \
 	echo "Starting frontend on :8080..."; \
-	nohup $(PYTHON) -m http.server 8080 --directory $(PROJECT)/frontend-expo/dist \
+	nohup $(PYTHON) -m http.server 8080 --bind 0.0.0.0 --directory $(PROJECT)/frontend-expo/dist \
 		> /tmp/qf_frontend.log 2>&1 & echo $$! > $(PID_DIR)/frontend.pid; \
 	echo ""; \
 	echo -n "Waiting for services"; \
