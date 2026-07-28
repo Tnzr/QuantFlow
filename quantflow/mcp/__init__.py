@@ -10,6 +10,15 @@ Architecture (compartmentalized for future multi-user scaling):
 - Tokens are stored encrypted in configs/robinhood_tokens.json
 - Read-only by default; trade execution requires explicit user opt-in
 
+OAuth Flow (same as Claude Code):
+1. Connect to MCP server without token
+2. Server responds with 401 + OAuth metadata (authorize_url, state, etc.)
+3. Open browser to authorize_url
+4. User authenticates with Robinhood
+5. Server redirects back with code
+6. Exchange code for token via callback
+7. Store token for future requests
+
 Available MCP tools (per Robinhood documentation):
 - get_account_info / get_portfolio
 - get_positions / get_orders
@@ -22,12 +31,17 @@ Available MCP tools (per Robinhood documentation):
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode, urlparse, parse_qs
+
 import httpx
 
 ROBINHOOD_MCP_URL = "https://agent.robinhood.com/mcp/trading"
@@ -121,81 +135,143 @@ class RobinhoodMCPManager:
             self._clients[workspace_id] = WorkspaceMCPClient(workspace_id=workspace_id)
         return self._clients[workspace_id]
 
-    def get_oauth_url(self, workspace_id: str, state: Optional[str] = None) -> dict:
-        """Generate OAuth authorization URL with PKCE.
+    async def get_oauth_challenge(self, workspace_id: str) -> Dict[str, Any]:
+        """Connect to MCP server and get OAuth challenge.
+
+        This is the same flow Claude Code uses:
+        1. Make unauthenticated request to MCP server
+        2. Server responds with 401 + OAuth metadata
+        3. Return the authorize_url for the user to open
 
         Returns dict with:
-        - url: the authorization URL to open in browser
-        - state: the state parameter for CSRF protection
-        - code_verifier: PKCE code verifier (must be sent to callback)
-        - redirect_uri: the callback URL to register
-        """
-        import secrets
-        import base64
-        import hashlib
-
-        state = state or secrets.token_urlsafe(32)
-        code_verifier = secrets.token_urlsafe(64)
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode("utf-8")
-
-        # Robinhood OAuth endpoints (from their Agentic Trading docs)
-        # The redirect_uri must be registered in your Robinhood Agentic account
-        redirect_uri = os.environ.get("ROBINHOOD_REDIRECT_URI", "quantflow://robinhood/callback")
-        client_id = os.environ.get("ROBINHOOD_CLIENT_ID", "")
-
-        if client_id:
-            # Real OAuth with registered client
-            params = {
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "response_type": "code",
-                "scope": "read watchlist trade",
-                "state": state,
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-                "workspace": workspace_id,
-            }
-            from urllib.parse import urlencode
-            url = f"https://robinhood.com/oauth/authorize?{urlencode(params)}"
-        else:
-            # No client_id configured — provide manual instructions
-            url = f"https://robinhood.com/oauth/authorize?response_type=code&scope=read+watchlist&state={state}"
-
-        return {
-            "url": url,
-            "state": state,
-            "code_verifier": code_verifier,
-            "redirect_uri": redirect_uri,
-            "client_id_configured": bool(client_id),
-        }
-
-    async def complete_oauth(self, workspace_id: str, code: str, code_verifier: Optional[str] = None) -> WorkspaceMCPClient:
-        """Exchange OAuth code for access token.
-
-        In production: POST to Robinhood's token endpoint with PKCE.
+        - authorize_url: URL to open in browser
+        - state: state parameter for CSRF protection
+        - code_verifier: PKCE code verifier (for token exchange)
+        - challenge_type: "oauth" or "none" (if already authenticated)
         """
         client = self.get_client(workspace_id)
-        redirect_uri = os.environ.get("ROBINHOOD_REDIRECT_URI", "quantflow://robinhood/callback")
-        client_id = os.environ.get("ROBINHOOD_CLIENT_ID", "")
-        client_secret = os.environ.get("ROBINHOOD_CLIENT_SECRET", "")
 
-        if client_id and client_secret and code_verifier:
-            # Real token exchange with PKCE
-            try:
-                resp = httpx.post(
-                    "https://api.robinhood.com/oauth/token",
-                    json={
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "redirect_uri": redirect_uri,
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "code_verifier": code_verifier,
-                    },
-                    timeout=15,
+        # If already authenticated, no challenge needed
+        if client.is_authenticated:
+            return {"challenge_type": "none", "already_authenticated": True}
+
+        # Make unauthenticated request to get OAuth challenge
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                # First, try to initialize MCP session
+                init_request = {
+                    "jsonrpc": "2.0",
+                    "id": str(uuid.uuid4()),
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "QuantFlow",
+                            "version": "1.0.0"
+                        }
+                    }
+                }
+
+                resp = await http.post(
+                    ROBINHOOD_MCP_URL,
+                    json=init_request,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                    }
                 )
+
+                # Check if we got OAuth challenge (401)
+                if resp.status_code == 401:
+                    # Parse WWW-Authenticate header for OAuth metadata
+                    auth_header = resp.headers.get("www-authenticate", "")
+                    if "oauth" in auth_header.lower():
+                        # Extract authorize URL from header or response body
+                        try:
+                            # Try to parse response body for OAuth details
+                            if resp.text:
+                                body = resp.json()
+                                if "authorize_url" in body:
+                                    return {
+                                        "challenge_type": "oauth",
+                                        "authorize_url": body["authorize_url"],
+                                        "state": body.get("state", secrets.token_urlsafe(32)),
+                                        "code_verifier": body.get("code_verifier", secrets.token_urlsafe(64)),
+                                        "workspace_id": workspace_id,
+                                    }
+                        except Exception:
+                            pass
+
+                        # Fallback: construct authorize URL from known parameters
+                        # Robinhood uses standard OAuth 2.0 authorization code flow
+                        state = secrets.token_urlsafe(32)
+                        code_verifier = secrets.token_urlsafe(64)
+                        code_challenge = base64.urlsafe_b64encode(
+                            hashlib.sha256(code_verifier.encode()).digest()
+                        ).rstrip(b"=").decode("utf-8")
+
+                        # Standard OAuth authorize URL for Robinhood MCP
+                        params = {
+                            "client_id": "quantflow-mcp",
+                            "redirect_uri": f"http://localhost:3000/robinhood/oauth/callback",
+                            "response_type": "code",
+                            "scope": "read watchlist",
+                            "state": state,
+                            "code_challenge": code_challenge,
+                            "code_challenge_method": "S256",
+                        }
+                        authorize_url = f"https://agent.robinhood.com/oauth/authorize?{urlencode(params)}"
+
+                        return {
+                            "challenge_type": "oauth",
+                            "authorize_url": authorize_url,
+                            "state": state,
+                            "code_verifier": code_verifier,
+                            "workspace_id": workspace_id,
+                        }
+
+                # If we get 200, we're authenticated (unlikely without token)
+                if resp.status_code == 200:
+                    return {"challenge_type": "none", "already_authenticated": True}
+
+                # Other error
+                return {
+                    "challenge_type": "error",
+                    "error": f"MCP server returned {resp.status_code}: {resp.text[:200]}",
+                }
+
+        except Exception as e:
+            return {
+                "challenge_type": "error",
+                "error": f"Failed to connect to MCP server: {str(e)}",
+            }
+
+    async def complete_oauth(self, workspace_id: str, code: str, state: str, code_verifier: str) -> WorkspaceMCPClient:
+        """Exchange OAuth code for access token.
+
+        This is called from the OAuth callback after the user authenticates
+        with Robinhood in their browser.
+        """
+        client = self.get_client(workspace_id)
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                # Exchange code for token
+                token_request = {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": f"http://localhost:3000/robinhood/oauth/callback",
+                    "client_id": "quantflow-mcp",
+                    "code_verifier": code_verifier,
+                }
+
+                resp = await http.post(
+                    "https://agent.robinhood.com/oauth/token",
+                    json=token_request,
+                    headers={"Content-Type": "application/json"},
+                )
+
                 if resp.status_code == 200:
                     token_data = resp.json()
                     client.access_token = token_data.get("access_token")
@@ -210,22 +286,12 @@ class RobinhoodMCPManager:
                     self._save_tokens()
                     return client
                 else:
-                    client.last_error = f"OAuth exchange failed: {resp.status_code} {resp.text[:200]}"
+                    client.last_error = f"Token exchange failed: {resp.status_code} {resp.text[:200]}"
                     return client
-            except Exception as e:
-                client.last_error = f"OAuth exchange error: {str(e)}"
-                return client
 
-        # No credentials configured — simulated token for local dev
-        client.access_token = f"rh_sim_{uuid.uuid4().hex[:16]}"
-        client.refresh_token = f"rh_ref_{uuid.uuid4().hex[:16]}"
-        client.expires_at = time.time() + 3600  # 1 hour
-        client.enabled = True
-        client.scopes = ["read", "watchlist"]
-        client.last_sync = time.time()
-        client.last_error = None
-        self._save_tokens()
-        return client
+        except Exception as e:
+            client.last_error = f"Token exchange error: {str(e)}"
+            return client
 
     def set_manual_token(self, workspace_id: str, access_token: str, refresh_token: Optional[str] = None, expires_in: int = 3600) -> WorkspaceMCPClient:
         """Set a manually provided OAuth token.

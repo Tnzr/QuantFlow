@@ -2863,41 +2863,35 @@ async def robinhood_status(token: Optional[str] = None):
     }
 
 
-@app.get("/robinhood/oauth/url")
-async def robinhood_oauth_url(token: Optional[str] = None, state: Optional[str] = None):
-    """Get OAuth authorization URL for Robinhood connection.
+@app.get("/robinhood/oauth/challenge")
+async def robinhood_oauth_challenge(token: Optional[str] = None):
+    """Get OAuth challenge from Robinhood MCP server.
 
-    Returns URL to open in browser, plus PKCE state for callback verification.
+    Connects to MCP server and returns the OAuth authorize_url for the user
+    to open in their browser. This is the same flow Claude Code uses.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
-    oauth_info = mgr.get_oauth_url(wid, state=state)
-    return {
-        "url": oauth_info["url"],
-        "state": oauth_info["state"],
-        "code_verifier": oauth_info["code_verifier"],
-        "redirect_uri": oauth_info["redirect_uri"],
-        "workspace_id": wid,
-        "client_id_configured": oauth_info["client_id_configured"],
-    }
+    challenge = await mgr.get_oauth_challenge(wid)
+    return challenge
 
 
 class OAuthCallbackRequest(BaseModel):
     code: str
-    state: Optional[str] = None
-    code_verifier: Optional[str] = None
+    state: str
+    code_verifier: str
 
 
 @app.post("/robinhood/oauth/callback")
 async def robinhood_oauth_callback(req: OAuthCallbackRequest, token: Optional[str] = None):
     """Complete OAuth flow with authorization code.
 
-    If code_verifier is provided and Robinhood credentials are configured,
-    exchanges the code for a real access token. Otherwise uses simulated token.
+    Called after the user authenticates with Robinhood in their browser.
+    Exchanges the code for an access token using PKCE.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
-    client = await mgr.complete_oauth(wid, req.code, code_verifier=req.code_verifier)
+    client = await mgr.complete_oauth(wid, req.code, req.state, req.code_verifier)
     return {
         "connected": client.enabled,
         "workspace_id": wid,

@@ -37,18 +37,36 @@ export default function useRobinhood(token) {
         await refreshStatus();
         return true;
       }
-      // Real OAuth: get URL with PKCE, open in popup, poll for callback
-      const oauthInfo = await apiGet("/robinhood/oauth/url", token);
+      // Real OAuth: get challenge from MCP server, open browser to authorize
+      const challenge = await apiGet("/robinhood/oauth/challenge", token);
+
+      if (challenge.challenge_type === "error") {
+        setError(challenge.error || "Failed to get OAuth challenge");
+        return false;
+      }
+
+      if (challenge.challenge_type === "none" && challenge.already_authenticated) {
+        // Already authenticated, just refresh status
+        await refreshStatus();
+        return true;
+      }
+
+      if (challenge.challenge_type !== "oauth" || !challenge.authorize_url) {
+        setError("Invalid OAuth challenge response");
+        return false;
+      }
+
+      // Open authorize_url in browser
       if (typeof window !== "undefined") {
-        const popup = window.open(oauthInfo.url, "_blank", "width=600,height=700");
+        const popup = window.open(challenge.authorize_url, "_blank", "width=600,height=700");
         if (!popup) {
           setError("Popup blocked. Please allow popups for Robinhood OAuth.");
           return false;
         }
         // Store PKCE info for callback
-        if (oauthInfo.code_verifier) {
-          localStorage.setItem("robinhood_code_verifier", oauthInfo.code_verifier);
-          localStorage.setItem("robinhood_state", oauthInfo.state);
+        if (challenge.code_verifier) {
+          localStorage.setItem("robinhood_code_verifier", challenge.code_verifier);
+          localStorage.setItem("robinhood_state", challenge.state);
         }
         // Poll for popup close
         const pollInterval = setInterval(async () => {
@@ -60,7 +78,7 @@ export default function useRobinhood(token) {
         // Auto-stop polling after 5 minutes
         setTimeout(() => clearInterval(pollInterval), 300000);
       } else {
-        console.log("Open this URL to connect:", oauthInfo.url);
+        console.log("Open this URL to connect:", challenge.authorize_url);
       }
       return true;
     } catch (e) {
@@ -73,8 +91,8 @@ export default function useRobinhood(token) {
   const handleOAuthCallback = useCallback(async (code, codeVerifier) => {
     try {
       setError(null);
-      const payload = { code };
-      if (codeVerifier) payload.code_verifier = codeVerifier;
+      const state = localStorage.getItem("robinhood_state");
+      const payload = { code, state, code_verifier: codeVerifier };
       const result = await apiPost("/robinhood/oauth/callback", payload, token);
       if (result.connected) {
         localStorage.removeItem("robinhood_code_verifier");
