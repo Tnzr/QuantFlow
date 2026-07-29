@@ -62,11 +62,12 @@ function formatDate(d) {
   return formatChartDate(d, "short");
 }
 
-export default function BacktestProgress({ equityCurve, trades, signals, rsiSeries, running, onComplete, ticker, token }) {
+export default function BacktestProgress({ equityCurve, trades, signals, rsiSeries, running, onComplete, ticker, startDate, endDate, token }) {
   const [currentBar, setCurrentBar] = useState(0);
   const [speed, setSpeed] = useState(1);
   const [paused, setPaused] = useState(false);
   const [priceData, setPriceData] = useState([]);
+  const [priceLoading, setPriceLoading] = useState(false);
   const [mlSignal, setMlSignal] = useState(null);
   const [mlForecast, setMlForecast] = useState(null);
   const timerRef = useRef(null);
@@ -104,20 +105,37 @@ export default function BacktestProgress({ equityCurve, trades, signals, rsiSeri
 
   const loadPriceData = useCallback(async () => {
     if (!ticker || priceData.length > 0) return;
+    setPriceLoading(true);
     try {
       const base = typeof process !== "undefined" && process.env?.EXPO_PUBLIC_API_BASE_URL || "http://127.0.0.1:3000";
       const headers = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const since = new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString();
-      let res = await fetch(`${base}/market/alpaca/bars/${encodeURIComponent(ticker)}?timeframe=5Min&limit=500&start=${encodeURIComponent(since)}`, { headers });
-      if (!res.ok) {
-        res = await fetch(`${base}/market/series/cache?ticker=${encodeURIComponent(ticker)}&interval=1d`, { method: "POST", headers });
+
+      // Determine how many daily bars are needed to cover the actual
+      // backtest date range (defaults to 2 years if not specified)
+      let days = 730;
+      if (startDate && endDate) {
+        const s = new Date(startDate);
+        const e = new Date(endDate);
+        if (!isNaN(s) && !isNaN(e)) {
+          days = Math.max(30, Math.ceil((e - s) / (1000 * 60 * 60 * 24)) + 10);
+        }
       }
+      const years = Math.max(1, Math.ceil(days / 365));
+      const period = `${years}y`;
+
+      const res = await fetch(
+        `${base}/market/series/cache?ticker=${encodeURIComponent(ticker)}&interval=1d&period=${period}&limit=${days}`,
+        { method: "POST", headers }
+      );
       const data = await res.json();
-      const items = data?.bars || data?.items || [];
+      const items = data?.items || [];
       if (items.length) setPriceData(items);
     } catch {}
-  }, [ticker, token, priceData.length]);
+    finally {
+      setPriceLoading(false);
+    }
+  }, [ticker, token, priceData.length, startDate, endDate]);
 
   useEffect(() => { loadPriceData(); }, [loadPriceData]);
   useEffect(() => {
@@ -146,10 +164,10 @@ export default function BacktestProgress({ equityCurve, trades, signals, rsiSeri
   const currentDate = equityCurve[currentBar]?.date || "";
 
   // Build full chart data (no scrolling window - show all with playhead)
+  // Uses REAL OHLC price data (priceData) aligned by date to the equity
+  // curve's date axis, with buy/sell signal markers overlaid.
   const fullBars = useMemo(() => {
     try {
-      // Use equityCurve dates as the time axis
-      // Generate synthetic OHLC from equity (since we don't have real price data in backtest)
       const eqData = equityCurve || [];
       const sigMap = {};
       if (signals) {
@@ -158,12 +176,49 @@ export default function BacktestProgress({ equityCurve, trades, signals, rsiSeri
           sigMap[sd] = s;
         });
       }
+      const priceMap = {};
+      if (priceData && priceData.length) {
+        priceData.forEach(p => {
+          const dk = String(p.date).slice(0, 10);
+          priceMap[dk] = p;
+        });
+      }
+
+      // If we have real price data, use it as the primary source (real OHLC).
+      // Otherwise fall back to a flat line at $100 so the chart doesn't crash.
+      if (Object.keys(priceMap).length > 0) {
+        return eqData.map((d, i) => {
+          const dk = String(d.date).slice(0, 10);
+          const sig = sigMap[dk];
+          const bar = priceMap[dk];
+          const eq = Number(d.equity) || 1;
+          if (bar) {
+            return {
+              idx: i,
+              date: dk,
+              open: Number(bar.open) || Number(bar.close) || 0,
+              close: Number(bar.close) || 0,
+              high: Number(bar.high) || Number(bar.close) || 0,
+              low: Number(bar.low) || Number(bar.close) || 0,
+              equity: eq,
+              tradeEntry: sig?.type === "buy" || null,
+              tradeExit: sig?.type === "sell" || null,
+              signalReason: sig?.reason || null,
+              _dMin: 0,
+            };
+          }
+          // No matching price bar for this date (e.g. weekend gap) — carry
+          // forward the last known close so the chart stays continuous
+          return null;
+        }).filter(Boolean);
+      }
+
+      // Fallback: synthesize from equity (only when no real price data available)
       return eqData.map((d, i) => {
         const dk = String(d.date).slice(0, 10);
         const sig = sigMap[dk];
         const eq = Number(d.equity) || 1;
-        // Synthesize OHLC from equity value (scale around 100 for readability)
-        const price = eq * 100; // scale to look like real prices
+        const price = eq * 100;
         const spread = price * 0.01;
         return {
           idx: i,
@@ -183,7 +238,7 @@ export default function BacktestProgress({ equityCurve, trades, signals, rsiSeri
       console.error("fullBars error:", e);
       return [];
     }
-  }, [equityCurve, signals]);
+  }, [equityCurve, signals, priceData]);
 
   const chartData = useMemo(() => {
     try {
@@ -299,6 +354,9 @@ export default function BacktestProgress({ equityCurve, trades, signals, rsiSeri
         )}
 
         <Text style={styles.cl}>Price &amp; Signals (Full History)</Text>
+        {priceLoading && priceData.length === 0 && (
+          <Text style={styles.loadingHint}>Loading real price history for {ticker}...</Text>
+        )}
         <View style={styles.chart}>
           <ResponsiveContainer width="100%" height={CHART_H}>
             <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 25, left: 0 }}>
@@ -364,6 +422,7 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 },
   title: { color: THEME.text, fontSize: 14, fontWeight: "800" },
   sub: { color: THEME.textMuted, fontSize: 10, marginTop: 2 },
+  loadingHint: { color: THEME.textMuted, fontSize: 10, fontStyle: "italic", marginBottom: 4 },
   controls: { flexDirection: "row", gap: 3, alignItems: "center" },
   sb: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: 3, borderWidth: 1, borderColor: THEME.border, backgroundColor: THEME.bg },
   sbOn: { backgroundColor: THEME.accentGlow, borderColor: THEME.accent },

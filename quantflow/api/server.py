@@ -2759,6 +2759,7 @@ def market_series_cache(
     ticker: str,
     period: str = "2y",
     interval: str = "1d",
+    limit: int = 365,
 ):
     try:
         symbol = ticker.strip().upper()
@@ -2791,11 +2792,12 @@ def market_series_cache(
         out.to_csv(file_path, index=False)
 
         # FastAPI/Starlette JSON rendering rejects NaN/Infinity values.
+        limit_rows = max(1, min(int(limit), 5000))
         items_df = (
-            out.tail(365)
+            out.tail(limit_rows)
             .replace([np.inf, -np.inf], np.nan)
             .astype(object)
-            .where(pd.notnull(out.tail(365)), None)
+            .where(pd.notnull(out.tail(limit_rows)), None)
         )
 
         return {

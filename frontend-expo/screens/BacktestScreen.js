@@ -73,6 +73,8 @@ export default function BacktestScreen({ token }) {
             running={true}
             onComplete={handleAnimationComplete}
             ticker={config.tickers?.[0]}
+            startDate={config.start}
+            endDate={config.end}
             token={token}
           />
         </ErrorBoundary>
