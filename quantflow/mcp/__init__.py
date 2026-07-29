@@ -462,15 +462,23 @@ class RobinhoodMCPManager:
         """Get snapshot of portfolio with total value and buying power."""
         return await self._call_tool(workspace_id, "get_portfolio", {})
 
-    async def get_equity_positions(self, workspace_id: str) -> Dict[str, Any]:
-        """View open equity positions with quantity and cost basis."""
-        return await self._call_tool(workspace_id, "get_equity_positions", {})
+    async def get_equity_positions(self, workspace_id: str, account_number: Optional[str] = None) -> Dict[str, Any]:
+        """View open equity positions with quantity and cost basis.
 
-    async def get_equity_orders(self, workspace_id: str, status: str = "all", limit: int = 50) -> Dict[str, Any]:
+        If account_number is provided, returns positions for that specific account.
+        Otherwise returns positions across all accounts.
+        """
+        args = {}
+        if account_number:
+            args["account_number"] = account_number
+        return await self._call_tool(workspace_id, "get_equity_positions", args)
+
+    async def get_equity_orders(self, workspace_id: str, status: str = "all", limit: int = 50, account_number: Optional[str] = None) -> Dict[str, Any]:
         """Get equity order status history."""
-        return await self._call_tool(workspace_id, "get_equity_orders", {
-            "status": status, "limit": limit
-        })
+        args = {"status": status, "limit": limit}
+        if account_number:
+            args["account_number"] = account_number
+        return await self._call_tool(workspace_id, "get_equity_orders", args)
 
     async def get_realized_pnl(self, workspace_id: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
         """View realized profit and loss for account over time window."""
@@ -754,31 +762,33 @@ async def _demo_portfolio(workspace_id: str) -> Dict[str, Any]:
         "demo": True,
         "workspace_id": workspace_id,
         "account": {
-            "equity": 25430.18,
-            "cash": 3210.45,
-            "buying_power": 12841.80,
-            "portfolio_value": 25430.18,
+            "equity": 98500.00,
+            "cash": 8500.00,
+            "buying_power": 42500.00,
+            "portfolio_value": 98500.00,
             "agentic_account_id": "demo-agentic-acct",
         },
         "positions": [
-            {"symbol": "AAPL", "quantity": 12, "avg_entry_price": 178.45, "current_price": 224.31, "unrealized_pl": 550.32, "unrealized_plpc": 0.2572},
-            {"symbol": "NVDA", "quantity": 8, "avg_entry_price": 850.20, "current_price": 1680.50, "unrealized_pl": 6642.40, "unrealized_plpc": 0.9766},
-            {"symbol": "MSFT", "quantity": 5, "avg_entry_price": 380.10, "current_price": 415.80, "unrealized_pl": 178.50, "unrealized_plpc": 0.0939},
-            {"symbol": "TSLA", "quantity": 15, "avg_entry_price": 245.60, "current_price": 182.30, "unrealized_pl": -949.50, "unrealized_plpc": -0.2577},
-            {"symbol": "COST", "quantity": 3, "avg_entry_price": 720.00, "current_price": 890.45, "unrealized_pl": 511.35, "unrealized_plpc": 0.2367},
+            {"symbol": "NVDA", "quantity": 15, "avg_entry_price": 720.00, "current_price": 980.50, "unrealized_pl": 3907.50, "unrealized_plpc": 0.362},
+            {"symbol": "AAPL", "quantity": 25, "avg_entry_price": 195.00, "current_price": 224.31, "unrealized_pl": 732.75, "unrealized_plpc": 0.15},
+            {"symbol": "INTC", "quantity": 80, "avg_entry_price": 52.00, "current_price": 61.50, "unrealized_pl": 760.00, "unrealized_plpc": 0.182},
+            {"symbol": "TGT", "quantity": 40, "avg_entry_price": 148.00, "current_price": 152.30, "unrealized_pl": 172.00, "unrealized_plpc": 0.029},
+            {"symbol": "BTQ", "quantity": 120, "avg_entry_price": 28.50, "current_price": 31.80, "unrealized_pl": 396.00, "unrealized_plpc": 0.115},
+            {"symbol": "PANW", "quantity": 10, "avg_entry_price": 380.00, "current_price": 420.50, "unrealized_pl": 405.00, "unrealized_plpc": 0.106},
         ],
         "orders": [
-            {"id": "demo-1", "symbol": "AAPL", "side": "buy", "quantity": 12, "type": "market", "status": "filled", "filled_price": 178.45, "created_at": "2025-12-10T14:30:00Z"},
-            {"id": "demo-2", "symbol": "NVDA", "side": "buy", "quantity": 8, "type": "market", "status": "filled", "filled_price": 850.20, "created_at": "2026-01-15T10:15:00Z"},
+            {"id": "demo-1", "symbol": "NVDA", "side": "buy", "quantity": 15, "type": "market", "status": "filled", "filled_price": 720.00, "created_at": "2025-12-10T14:30:00Z"},
+            {"id": "demo-2", "symbol": "AAPL", "side": "buy", "quantity": 25, "type": "market", "status": "filled", "filled_price": 195.00, "created_at": "2026-01-15T10:15:00Z"},
+            {"id": "demo-3", "symbol": "INTC", "side": "buy", "quantity": 80, "type": "market", "status": "filled", "filled_price": 52.00, "created_at": "2026-02-01T10:00:00Z"},
         ],
-        "watchlist": ["GOOGL", "META", "AMD", "PLTR", "SHOP"],
+        "watchlist": ["NVDA", "AAPL", "INTC", "TGT", "BTQ", "PANW", "MSFT", "GOOGL"],
     }
 
 
 async def _demo_quote(workspace_id: str, ticker: str) -> Dict[str, Any]:
     """Demo quote for local dev."""
     import random
-    base_prices = {"AAPL": 224.31, "NVDA": 1680.50, "MSFT": 415.80, "TSLA": 182.30, "COST": 890.45}
+    base_prices = {"NVDA": 980.50, "AAPL": 224.31, "INTC": 61.50, "TGT": 152.30, "BTQ": 31.80, "PANW": 420.50, "MSFT": 415.80, "GOOGL": 175.00}
     base = base_prices.get(ticker, 100.0)
     return {
         "demo": True,

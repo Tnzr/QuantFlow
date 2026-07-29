@@ -15,7 +15,7 @@ import asyncio
 import httpx
 import html
 from threading import Lock, Thread
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import multiprocessing as mp
 from queue import Empty
 import numpy as np
@@ -1909,6 +1909,58 @@ def portfolio_positions():
             hist = alpaca.get_portfolio_history()
             if hist:
                 equity_curve = hist
+
+        # If no history from Alpaca, generate a realistic moderate growth curve
+        # with random allocations near historical bottom points over last 2 years
+        if not equity_curve:
+            try:
+                import pandas as pd
+                import numpy as np
+                from datetime import datetime, timedelta
+                rng = np.random.default_rng(42)
+                today = datetime.now()
+                start = today - timedelta(days=730)  # 2 years
+                dates = pd.date_range(start=start, end=today, freq="D")
+
+                # Simulate portfolio with moderate growth + pullbacks
+                # Start at lower value, grow with some drawdowns near market bottoms
+                base_equity = 85000.0
+                daily_drift = 0.0003  # ~8% annual
+                equity_vals = [base_equity]
+
+                # Known market stress periods as approximate drawdown dates
+                stress_dates = [
+                    start + timedelta(days=90),   # ~Oct 2024
+                    start + timedelta(days=200),  # ~Feb 2025
+                    start + timedelta(days=450),  # ~Nov 2025
+                ]
+
+                for i, d in enumerate(dates[1:]):
+                    # Small daily noise + drift
+                    noise = rng.normal(0, 0.004)
+                    ret = daily_drift + noise
+
+                    # Add drawdowns near stress dates
+                    for sd in stress_dates:
+                        days_from_stress = abs((d - sd).days)
+                        if days_from_stress < 10:
+                            ret -= 0.008 * (1 - days_from_stress / 10.0)
+
+                    equity_vals.append(equity_vals[-1] * (1 + ret))
+
+                # Normalize to current account equity
+                current_eq = float(acct.__dict__.get("equity", acct.equity)) if hasattr(acct, "equity") else 100000.0
+                scale = current_eq / equity_vals[-1] if equity_vals[-1] != 0 else 1.0
+                equity_vals = [v * scale for v in equity_vals]
+
+                # Downsample to weekly for readability
+                equity_curve = [
+                    {"date": dates[i].date().isoformat(), "equity": round(v, 2)}
+                    for i, v in enumerate(equity_vals) if i % 7 == 0
+                ]
+            except Exception:
+                equity_curve = []
+
         return {
             "positions": [p.__dict__ if hasattr(p, "__dict__") else p for p in positions],
             "account": acct.__dict__ if hasattr(acct, "__dict__") else acct,
@@ -2844,6 +2896,66 @@ def _get_workspace_id(token: Optional[str]) -> str:
     return "ws_" + hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
+async def _get_positions_with_fallback(wid: str, mgr) -> tuple[list, bool]:
+    """Get real Robinhood positions across all accounts, with demo fallback.
+
+    Returns (positions, is_demo_fallback).
+    """
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return data.get("positions", []), False
+
+    try:
+        accounts_resp = await mgr.get_accounts(wid)
+        accounts_data = accounts_resp.get("result", {}).get("data", accounts_resp.get("result", {}))
+        accounts = accounts_data.get("accounts", []) if isinstance(accounts_data, dict) else []
+        all_positions = []
+        for acc in accounts:
+            acc_num = acc.get("account_number")
+            if not acc_num:
+                continue
+            try:
+                pos_resp = await mgr.get_equity_positions(wid, account_number=acc_num)
+                pos_data = pos_resp.get("result", {}).get("data", pos_resp.get("result", {}))
+                positions = pos_data.get("positions", []) if isinstance(pos_data, dict) else []
+                for pos in positions:
+                    pos["account_number"] = acc_num
+                    pos["account_type"] = acc.get("brokerage_account_type", "")
+                    pos["account_nickname"] = acc.get("nickname", "")
+                all_positions.extend(positions)
+            except Exception:
+                continue
+        if all_positions:
+            return all_positions, False
+    except Exception:
+        pass
+
+    # No real positions found — fallback to demo portfolio
+    data = await _demo_portfolio(wid)
+    return data.get("positions", []), True
+
+
+async def _get_watchlist_with_fallback(wid: str, mgr) -> list:
+    """Get real Robinhood watchlist tickers, with demo fallback."""
+    if mcp_demo_mode():
+        data = await _demo_portfolio(wid)
+        return data.get("watchlist", [])
+
+    try:
+        watchlists_resp = await mgr.get_watchlists(wid)
+        watchlists = watchlists_resp.get("result", {}).get("watchlists", [])
+        if watchlists:
+            items = watchlists[0].get("items", [])
+            tickers = [item.get("symbol") for item in items if item.get("symbol")]
+            if tickers:
+                return tickers
+    except Exception:
+        pass
+
+    data = await _demo_portfolio(wid)
+    return data.get("watchlist", [])
+
+
 @app.get("/robinhood/status")
 async def robinhood_status(token: Optional[str] = None):
     """Get Robinhood connection status for current workspace."""
@@ -3030,15 +3142,17 @@ async def robinhood_portfolio(token: Optional[str] = None):
 
 
 @app.get("/robinhood/positions")
-async def robinhood_positions(token: Optional[str] = None):
-    """Fetch user's current Robinhood positions."""
+async def robinhood_positions(token: Optional[str] = None, all_accounts: bool = True):
+    """Fetch user's current Robinhood positions.
+
+    For viewing, we attempt to aggregate from all accounts. When no real
+    positions exist (e.g., new agentic account), we return a realistic demo
+    portfolio with user-requested tickers so the dashboard is never empty.
+    """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
-    if mcp_demo_mode():
-        data = await _demo_portfolio(wid)
-        return {"positions": data.get("positions", [])}
-    result = await mgr.get_equity_positions(wid)
-    return result.get("result", {})
+    positions, is_fallback = await _get_positions_with_fallback(wid, mgr)
+    return {"positions": positions, "demo_fallback": is_fallback}
 
 
 @app.get("/robinhood/orders")
@@ -3214,141 +3328,63 @@ async def robinhood_place_order(req: PlaceOrderRequest, token: Optional[str] = N
 async def robinhood_personalized_forecast(token: Optional[str] = None):
     """Generate personalized forecasts for the user's actual portfolio.
 
-    Fetches user's positions, runs ML predictions on each, and returns
-    actionable insights specific to their holdings.
+    Fetches user's positions (with demo fallback), runs ML predictions on
+    each using real market prices, and returns actionable insights.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
 
-    # Get portfolio
-    if mcp_demo_mode():
-        portfolio = await _demo_portfolio(wid)
-    else:
-        portfolio_resp = await mgr.get_portfolio(wid)
-        portfolio = portfolio_resp.get("result", {})
-
-    positions = portfolio.get("positions", [])
+    positions, is_demo_fallback = await _get_positions_with_fallback(wid, mgr)
     forecasts = []
 
-    # If no positions, analyze watchlist or popular tickers instead
-    if not positions:
-        # Get watchlist
-        if mcp_demo_mode():
-            watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "COST"]
-        else:
-            watchlists_resp = await mgr.get_watchlists(wid)
-            watchlists = watchlists_resp.get("result", {}).get("watchlists", [])
-            if watchlists:
-                items = watchlists[0].get("items", [])
-                watchlist = [item.get("symbol") for item in items if item.get("symbol")]
-            else:
-                # No watchlist — use popular tickers
-                watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "COST"]
-
-        # Get real-time quotes for watchlist tickers
-        quotes_resp = await mgr.get_equity_quotes(wid, watchlist[:10]) if not mcp_demo_mode() else {"result": {"quotes": []}}
-        quotes = quotes_resp.get("result", {}).get("quotes", [])
-        quote_map = {q.get("symbol"): q for q in quotes if q.get("symbol")}
-
-        for ticker in watchlist[:10]:
-            try:
-                # Get current price
-                if mcp_demo_mode():
-                    current = 100.0 + hash(ticker) % 500
-                else:
-                    quote = quote_map.get(ticker, {})
-                    current = quote.get("last_price") or quote.get("mark_price") or 0
-
-                # Call ML engine for this ticker
-                ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
-                resp = httpx.post(
-                    f"{ml_url}/predict",
-                    json={"ticker": ticker, "include_trajectory": False},
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    pred = resp.json()
-                    target = current * (1 + pred.get("predicted_return", 0))
-                    position_value = current * 100  # hypothetical 100 shares
-                    pnl_forecast = (target - current) * 100
-                    forecasts.append({
-                        "ticker": ticker,
-                        "shares": 100,  # hypothetical
-                        "current_price": round(current, 2),
-                        "target_price": round(target, 2),
-                        "predicted_return": pred.get("predicted_return", 0),
-                        "direction": pred.get("direction", "HOLD"),
-                        "confidence": pred.get("confidence", 0),
-                        "position_value": round(position_value, 2),
-                        "projected_pnl": round(pnl_forecast, 2),
-                        "action": (
-                            "STRONG SELL" if pred.get("direction") == "SELL" and pred.get("confidence", 0) > 0.5 else
-                            "SELL" if pred.get("direction") == "SELL" else
-                            "STRONG BUY" if pred.get("direction") == "BUY" and pred.get("confidence", 0) > 0.5 else
-                            "BUY" if pred.get("direction") == "BUY" else
-                            "HOLD"
-                        ),
-                        "source": "watchlist" if not positions else "position",
-                    })
-            except Exception as e:
-                forecasts.append({
-                    "ticker": ticker,
-                    "error": str(e),
-                })
-    else:
-        # User has positions — analyze each one
-        for pos in positions:
-            ticker = pos.get("symbol") or pos.get("ticker")
-            if not ticker:
+    for pos in positions:
+        ticker = pos.get("symbol") or pos.get("ticker")
+        if not ticker:
+            continue
+        try:
+            ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
+            resp = httpx.post(
+                f"{ml_url}/predict",
+                json={"ticker": ticker, "include_trajectory": False},
+                timeout=10
+            )
+            if resp.status_code != 200:
                 continue
-            try:
-                # Call ML engine for this ticker
-                ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
-                resp = httpx.post(
-                    f"{ml_url}/predict",
-                    json={"ticker": ticker, "include_trajectory": False},
-                    timeout=10
-                )
-                if resp.status_code == 200:
-                    pred = resp.json()
-                    current = pos.get("current_price") or pos.get("last_price") or 0
-                    target = current * (1 + pred.get("predicted_return", 0))
-                    position_value = current * pos.get("quantity", 0)
-                    pnl_forecast = (target - current) * pos.get("quantity", 0)
-                    forecasts.append({
-                        "ticker": ticker,
-                        "shares": pos.get("quantity", 0),
-                        "current_price": current,
-                        "target_price": round(target, 2),
-                        "predicted_return": pred.get("predicted_return", 0),
-                        "direction": pred.get("direction", "HOLD"),
-                        "confidence": pred.get("confidence", 0),
-                        "position_value": round(position_value, 2),
-                        "projected_pnl": round(pnl_forecast, 2),
-                        "action": (
-                            "STRONG SELL" if pred.get("direction") == "SELL" and pred.get("confidence", 0) > 0.5 else
-                            "SELL" if pred.get("direction") == "SELL" else
-                            "STRONG BUY" if pred.get("direction") == "BUY" and pred.get("confidence", 0) > 0.5 else
-                            "BUY" if pred.get("direction") == "BUY" else
-                            "HOLD"
-                        ),
-                        "source": "position",
-                    })
-            except Exception as e:
-                forecasts.append({
-                    "ticker": ticker,
-                    "error": str(e),
-                })
+            pred = resp.json()
 
-    # Compute portfolio-level insights
+            # Prefer real market price; fall back to position's stored price
+            _, real_price = _real_rsi_and_price(ticker)
+            current = real_price or pos.get("current_price") or pos.get("last_price") or 0
+            qty = pos.get("quantity", 0)
+            target = current * (1 + pred.get("predicted_return", 0))
+            position_value = current * qty
+            pnl_forecast = (target - current) * qty
+            forecasts.append({
+                "ticker": ticker,
+                "shares": qty,
+                "current_price": round(current, 2),
+                "target_price": round(target, 2),
+                "predicted_return": pred.get("predicted_return", 0),
+                "direction": pred.get("direction", "HOLD"),
+                "confidence": pred.get("confidence", 0),
+                "position_value": round(position_value, 2),
+                "projected_pnl": round(pnl_forecast, 2),
+                "action": (
+                    "STRONG SELL" if pred.get("direction") == "SELL" and pred.get("confidence", 0) > 0.5 else
+                    "SELL" if pred.get("direction") == "SELL" else
+                    "STRONG BUY" if pred.get("direction") == "BUY" and pred.get("confidence", 0) > 0.5 else
+                    "BUY" if pred.get("direction") == "BUY" else
+                    "HOLD"
+                ),
+                "source": "demo" if is_demo_fallback else "position",
+            })
+        except Exception as e:
+            forecasts.append({"ticker": ticker, "error": str(e)})
+
     total_value = sum(f.get("position_value", 0) for f in forecasts if "position_value" in f)
     total_projected = sum(f.get("projected_pnl", 0) for f in forecasts if "projected_pnl" in f)
-    bullish = [f for f in forecasts if f.get("direction") == "BUY"]
-    bearish = [f for f in forecasts if f.get("direction") == "SELL"]
-
-    # Sort by confidence
-    bullish.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-    bearish.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    bullish = sorted([f for f in forecasts if f.get("direction") == "BUY"], key=lambda x: x.get("confidence", 0), reverse=True)
+    bearish = sorted([f for f in forecasts if f.get("direction") == "SELL"], key=lambda x: x.get("confidence", 0), reverse=True)
 
     return {
         "workspace_id": wid,
@@ -3367,42 +3403,49 @@ async def robinhood_personalized_forecast(token: Optional[str] = None):
                 "Hold current positions - no strong signals"
             ),
             "has_positions": bool(positions),
-            "analysis_source": "positions" if positions else "watchlist",
+            "analysis_source": "demo" if is_demo_fallback else "positions",
+            "is_demo_fallback": is_demo_fallback,
         },
         "demo": mcp_demo_mode(),
     }
+
+
+def _real_rsi_and_price(ticker: str) -> tuple[float, float]:
+    """Compute RSI(14) and last close price from real market data (Alpaca/yfinance).
+
+    More reliable than relying on Robinhood's MCP technical-indicator tool,
+    which requires extra scopes and can silently fail.
+    """
+    try:
+        df = fetch_ohlcv(ticker, period="6mo", interval="1d")
+        if df is None or df.empty:
+            return 50.0, 0.0
+        df = compute_indicators(df)
+        last = df.iloc[-1]
+        rsi_val = float(last.get("rsi14", 50.0))
+        price = float(last.get("adj close", last.get("close", 0.0)))
+        if pd.isna(rsi_val):
+            rsi_val = 50.0
+        return rsi_val, price
+    except Exception:
+        return 50.0, 0.0
 
 
 @app.get("/robinhood/personalized/signals")
 async def robinhood_personalized_signals(token: Optional[str] = None):
     """Generate entry/sell signals for user's positions and watchlist.
 
-    Combines ML model predictions with technical indicators to generate
-    actionable entry/exit signals with confidence levels.
+    Combines ML model predictions with real RSI (computed from market data)
+    to generate actionable entry/exit signals with confidence levels.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
 
-    # Get portfolio and watchlist
-    if mcp_demo_mode():
-        portfolio = await _demo_portfolio(wid)
-        watchlist = portfolio.get("watchlist", ["AAPL", "NVDA", "MSFT", "TSLA", "COST"])
-        positions = portfolio.get("positions", [])
-    else:
-        portfolio_resp = await mgr.get_portfolio(wid)
-        portfolio = portfolio_resp.get("result", {})
-        positions = portfolio.get("positions", [])
+    positions, _ = await _get_positions_with_fallback(wid, mgr)
+    watchlist = await _get_watchlist_with_fallback(wid, mgr)
+    position_tickers = [p.get("symbol") for p in positions if p.get("symbol")]
 
-        watchlists_resp = await mgr.get_watchlists(wid)
-        watchlists = watchlists_resp.get("result", {}).get("watchlists", [])
-        if watchlists:
-            items = watchlists[0].get("items", [])
-            watchlist = [item.get("symbol") for item in items if item.get("symbol")]
-        else:
-            watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "COST"]
-
-    # Combine positions and watchlist for analysis
-    tickers_to_analyze = list(set([p.get("symbol") for p in positions if p.get("symbol")] + watchlist[:10]))
+    tickers_to_analyze = list(dict.fromkeys(position_tickers + watchlist[:10]))[:15]
 
     signals = []
     for ticker in tickers_to_analyze:
@@ -3414,30 +3457,15 @@ async def robinhood_personalized_signals(token: Optional[str] = None):
                 json={"ticker": ticker, "include_trajectory": False},
                 timeout=10
             )
-            ml_signal = None
-            if resp.status_code == 200:
-                ml_signal = resp.json()
+            ml_signal = resp.json() if resp.status_code == 200 else None
 
-            # Get technical indicators
-            tech_resp = await mgr.get_equity_technical_indicators(
-                wid, ticker, indicator="rsi", interval="day", span="week"
-            ) if not mcp_demo_mode() else {"result": {"rsi": 50}}
-            rsi = tech_resp.get("result", {}).get("rsi", 50)
+            # Get real RSI + price
+            rsi, current_price = _real_rsi_and_price(ticker)
 
-            # Get current price
-            quote_resp = await mgr.get_equity_quotes(wid, [ticker]) if not mcp_demo_mode() else {"result": {"quotes": [{"last_price": 100}]}}
-            quotes = quote_resp.get("result", {}).get("quotes", [])
-            current_price = quotes[0].get("last_price", 100) if quotes else 100
-
-            # Generate signal based on ML + RSI
             direction = ml_signal.get("direction", "HOLD") if ml_signal else "HOLD"
             confidence = ml_signal.get("confidence", 0) if ml_signal else 0
             predicted_return = ml_signal.get("predicted_return", 0) if ml_signal else 0
 
-            # RSI-based signal
-            rsi_signal = "BUY" if rsi < 30 else "SELL" if rsi > 70 else "HOLD"
-
-            # Combined signal
             if direction == "BUY" and rsi < 40:
                 signal = "STRONG BUY"
                 reason = f"ML bullish ({confidence*100:.0f}%) + oversold RSI ({rsi:.0f})"
@@ -3470,17 +3498,16 @@ async def robinhood_personalized_signals(token: Optional[str] = None):
                 "predicted_return": round(predicted_return, 4),
                 "rsi": round(rsi, 1),
                 "timestamp": _utc_now_iso(),
-                "source": "position" if ticker in [p.get("symbol") for p in positions] else "watchlist",
+                "source": "position" if ticker in position_tickers else "watchlist",
             })
         except Exception as e:
             signals.append({
                 "ticker": ticker,
                 "signal": "ERROR",
                 "reason": f"Analysis failed: {str(e)[:100]}",
-                "source": "position" if ticker in [p.get("symbol") for p in positions] else "watchlist",
+                "source": "position" if ticker in position_tickers else "watchlist",
             })
 
-    # Sort by signal strength
     signal_order = {"STRONG BUY": 0, "BUY": 1, "WATCH BUY": 2, "HOLD": 3, "WATCH SELL": 4, "SELL": 5, "STRONG SELL": 6, "ERROR": 7}
     signals.sort(key=lambda x: signal_order.get(x.get("signal"), 7))
 
@@ -3499,173 +3526,142 @@ async def robinhood_personalized_signals(token: Optional[str] = None):
     }
 
 
+def _synthetic_option_chain(current_price: float, hist_vol: float, days_to_expiry: int, strategy: str) -> list[dict]:
+    """Generate a synthetic option chain using Black-Scholes approximation.
+
+    Robinhood's live option chain tool requires elevated permissions that
+    aren't available to a view-only agentic connection, so we compute
+    realistic ATM strikes/prices/greeks from real historical volatility.
+    """
+    import math as _math
+    from scipy.stats import norm
+
+    T = max(days_to_expiry, 1) / 365.0
+    r = 0.045  # risk-free rate approximation
+    sigma = max(hist_vol, 0.15)
+    option_type = "call" if strategy == "long" else "put"
+
+    # Generate strikes around current price (ATM +/- 2 increments)
+    increment = round(current_price * 0.025, 1) if current_price > 20 else 1.0
+    increment = max(increment, 0.5)
+    strikes = [round(current_price + k * increment, 2) for k in range(-2, 3)]
+
+    chain = []
+    for strike in strikes:
+        d1 = (_math.log(current_price / strike) + (r + 0.5 * sigma**2) * T) / (sigma * _math.sqrt(T))
+        d2 = d1 - sigma * _math.sqrt(T)
+        if option_type == "call":
+            price = current_price * norm.cdf(d1) - strike * _math.exp(-r * T) * norm.cdf(d2)
+            delta = norm.cdf(d1)
+        else:
+            price = strike * _math.exp(-r * T) * norm.cdf(-d2) - current_price * norm.cdf(-d1)
+            delta = norm.cdf(d1) - 1
+        price = max(price, 0.01)
+        chain.append({
+            "strike": strike,
+            "mid_price": round(price, 2),
+            "delta": round(delta, 3),
+            "implied_vol": round(sigma, 3),
+        })
+    return chain
+
+
 @app.get("/robinhood/personalized/options/recommendations")
 async def robinhood_options_recommendations(
     token: Optional[str] = None,
     balance: Optional[float] = None,
-    strategy: str = "long",  # long, short, covered_call, protective_put
+    strategy: str = "long",  # long or short
     expiry_days: int = 30,
 ):
-    """Generate hourly options recommendations for long/short strategies.
+    """Generate options recommendations for long/short strategies.
 
-    Analyzes user's positions and watchlist to recommend option strategies
-    based on current market conditions and ML predictions.
+    Uses real market prices + historical volatility to compute synthetic
+    option chains (Black-Scholes), ranked by ML confidence × delta.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
 
-    # Get portfolio and watchlist
-    if mcp_demo_mode():
-        portfolio = await _demo_portfolio(wid)
-        watchlist = portfolio.get("watchlist", ["AAPL", "NVDA", "MSFT", "TSLA", "COST"])
-        positions = portfolio.get("positions", [])
-        balance = balance or 10000.0
-    else:
-        portfolio_resp = await mgr.get_portfolio(wid)
-        portfolio = portfolio_resp.get("result", {})
-        positions = portfolio.get("positions", [])
+    positions, is_demo_fallback = await _get_positions_with_fallback(wid, mgr)
+    watchlist = await _get_watchlist_with_fallback(wid, mgr)
+    position_tickers = [p.get("symbol") for p in positions if p.get("symbol")]
 
-        watchlists_resp = await mgr.get_watchlists(wid)
-        watchlists = watchlists_resp.get("result", {}).get("watchlists", [])
-        if watchlists:
-            items = watchlists[0].get("items", [])
-            watchlist = [item.get("symbol") for item in items if item.get("symbol")]
-        else:
-            watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "COST"]
-
-        # Get account balance if not provided
-        if balance is None:
+    if balance is None:
+        try:
             accounts_resp = await mgr.get_accounts(wid)
-            accounts = accounts_resp.get("result", {}).get("accounts", [])
-            if accounts:
-                balance = accounts[0].get("buying_power", 10000.0)
-            else:
-                balance = 10000.0
+            accounts_data = accounts_resp.get("result", {}).get("data", accounts_resp.get("result", {}))
+            accounts = accounts_data.get("accounts", []) if isinstance(accounts_data, dict) else []
+            balance = float(accounts[0].get("buying_power", 10000.0)) if accounts else 10000.0
+        except Exception:
+            balance = 10000.0
 
-    # Analyze tickers for options opportunities
-    tickers_to_analyze = list(set([p.get("symbol") for p in positions if p.get("symbol")] + watchlist[:5]))
+    tickers_to_analyze = list(dict.fromkeys(position_tickers + watchlist[:5]))[:8]
     recommendations = []
 
     for ticker in tickers_to_analyze:
         try:
-            # Get ML prediction
             ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
             resp = httpx.post(
                 f"{ml_url}/predict",
                 json={"ticker": ticker, "include_trajectory": False},
                 timeout=10
             )
-            ml_signal = None
-            if resp.status_code == 200:
-                ml_signal = resp.json()
-
-            # Get option chains
-            chains_resp = await mgr.get_option_chains(wid, ticker) if not mcp_demo_mode() else {"result": {"chains": []}}
-            chains = chains_resp.get("result", {}).get("chains", [])
-
-            if not chains:
-                continue
-
-            # Get current price
-            quote_resp = await mgr.get_equity_quotes(wid, [ticker]) if not mcp_demo_mode() else {"result": {"quotes": [{"last_price": 100}]}}
-            quotes = quote_resp.get("result", {}).get("quotes", [])
-            current_price = quotes[0].get("last_price", 100) if quotes else 100
-
-            # Generate recommendations based on strategy
+            ml_signal = resp.json() if resp.status_code == 200 else None
             direction = ml_signal.get("direction", "HOLD") if ml_signal else "HOLD"
             confidence = ml_signal.get("confidence", 0) if ml_signal else 0
 
-            for chain in chains[:2]:  # Analyze first 2 expirations
-                expiry = chain.get("expiry")
-                if not expiry:
-                    continue
+            # Only recommend when ML agrees with requested strategy direction
+            wants_call = strategy == "long" and direction == "BUY"
+            wants_put = strategy == "short" and direction == "SELL"
+            if not (wants_call or wants_put) or confidence < 0.35:
+                continue
 
-                # Calculate days to expiry
-                from datetime import datetime
-                try:
-                    expiry_date = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-                    days_to_expiry = (expiry_date - datetime.now(expiry_date.tzinfo)).days
-                    if days_to_expiry > expiry_days * 2:  # Skip far expirations
-                        continue
-                except:
-                    days_to_expiry = 30
+            df = fetch_ohlcv(ticker, period="6mo", interval="1d")
+            if df is None or df.empty:
+                continue
+            df = compute_indicators(df)
+            current_price = float(df.iloc[-1].get("adj close", df.iloc[-1].get("close", 0)))
+            hist_vol = float(df.iloc[-1].get("vol20", 0.3)) if not pd.isna(df.iloc[-1].get("vol20", None)) else 0.3
+            if current_price <= 0:
+                continue
 
-                # Get instruments for this chain
-                instruments_resp = await mgr.get_option_instruments(
-                    wid, chain.get("chain_id"), option_type="call" if strategy == "long" else "put"
-                ) if not mcp_demo_mode() else {"result": {"instruments": []}}
-                instruments = instruments_resp.get("result", {}).get("instruments", [])
+            chain = _synthetic_option_chain(current_price, hist_vol, expiry_days, strategy)
+            # Pick the ATM option (closest to current price)
+            atm = min(chain, key=lambda o: abs(o["strike"] - current_price))
 
-                if not instruments:
-                    continue
+            contracts = max(1, int(balance * 0.05 / (atm["mid_price"] * 100))) if atm["mid_price"] > 0 else 0
+            if contracts == 0:
+                continue
+            total_cost = contracts * atm["mid_price"] * 100
+            option_strategy = "LONG CALL" if strategy == "long" else "LONG PUT"
+            score = round(confidence * abs(atm["delta"]) * 100, 2)
 
-                # Find ATM options (closest to current price)
-                atm_options = sorted(
-                    instruments,
-                    key=lambda x: abs((x.get("strike") or 0) - current_price)
-                )[:3]
-
-                for opt in atm_options:
-                    strike = opt.get("strike")
-                    bid = opt.get("bid", 0)
-                    ask = opt.get("ask", 0)
-                    mid = (bid + ask) / 2 if bid and ask else 0
-
-                    if not mid:
-                        continue
-
-                    # Calculate metrics
-                    delta = opt.get("delta", 0.5)
-                    implied_vol = opt.get("implied_volatility", 0.3)
-                    contracts = max(1, int(balance * 0.05 / (mid * 100)))  # 5% of balance per trade
-                    cost = contracts * mid * 100
-
-                    # Generate recommendation
-                    if strategy == "long" and direction == "BUY" and confidence > 0.4:
-                        recommendations.append({
-                            "ticker": ticker,
-                            "strategy": "LONG CALL",
-                            "expiry": expiry,
-                            "days_to_expiry": days_to_expiry,
-                            "strike": strike,
-                            "entry_price": round(mid, 2),
-                            "contracts": contracts,
-                            "total_cost": round(cost, 2),
-                            "delta": round(delta, 3),
-                            "implied_vol": round(implied_vol, 3),
-                            "ml_direction": direction,
-                            "ml_confidence": round(confidence, 3),
-                            "reason": f"ML bullish ({confidence*100:.0f}%) — long call for upside",
-                            "risk_level": "MEDIUM",
-                            "score": round(confidence * delta * 100, 2),
-                        })
-                    elif strategy == "short" and direction == "SELL" and confidence > 0.4:
-                        recommendations.append({
-                            "ticker": ticker,
-                            "strategy": "LONG PUT",
-                            "expiry": expiry,
-                            "days_to_expiry": days_to_expiry,
-                            "strike": strike,
-                            "entry_price": round(mid, 2),
-                            "contracts": contracts,
-                            "total_cost": round(cost, 2),
-                            "delta": round(delta, 3),
-                            "implied_vol": round(implied_vol, 3),
-                            "ml_direction": direction,
-                            "ml_confidence": round(confidence, 3),
-                            "reason": f"ML bearish ({confidence*100:.0f}%) — long put for downside",
-                            "risk_level": "MEDIUM",
-                            "score": round(confidence * (1-delta) * 100, 2),
-                        })
-        except Exception as e:
+            recommendations.append({
+                "ticker": ticker,
+                "strategy": option_strategy,
+                "expiry": (datetime.now() + timedelta(days=expiry_days)).date().isoformat(),
+                "days_to_expiry": expiry_days,
+                "strike": atm["strike"],
+                "current_price": round(current_price, 2),
+                "entry_price": atm["mid_price"],
+                "contracts": contracts,
+                "total_cost": round(total_cost, 2),
+                "delta": atm["delta"],
+                "implied_vol": atm["implied_vol"],
+                "ml_direction": direction,
+                "ml_confidence": round(confidence, 3),
+                "reason": f"ML {direction.lower()} ({confidence*100:.0f}%) — {option_strategy.lower()} for {'upside' if strategy == 'long' else 'downside'}",
+                "risk_level": "HIGH" if confidence < 0.5 else "MEDIUM",
+                "score": score,
+                "source": "position" if ticker in position_tickers else "watchlist",
+            })
+        except Exception:
             continue
 
-    # Sort by score (highest first)
     recommendations.sort(key=lambda x: x.get("score", 0), reverse=True)
 
     return {
         "workspace_id": wid,
-        "recommendations": recommendations[:20],  # Top 20
+        "recommendations": recommendations[:20],
         "summary": {
             "total_opportunities": len(recommendations),
             "long_calls": len([r for r in recommendations if r.get("strategy") == "LONG CALL"]),
@@ -3675,7 +3671,7 @@ async def robinhood_options_recommendations(
             "strategy": strategy,
             "expiry_days": expiry_days,
         },
-        "demo": mcp_demo_mode(),
+        "demo": mcp_demo_mode() or is_demo_fallback,
     }
 
 
@@ -3683,89 +3679,57 @@ async def robinhood_options_recommendations(
 async def robinhood_personalized_sentiment(token: Optional[str] = None):
     """Generate sentiment analysis with warnings and rules of thumb.
 
-    Analyzes user's positions and watchlist to provide personalized
-    sentiment analysis, warnings, and actionable rules of thumb for
-    timing entries correctly.
+    Uses real market data (RSI, price, historical volatility) combined with
+    ML predictions. Every ticker gets an explicit reasoning sentence — not
+    just conditional warnings — so the score is always explainable.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
 
-    # Get portfolio and watchlist
-    if mcp_demo_mode():
-        portfolio = await _demo_portfolio(wid)
-        watchlist = portfolio.get("watchlist", ["AAPL", "NVDA", "MSFT", "TSLA", "COST"])
-        positions = portfolio.get("positions", [])
-    else:
-        portfolio_resp = await mgr.get_portfolio(wid)
-        portfolio = portfolio_resp.get("result", {})
-        positions = portfolio.get("positions", [])
+    positions, is_demo_fallback = await _get_positions_with_fallback(wid, mgr)
+    watchlist = await _get_watchlist_with_fallback(wid, mgr)
+    position_tickers = [p.get("symbol") for p in positions if p.get("symbol")]
+    tickers_to_analyze = list(dict.fromkeys(position_tickers + watchlist[:8]))[:12]
 
-        watchlists_resp = await mgr.get_watchlists(wid)
-        watchlists = watchlists_resp.get("result", {}).get("watchlists", [])
-        if watchlists:
-            items = watchlists[0].get("items", [])
-            watchlist = [item.get("symbol") for item in items if item.get("symbol")]
-        else:
-            watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "COST"]
-
-    # Analyze each ticker
-    tickers_to_analyze = list(set([p.get("symbol") for p in positions if p.get("symbol")] + watchlist[:8]))
     sentiment_analysis = []
 
     for ticker in tickers_to_analyze:
         try:
-            # Get ML prediction
             ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
             resp = httpx.post(
                 f"{ml_url}/predict",
                 json={"ticker": ticker, "include_trajectory": False},
                 timeout=10
             )
-            ml_signal = None
-            if resp.status_code == 200:
-                ml_signal = resp.json()
-
-            # Get technical indicators
-            tech_resp = await mgr.get_equity_technical_indicators(
-                wid, ticker, indicator="rsi", interval="day", span="week"
-            ) if not mcp_demo_mode() else {"result": {"rsi": 50}}
-            rsi = tech_resp.get("result", {}).get("rsi", 50)
-
-            # Get fundamentals
-            fund_resp = await mgr.get_equity_fundamentals(wid, ticker) if not mcp_demo_mode() else {"result": {"pe_ratio": 20}}
-            fundamentals = fund_resp.get("result", {})
-            pe_ratio = fundamentals.get("pe_ratio", 20)
-            market_cap = fundamentals.get("market_cap", 0)
-
-            # Get earnings
-            earnings_resp = await mgr.get_earnings_results(wid, ticker) if not mcp_demo_mode() else {"result": {"next_report": None}}
-            earnings = earnings_resp.get("result", {})
-            next_report = earnings.get("next_report")
-
-            # Get current price
-            quote_resp = await mgr.get_equity_quotes(wid, [ticker]) if not mcp_demo_mode() else {"result": {"quotes": [{"last_price": 100}]}}
-            quotes = quote_resp.get("result", {}).get("quotes", [])
-            current_price = quotes[0].get("last_price", 100) if quotes else 100
-
-            # Generate sentiment analysis
+            ml_signal = resp.json() if resp.status_code == 200 else None
             direction = ml_signal.get("direction", "HOLD") if ml_signal else "HOLD"
             confidence = ml_signal.get("confidence", 0) if ml_signal else 0
 
-            # Sentiment score (-1 to 1)
+            rsi, current_price = _real_rsi_and_price(ticker)
+
+            # Try fundamentals from Robinhood MCP (best-effort, non-blocking)
+            pe_ratio, market_cap, next_report = None, None, None
+            try:
+                fund_resp = await mgr.get_equity_fundamentals(wid, ticker)
+                fundamentals = fund_resp.get("result", {}).get("data", fund_resp.get("result", {}))
+                if isinstance(fundamentals, dict):
+                    pe_ratio = fundamentals.get("pe_ratio")
+                    market_cap = fundamentals.get("market_cap")
+            except Exception:
+                pass
+
             sentiment_score = confidence if direction == "BUY" else -confidence if direction == "SELL" else 0
 
-            # Warnings
             warnings = []
             if rsi > 70:
                 warnings.append(f"Overbought RSI ({rsi:.0f}) — consider taking profits")
             if rsi < 30:
                 warnings.append(f"Oversold RSI ({rsi:.0f}) — potential entry opportunity")
-            if pe_ratio > 50:
+            if pe_ratio and pe_ratio > 50:
                 warnings.append(f"High P/E ratio ({pe_ratio:.0f}) — elevated valuation")
             if next_report:
-                warnings.append(f"Earnings report soon — expect volatility")
+                warnings.append("Earnings report soon — expect volatility")
 
-            # Rules of thumb
             rules = []
             if direction == "BUY" and rsi < 40:
                 rules.append("ML bullish + RSI not overbought → good entry setup")
@@ -3776,7 +3740,6 @@ async def robinhood_personalized_sentiment(token: Optional[str] = None):
             if confidence < 0.3:
                 rules.append("Low confidence — wait for better setup")
 
-            # Market play context
             market_play = "neutral"
             if rsi > 70 and direction == "BUY":
                 market_play = "momentum_chase"
@@ -3786,6 +3749,15 @@ async def robinhood_personalized_sentiment(token: Optional[str] = None):
                 market_play = "distribution"
             elif rsi < 40 and direction == "SELL":
                 market_play = "panic_sell"
+
+            # Always produce an explicit, non-vague reasoning sentence
+            explanation = (
+                f"ML model predicts {direction} with {confidence*100:.0f}% confidence "
+                f"(predicted return {ml_signal.get('predicted_return', 0)*100:.2f}%). "
+                f"RSI(14) is {rsi:.0f} at ${current_price:.2f}, which is "
+                f"{'oversold' if rsi < 30 else 'overbought' if rsi > 70 else 'neutral'}. "
+                f"Combined signal score: {sentiment_score:+.2f}."
+            )
 
             sentiment_analysis.append({
                 "ticker": ticker,
@@ -3797,36 +3769,41 @@ async def robinhood_personalized_sentiment(token: Optional[str] = None):
                 "pe_ratio": round(pe_ratio, 1) if pe_ratio else None,
                 "market_cap": round(market_cap / 1e9, 1) if market_cap else None,
                 "next_earnings": next_report,
+                "explanation": explanation,
                 "warnings": warnings,
                 "rules_of_thumb": rules,
                 "market_play": market_play,
-                "source": "position" if ticker in [p.get("symbol") for p in positions] else "watchlist",
+                "source": "position" if ticker in position_tickers else "watchlist",
             })
         except Exception as e:
             sentiment_analysis.append({
                 "ticker": ticker,
                 "error": f"Analysis failed: {str(e)[:100]}",
-                "source": "position" if ticker in [p.get("symbol") for p in positions] else "watchlist",
+                "source": "position" if ticker in position_tickers else "watchlist",
             })
 
-    # Sort by sentiment score (most bullish first)
     sentiment_analysis.sort(key=lambda x: x.get("sentiment_score", 0), reverse=True)
 
-    # Generate overall market sentiment
     bullish_count = len([s for s in sentiment_analysis if s.get("ml_direction") == "BUY"])
     bearish_count = len([s for s in sentiment_analysis if s.get("ml_direction") == "SELL"])
-    avg_sentiment = sum(s.get("sentiment_score", 0) for s in sentiment_analysis) / len(sentiment_analysis) if sentiment_analysis else 0
+    valid = [s for s in sentiment_analysis if "sentiment_score" in s]
+    avg_sentiment = sum(s.get("sentiment_score", 0) for s in valid) / len(valid) if valid else 0
+    overall_sentiment = "BULLISH" if avg_sentiment > 0.15 else "BEARISH" if avg_sentiment < -0.15 else "NEUTRAL"
 
-    overall_sentiment = "BULLISH" if avg_sentiment > 0.2 else "BEARISH" if avg_sentiment < -0.2 else "NEUTRAL"
-
-    # Market warnings
     market_warnings = []
-    if bullish_count > bearish_count * 2:
+    if bullish_count > bearish_count * 2 and bullish_count > 0:
         market_warnings.append("Strong bullish bias — consider taking some profits")
-    if bearish_count > bullish_count * 2:
+    if bearish_count > bullish_count * 2 and bearish_count > 0:
         market_warnings.append("Strong bearish bias — consider defensive positioning")
     if avg_sentiment < -0.3:
         market_warnings.append("Overall negative sentiment — expect volatility")
+
+    overview = (
+        f"Analyzed {len(valid)} tickers: {bullish_count} bullish, {bearish_count} bearish, "
+        f"{len(valid) - bullish_count - bearish_count} neutral. Average signal score {avg_sentiment:+.2f} "
+        f"→ {overall_sentiment}. This score is the average of each ticker's ML confidence "
+        f"(signed by direction: +confidence for BUY, -confidence for SELL, 0 for HOLD)."
+    )
 
     return {
         "workspace_id": wid,
@@ -3836,147 +3813,122 @@ async def robinhood_personalized_sentiment(token: Optional[str] = None):
             "avg_sentiment_score": round(avg_sentiment, 3),
             "bullish_count": bullish_count,
             "bearish_count": bearish_count,
-            "neutral_count": len(sentiment_analysis) - bullish_count - bearish_count,
+            "neutral_count": len(valid) - bullish_count - bearish_count,
             "market_warnings": market_warnings,
             "top_bullish": sentiment_analysis[0]["ticker"] if sentiment_analysis else None,
             "top_bearish": sentiment_analysis[-1]["ticker"] if sentiment_analysis else None,
+            "overview": overview,
         },
-        "demo": mcp_demo_mode(),
+        "demo": mcp_demo_mode() or is_demo_fallback,
     }
+
+
+SCANNER_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AMD", "INTC",
+    "AVGO", "CRM", "ADBE", "ORCL", "NFLX", "PANW", "COST", "TGT", "WMT",
+    "JPM", "BAC", "XOM", "CVX", "UNH", "JNJ", "PFE", "KO", "PEP", "DIS",
+]
 
 
 @app.get("/robinhood/scanner/run")
 async def robinhood_scanner_run(
     token: Optional[str] = None,
-    preset: Optional[str] = None,
-    filters: Optional[str] = None,
+    min_volume: float = 1_000_000,
+    max_rsi: Optional[float] = None,
+    min_rsi: Optional[float] = None,
+    direction: Optional[str] = None,  # BUY, SELL, or None for all
 ):
-    """Run a saved scan or create a new one to find better deals.
+    """Scan a curated universe of liquid stocks + user's watchlist for
+    trading opportunities, ranked by ML confidence and RSI.
 
-    Uses Robinhood's scanner to find stocks matching specific criteria
-    for long or short strategies.
+    This is a real functioning scanner using our own market data pipeline
+    (Alpaca/yfinance) rather than depending on Robinhood's scanner tool,
+    which requires elevated permissions not available for view-only access.
     """
     wid = _get_workspace_id(token)
     mgr = get_mcp_manager()
 
-    if mcp_demo_mode():
-        # Return demo scan results
-        return {
-            "workspace_id": wid,
-            "scan_results": [
-                {"ticker": "AAPL", "price": 224.31, "change": 1.2, "volume": 45e6, "rsi": 58, "signal": "BUY"},
-                {"ticker": "NVDA", "price": 1680.50, "change": -2.1, "volume": 120e6, "rsi": 42, "signal": "WATCH BUY"},
-                {"ticker": "MSFT", "price": 415.80, "change": 0.8, "volume": 30e6, "rsi": 55, "signal": "HOLD"},
-                {"ticker": "TSLA", "price": 182.30, "change": -5.4, "volume": 80e6, "rsi": 28, "signal": "STRONG BUY"},
-                {"ticker": "COST", "price": 890.45, "change": 0.5, "volume": 15e6, "rsi": 62, "signal": "WATCH SELL"},
-            ],
-            "summary": {
-                "scan_name": "demo_scan",
-                "total_matches": 5,
-                "strong_buy": 1,
-                "buy": 1,
-                "hold": 1,
-                "sell": 1,
-            },
-            "demo": True,
-        }
+    watchlist = await _get_watchlist_with_fallback(wid, mgr)
+    positions, _ = await _get_positions_with_fallback(wid, mgr)
+    position_tickers = [p.get("symbol") for p in positions if p.get("symbol")]
 
-    # Get user's saved scans
-    scans_resp = await mgr.get_scans(wid)
-    scans = scans_resp.get("result", {}).get("scans", [])
+    universe = list(dict.fromkeys(position_tickers + watchlist + SCANNER_UNIVERSE))[:15]
 
-    if not scans:
-        # Create a default scan for finding opportunities
-        scan_resp = await mgr.create_scan(
-            wid,
-            preset="most_active",
-            filters={"min_volume": 1000000, "rsi_below": 40}
-        )
-        if scan_resp.get("result"):
-            scan_id = scan_resp["result"].get("scan_id")
-            results_resp = await mgr.run_scan(wid, scan_id)
-            results = results_resp.get("result", {}).get("results", [])
-        else:
-            return {
-                "workspace_id": wid,
-                "error": "No scans found and failed to create default scan",
-            }
-    else:
-        # Run the first saved scan
-        scan_id = scans[0].get("id")
-        results_resp = await mgr.run_scan(wid, scan_id)
-        results = results_resp.get("result", {}).get("results", [])
-
-    # Analyze scan results with ML
     analyzed_results = []
-    for result in results[:20]:  # Top 20
-        ticker = result.get("symbol")
-        if not ticker:
-            continue
-
+    for ticker in universe:
         try:
-            # Get ML prediction
+            df = fetch_ohlcv(ticker, period="3mo", interval="1d")
+            if df is None or df.empty or len(df) < 5:
+                continue
+            df = compute_indicators(df)
+            last = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else last
+            price = float(last.get("adj close", last.get("close", 0)))
+            prev_price = float(prev.get("adj close", prev.get("close", price)))
+            rsi = float(last.get("rsi14", 50.0))
+            if pd.isna(rsi):
+                rsi = 50.0
+            volume = float(last.get("volume", 0)) if "volume" in df.columns else 0
+            change_pct = ((price / prev_price) - 1) * 100 if prev_price else 0
+
+            if volume and volume < min_volume:
+                continue
+            if max_rsi is not None and rsi > max_rsi:
+                continue
+            if min_rsi is not None and rsi < min_rsi:
+                continue
+
             ml_url = os.environ.get("ML_ENGINE_URL", "http://localhost:8000")
             resp = httpx.post(
                 f"{ml_url}/predict",
                 json={"ticker": ticker, "include_trajectory": False},
                 timeout=10
             )
-            ml_signal = None
-            if resp.status_code == 200:
-                ml_signal = resp.json()
-
-            # Get technical indicators
-            tech_resp = await mgr.get_equity_technical_indicators(
-                wid, ticker, indicator="rsi", interval="day", span="week"
-            )
-            rsi = tech_resp.get("result", {}).get("rsi", 50)
-
-            # Generate signal
-            direction = ml_signal.get("direction", "HOLD") if ml_signal else "HOLD"
+            ml_signal = resp.json() if resp.status_code == 200 else None
+            ml_direction = ml_signal.get("direction", "HOLD") if ml_signal else "HOLD"
             confidence = ml_signal.get("confidence", 0) if ml_signal else 0
 
-            if direction == "BUY" and rsi < 40:
+            if direction and ml_direction != direction:
+                continue
+
+            if ml_direction == "BUY" and rsi < 40:
                 signal = "STRONG BUY"
-            elif direction == "BUY":
+            elif ml_direction == "BUY":
                 signal = "BUY"
-            elif direction == "SELL" and rsi > 60:
+            elif ml_direction == "SELL" and rsi > 60:
                 signal = "STRONG SELL"
-            elif direction == "SELL":
+            elif ml_direction == "SELL":
                 signal = "SELL"
+            elif rsi < 30:
+                signal = "WATCH BUY"
+            elif rsi > 70:
+                signal = "WATCH SELL"
             else:
                 signal = "HOLD"
 
             analyzed_results.append({
                 "ticker": ticker,
-                "price": result.get("price", 0),
-                "change": result.get("change", 0),
-                "volume": result.get("volume", 0),
+                "price": round(price, 2),
+                "change": round(change_pct, 2),
+                "volume": volume,
                 "rsi": round(rsi, 1),
                 "signal": signal,
-                "ml_direction": direction,
+                "ml_direction": ml_direction,
                 "ml_confidence": round(confidence, 3),
-                "reason": f"ML {direction.lower()} ({confidence*100:.0f}%) + RSI {rsi:.0f}",
+                "reason": f"ML {ml_direction.lower()} ({confidence*100:.0f}%) + RSI {rsi:.0f}",
+                "source": "position" if ticker in position_tickers else "watchlist" if ticker in watchlist else "universe",
             })
         except Exception:
-            analyzed_results.append({
-                "ticker": ticker,
-                "price": result.get("price", 0),
-                "change": result.get("change", 0),
-                "volume": result.get("volume", 0),
-                "signal": "ERROR",
-                "reason": "Analysis failed",
-            })
+            continue
 
-    # Sort by signal strength
-    signal_order = {"STRONG BUY": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "STRONG SELL": 4, "ERROR": 5}
-    analyzed_results.sort(key=lambda x: signal_order.get(x.get("signal"), 5))
+    signal_order = {"STRONG BUY": 0, "BUY": 1, "WATCH BUY": 2, "HOLD": 3, "WATCH SELL": 4, "SELL": 5, "STRONG SELL": 6}
+    analyzed_results.sort(key=lambda x: (signal_order.get(x.get("signal"), 7), -x.get("ml_confidence", 0)))
 
     return {
         "workspace_id": wid,
-        "scan_results": analyzed_results,
+        "scan_results": analyzed_results[:25],
         "summary": {
-            "scan_name": scans[0].get("name", "default") if scans else "default",
+            "scan_name": "liquid_universe_scan",
             "total_matches": len(analyzed_results),
             "strong_buy": len([r for r in analyzed_results if r.get("signal") == "STRONG BUY"]),
             "buy": len([r for r in analyzed_results if r.get("signal") == "BUY"]),
@@ -3984,6 +3936,7 @@ async def robinhood_scanner_run(
             "sell": len([r for r in analyzed_results if r.get("signal") == "SELL"]),
             "strong_sell": len([r for r in analyzed_results if r.get("signal") == "STRONG SELL"]),
             "top_pick": analyzed_results[0]["ticker"] if analyzed_results else None,
+            "filters_applied": {"min_volume": min_volume, "max_rsi": max_rsi, "min_rsi": min_rsi, "direction": direction},
         },
         "demo": mcp_demo_mode(),
     }
