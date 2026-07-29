@@ -14,6 +14,7 @@ import ScreenTitle from "../components/shared/ScreenTitle";
 import WatchlistPanel from "../components/dashboard/WatchlistPanel";
 import AllocationAdvisor from "../components/dashboard/AllocationAdvisor";
 import RobinhoodDashboard from "../components/robinhood/RobinhoodDashboard";
+import RobinhoodSignals from "../components/robinhood/RobinhoodSignals";
 import useRobinhood from "../hooks/useRobinhood";
 import useWatchlist from "../hooks/useWatchlist";
 import PortfolioManager from "../components/dashboard/PortfolioManager";
@@ -49,6 +50,7 @@ export default function DashboardScreen({ token }) {
       <EquityCurve data={equityCurve} />
 
       <RobinhoodDashboard useRobinhood={useRobinhood} token={token} useWatchlist={useWatchlist} />
+      <RobinhoodSignals useRobinhood={useRobinhood} token={token} />
       <WatchlistPanel token={token} />
       <AllocationAdvisor token={token} />
       <PortfolioManager token={token} />

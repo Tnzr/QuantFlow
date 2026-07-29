@@ -13,6 +13,10 @@ export default function useRobinhood(token) {
   const [orders, setOrders] = useState(null);
   const [watchlist, setWatchlist] = useState(null);
   const [forecast, setForecast] = useState(null);
+  const [signals, setSignals] = useState(null);
+  const [sentiment, setSentiment] = useState(null);
+  const [options, setOptions] = useState(null);
+  const [scanner, setScanner] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -202,6 +206,47 @@ export default function useRobinhood(token) {
     }
   }, [token]);
 
+  const fetchSignals = useCallback(async () => {
+    try {
+      const data = await apiGet("/robinhood/personalized/signals", token);
+      setSignals(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [token]);
+
+  const fetchSentiment = useCallback(async () => {
+    try {
+      const data = await apiGet("/robinhood/personalized/sentiment", token);
+      setSentiment(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [token]);
+
+  const fetchOptions = useCallback(async (params = {}) => {
+    try {
+      const searchParams = new URLSearchParams();
+      if (params.strategy) searchParams.set("strategy", params.strategy);
+      if (params.expiry_days) searchParams.set("expiry_days", params.expiry_days);
+      if (params.balance) searchParams.set("balance", params.balance);
+      const url = `/robinhood/personalized/options/recommendations${searchParams.toString() ? "?" + searchParams.toString() : ""}`;
+      const data = await apiGet(url, token);
+      setOptions(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [token]);
+
+  const fetchScanner = useCallback(async () => {
+    try {
+      const data = await apiGet("/robinhood/scanner/run", token);
+      setScanner(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [token]);
+
   const addToWatchlist = useCallback(async (ticker) => {
     try {
       await apiPost("/robinhood/watchlist/add", { ticker }, token);
@@ -271,6 +316,14 @@ export default function useRobinhood(token) {
     fetchWatchlist,
     importWatchlist,
     fetchForecast,
+    fetchSignals,
+    fetchSentiment,
+    fetchOptions,
+    fetchScanner,
+    signals,
+    sentiment,
+    options,
+    scanner,
     addToWatchlist,
     removeFromWatchlist,
     reviewOrder,
