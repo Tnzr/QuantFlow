@@ -112,19 +112,25 @@ export default function BacktestResults({ summary, sigmaBuckets, trades, onRerun
           <View style={styles.table}>
             <View style={styles.tableHeader}>
               <Text style={[styles.th, styles.colName]}>Ticker</Text>
+              <Text style={[styles.th, styles.colDate]}>Entry Date</Text>
               <Text style={[styles.th, styles.colNum]}>Entry</Text>
+              <Text style={[styles.th, styles.colDate]}>Exit Date</Text>
               <Text style={[styles.th, styles.colNum]}>Exit</Text>
               <Text style={[styles.th, styles.colNum]}>P&L</Text>
             </View>
             {trades.slice(0, 50).map((t, i) => {
               const pnl = (t.pnl != null) ? Number(t.pnl) : ((t.return_pct != null && t.entry_price != null) ? Number(t.entry_price) * Number(t.return_pct) : 0);
               const isWin = pnl >= 0;
+              const entryDate = t.entry_date ? String(t.entry_date).slice(0, 10) : "—";
+              const exitDate = t.exit_date ? String(t.exit_date).slice(0, 10) : "—";
               return (
                 <View key={i} style={styles.tableRow}>
                   <Text style={[styles.td, styles.colName]}>{t.symbol || t.ticker || "—"}</Text>
+                  <Text style={[styles.td, styles.colDate]}>{entryDate}</Text>
                   <Text style={[styles.td, styles.colNum]}>
                     {t.entry_price != null ? `$${Number(t.entry_price).toFixed(2)}` : "—"}
                   </Text>
+                  <Text style={[styles.td, styles.colDate]}>{exitDate}</Text>
                   <Text style={[styles.td, styles.colNum]}>
                     {t.exit_price != null ? `$${Number(t.exit_price).toFixed(2)}` : "—"}
                   </Text>
@@ -200,6 +206,7 @@ const styles = StyleSheet.create({
   th: { color: THEME.textMuted, fontSize: 11, fontWeight: "700" },
   td: { color: THEME.text, fontSize: 12 },
   colName: { flex: 2 },
+  colDate: { flex: 1.4, textAlign: "center", fontVariant: ["tabular-nums"], fontSize: 10 },
   colNum: { flex: 1, textAlign: "right", fontVariant: ["tabular-nums"] },
   more: { color: THEME.textMuted, fontSize: 11, textAlign: "center", paddingVertical: 6 },
   compareBar: { flexDirection: "row", alignItems: "center", gap: 8, padding: 8, backgroundColor: THEME.surfaceLight, borderRadius: 6, marginBottom: 10 },
