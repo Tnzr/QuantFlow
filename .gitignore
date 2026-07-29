@@ -113,3 +113,8 @@ tests/test-*.mjs
 data/*.parquet
 data/database/
 
+# Robinhood OAuth tokens/client registration (contains live secrets)
+configs/robinhood_tokens.json
+configs/robinhood_client_id.json
+configs/user_settings.json
+
