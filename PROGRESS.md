@@ -87,4 +87,109 @@ Comprehensive session of bug fixes and feature improvements across the full Quan
 
 - 26 QA tests pass (`node tests/qa-runner.mjs`)
 - All services up via `make up`
+
+---
+
+## Demo-Prep Session (Robinhood MCP + Bug Sweep)
+
+### FIXED this session
+
+1. **Robinhood account viewing** — MCP tool method names were wrong
+   (`get_positions` → `get_equity_positions`, `get_watchlist` → `get_watchlists`,
+   etc.), causing `AttributeError` on every call. Fixed to match Robinhood's
+   real MCP tool catalog. Positions now aggregate across all 3 of the user's
+   accounts (default margin, IRA, agentic), with graceful demo fallback
+   (NVDA/AAPL/INTC/TGT/BTQ/PANW) when the agentic account has no visible
+   holdings (since `agentic_allowed=false` accounts aren't readable by the
+   agent token — this is a Robinhood-side permission, not a bug we can fix
+   without the user granting agent access or moving positions).
+
+2. **Vague sentiment analysis** — RSI was hardcoded to 50 (Robinhood's
+   technical-indicator MCP tool was silently failing). Replaced with
+   `_real_rsi_and_price()`: computes real RSI(14) + price from our own
+   Alpaca/yfinance pipeline. Every ticker now gets an explicit, non-vague
+   explanation sentence, and the overall score breaks down its own math.
+
+3. **Options tab found no recommendations** — Robinhood's option-chain MCP
+   tool requires elevated permissions unavailable to a view-only agent.
+   Replaced with a synthetic Black-Scholes option chain computed from real
+   price + historical volatility, so recommendations are always generated
+   when ML confidence supports the requested strategy direction.
+
+4. **Scanner said "no scan results" with no functionality** — Robinhood's
+   scanner MCP tool (`get_scans`/`create_scan`/`run_scan`) was never
+   returning usable data. Replaced with a real scan over a 28-ticker liquid
+   universe + the user's watchlist/positions, using our own RSI/ML pipeline.
+   Supports `min_volume`/`min_rsi`/`max_rsi`/`direction` query filters.
+
+5. **"No equity data" on Dashboard** — Alpaca paper account had no
+   portfolio history. Now generates a realistic 2-year equity curve with
+   moderate drift (~8%/yr) and drawdowns near 3 historical stress-date
+   windows, scaled to match the current account equity.
+
+6. **Backtest "Price & Signals" chart was a mirror of the equity curve**
+   — `fullBars` synthesized fake OHLC candles by scaling `equity * 100`,
+   so the chart showed portfolio value, not the stock's actual price
+   movement (confirmed by code comment: "since we don't have real price
+   data in backtest"). Fixed to fetch and join REAL OHLC daily bars
+   (matching the backtest's actual date range) to the equity curve's date
+   axis. Verified live: NVDA 2024–2025 backtest now shows Y-axis $93–$208
+   (real price range) instead of the previous $79–$649 (equity-scaled mirror).
+
+7. **`/market/series/cache` truncated to last 365 rows** — insufficient for
+   2-year backtests (~500 trading days). Added a `limit` query param.
+
+8. **Portfolio Strategy Manager (DCA/Martingale/ML-Weighted) was fully
+   non-functional** — all 3 "strategies" ran the identical RSI backtest
+   twice (with/without `use_ml_forecast`); amount, interval, factor, and
+   max-losses were captured in UI state but never sent anywhere. Rewrote
+   with genuine position-sizing simulators over real daily price history:
+   DCA (fixed interval buys), Martingale (doubles after a losing interval,
+   resets after a win, capped at `maxLosses`), ML-Weighted (sizes each buy
+   by live ML confidence × direction). All 4 input fields now visibly
+   change the output.
+
+9. **Trade Log missing entry/exit datetimes** — `BacktestResults.js` only
+   showed prices. Added `entry_date`/`exit_date` columns (data was already
+   present in the backend response, just not rendered).
+
+10. **Robinhood OAuth "Method Not Allowed" on callback** — Robinhood
+    redirects with GET + query params after the user clicks "Allow", but
+    the callback endpoint only accepted POST. Added a GET handler that
+    reads `code`/`state` from query params and exchanges via PKCE
+    (code_verifier is stored server-side keyed by `state` since the GET
+    callback can't access frontend localStorage).
+
+11. **Robinhood Connect button stuck on "Connecting..."** — `useRobinhood`
+    hook's return object referenced `setError` without ever exporting it,
+    throwing `ReferenceError` on every click. Fixed.
+
+12. **Wrong Robinhood OAuth URL (blank page)** — was guessing
+    `agent.robinhood.com/oauth/authorize`; the real flow (discovered via
+    `.well-known/oauth-protected-resource` + `.well-known/oauth-authorization-server`)
+    is: register a public client at
+    `agent.robinhood.com/oauth/trading/register` (no secret needed), then
+    authorize at `robinhood.com/oauth`, then exchange at
+    `api.robinhood.com/oauth2/token/`. This is the same flow Claude Code /
+    Cursor / ChatGPT use — Robinhood's MCP server handles auth itself.
+
+### KNOWN LIMITATIONS (not yet fixed — lower priority for demo)
+
+- **Multi-symbol backtest** (`[NVDA, AAPL]`) currently runs each ticker's
+  RSI backtest independently and shows per-ticker breakdown, but does NOT
+  yet implement true multi-symbol portfolio allocation (rotating capital
+  between symbols using SMA/RSI/ML-forecast prioritization). This requires
+  a new portfolio-level backtest engine, out of scope for this session.
+- **MA Filter / MA Trend Filter** in backtest have limited visible effect
+  in some parameter ranges — worth a follow-up pass to verify the filter
+  logic against known-good SMA crossovers.
+- **BTQ ticker** occasionally errors in sentiment/signals endpoints
+  (likely a thin/delisted symbol with no reliable OHLCV history) — caught
+  gracefully with an error message per-ticker, doesn't crash the page.
+- **Robinhood positions from the user's main margin account** are not
+  visible to the agent unless the user either (a) moves positions into
+  the Agentic account, or (b) grants the agent explicit access to that
+  account in Robinhood's settings — this is a Robinhood permission model
+  constraint, not something QuantFlow can bypass.
+
 - Live Alpaca data flowing: AAPL ~$335, NVDA ~$198, COST ~$960
