@@ -243,7 +243,8 @@ def step(prev: SignalState, ind: dict, impact: dict, outcome: str | None,
         return st, alerts
 
     if cfg.direction_mode == "either":
-        st.side = "long" if st.bull >= st.bear else "short"
+        allowed = impact.get("tradeable_sides") or ["long", "short"]
+        st.side = max(allowed, key=lambda s: st.bull if s == "long" else st.bear)
     else:
         st.side = "long" if branch_z(impact, outcome, cfg) > 0 else "short"
     own = st.bull if st.side == "long" else st.bear

@@ -306,3 +306,14 @@ def test_legacy_open_state_without_impact_still_gets_exits(tmp_path):
     save_playbook_state(legacy, db)  # no "impact" key, as written by older versions
     out = run_cycle([], "D", db_path=db, send=False, bars_fn=lambda s, *a: None if s != "AAA" else b, chain_fn=lambda s: None)
     assert out["signals"]["AAA"]["state"] == "exited" and out["alerts"][0]["kind"] == "exit"
+
+
+def test_either_mode_only_confirms_affordable_side():
+    r = impact.ImpactRow("AAA", "SPY", "fin", 6, 1.0, 1.0, -1.0, 3, 3, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.4, "up", 2.0, 0.4,
+                         swing_ratio=1.2)
+    fit = lambda sym, side, budget: {"structure": "long_put", "qty": 1} if side == "short" else {"structure": None}
+    kept = impact.top_n_affordable([r], 1, 100, fit, executable_only=True, outcome="R", direction_mode="either")
+    assert kept and kept[0][0].tradeable_sides == ["short"]
+    st, alerts = step(SignalState("AAA"), indicators(bars(last_jump=0.03, last_vol=3.0)), kept[0][0].to_dict(), "R",
+                      RuleConfig(direction_mode="either"))
+    assert st.side == "short" and all(a.instrument != "long_call" for a in alerts)

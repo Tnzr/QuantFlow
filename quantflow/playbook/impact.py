@@ -92,6 +92,7 @@ class ImpactRow:
     per_election: dict = field(default_factory=dict)
     placebo_sensitivity: float = float("nan")  # same statistic on post-midterm-year placebo dates
     swing_ratio: float = float("nan")  # sensitivity / placebo_sensitivity; >1 = midterms move it more
+    tradeable_sides: list = field(default_factory=list)  # sides with a structure that fits the budget (screened)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -218,7 +219,8 @@ def top_n_affordable(
     Direction checked: once ``outcome`` ("D"/"R") is known, the resolved-branch side that the rules
     tree will trade; before that, the projected side first and, if it does not fit, the opposite side
     (the tree can still flip to it after the result), so no tradeable symbol is dropped early.
-    With ``direction_mode="either"`` both sides are always checked, matching ``RuleConfig.direction_mode``."""
+    With ``direction_mode="either"`` both sides are always checked, matching ``RuleConfig.direction_mode``.
+    The sides that fit are stored on ``row.tradeable_sides`` so the rules tree only confirms those."""
     if fit_fn is None:
         fit_fn = _live_fit
     picked, seen = [], {}
@@ -234,14 +236,18 @@ def top_n_affordable(
             branch_z = r.projected_z if outcome not in ("D", "R") else (r.z_dem if outcome == "D" else r.z_rep)
             first = "long" if branch_z > 0 else "short"
             sides = [first, "short" if first == "long" else "long"]
-        st = {}
+        either = direction_mode == "either"
+        fits = {}
         for side in sides:
-            st = fit_fn(r.symbol, side, budget)
-            if ok(st):
-                st = {**st, "side": side}
-                break
-        if not ok(st):
+            cand = fit_fn(r.symbol, side, budget)
+            if ok(cand):
+                fits[side] = {**cand, "side": side}
+                if not either:
+                    break
+        if not fits:
             continue
+        r.tradeable_sides = list(fits)
+        st = next(iter(fits.values()))
         picked.append((r, st))
         seen[r.group] = seen.get(r.group, 0) + 1
         if len(picked) == n:
