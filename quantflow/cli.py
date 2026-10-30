@@ -693,6 +693,42 @@ def cmd_predict(args):
             )
 
 
+
+def cmd_election_ingest(args):
+    from .election.ingest import ingest_all
+
+    print(ingest_all(args.db, fetch_news=not args.no_news, fetch_odds=not args.no_odds))
+
+
+def cmd_agents(args):
+    from .agents.graph import run_agents
+
+    for t in [x.strip().upper() for x in args.tickers.split(",") if x.strip()]:
+        r = run_agents(t, use_llm=args.llm, db_path=args.db)
+        print({"ticker": t, "bias": r["bias"], "final": round(r["final_confidence"], 3), "gate": r["gate"]["reason"]})
+
+
+def cmd_resilience(args):
+    from .agents.graph import db_sentiment
+    from .backtest.agentic_backtest import resilience_report
+
+    rpt = resilience_report(args.ticker.upper(), start=args.start, sentiment_fn=db_sentiment(args.db))
+    rpt.pop("equity", None)
+    out = json.dumps(rpt, indent=2, default=str)
+    if args.out:
+        Path(args.out).write_text(out)
+    print(out if not args.out else f"wrote {args.out}")
+
+
+def cmd_election_scenario(args):
+    from .election.scenarios import run_scenario_study
+
+    r = run_scenario_study(args.horizon)
+    for b in r["baskets"]:
+        print(f"{b['side']:5} {b['basket']:28} score={b['score']:+.3f} analog={b['analog_excess']:+.2%} (n={b['analog_n']}) "
+              f"divided={b['divided_excess']:+.2%} (n={b['divided_n']}) consistent={b['consistent']}")
+
+
 def cmd_research_ladder(args):
     import json as _json
 
@@ -904,6 +940,29 @@ def main():
     p17.add_argument("--period", default="2y")
     p17.add_argument("--device", default="")
     p17.set_defaults(func=cmd_predict)
+
+    p18 = sub.add_parser("election-ingest", help="Free RSS news + Polymarket odds -> election tables")
+    p18.add_argument("--db", default="sqlite:///quantflow.db")
+    p18.add_argument("--no-news", action="store_true")
+    p18.add_argument("--no-odds", action="store_true")
+    p18.set_defaults(func=cmd_election_ingest)
+
+    p19 = sub.add_parser("agents", help="Run LangGraph election-aware agents")
+    p19.add_argument("--tickers", default="SPY")
+    p19.add_argument("--llm", action="store_true", help="Add DeepSeek reviewer (needs DEEPSEEK_API_KEY)")
+    p19.add_argument("--db", default="sqlite:///quantflow.db")
+    p19.set_defaults(func=cmd_agents)
+
+    p20 = sub.add_parser("resilience", help="Point-in-time agentic backtest + walk-forward stress report")
+    p20.add_argument("--ticker", default="SPY")
+    p20.add_argument("--start", default="2018-01-01")
+    p20.add_argument("--db", default="sqlite:///quantflow.db")
+    p20.add_argument("--out", default="")
+    p20.set_defaults(func=cmd_resilience)
+
+    p21 = sub.add_parser("election-scenario", help="Rank scenario baskets vs past midterms")
+    p21.add_argument("--horizon", default="3m", choices=["1w", "1m", "3m", "6m"])
+    p21.set_defaults(func=cmd_election_scenario)
 
     args = p.parse_args()
     args.func(args)

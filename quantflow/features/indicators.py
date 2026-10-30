@@ -44,7 +44,9 @@ def _fetch_ohlcv_alpaca(ticker: str, period: str, interval: str) -> pd.DataFrame
 
     days = _PERIOD_LOOKBACK_DAYS.get(interval, 365)
     # honor explicit period for very long windows
-    if isinstance(period, str) and period.endswith("y"):
+    if period == "max":
+        days = 365 * 30
+    elif isinstance(period, str) and period.endswith("y"):
         try:
             days = int(period[:-1]) * 365
         except ValueError:

@@ -23,3 +23,5 @@ fastapi>=0.115
 uvicorn>=0.30
 python-dotenv>=1.0
 firebase-admin>=6.5
+langgraph>=0.2
+cryptography>=42

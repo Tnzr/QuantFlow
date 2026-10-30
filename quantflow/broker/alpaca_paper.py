@@ -117,13 +117,23 @@ class AlpacaPaperTrading:
                     order_type: str = "market",
                     limit_price: Optional[float] = None,
                     stop_loss_pct: Optional[float] = None,
-                    take_profit_pct: Optional[float] = None) -> OrderResult:
-        """Place a paper trade order."""
+                    take_profit_pct: Optional[float] = None,
+                    enforce_risk: Optional[bool] = None) -> OrderResult:
+        """Place a paper trade order.
+
+        Unless disabled (``enforce_risk=False`` or QUANTFLOW_ENFORCE_RISK_GUARDS=false),
+        the order is rejected with ``RiskGuardError`` when expected slippage vs the quote
+        mid exceeds 2% or worst-case loss exceeds 1% of account equity.
+        """
         if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return OrderResult(id="demo-001", ticker=ticker, side=side,
                              qty=qty, type=order_type, status="demo_filled",
                              filled_price=100.0)
         self._require_keys()
+        if enforce_risk is None:
+            enforce_risk = os.environ.get("QUANTFLOW_ENFORCE_RISK_GUARDS", "true").lower() not in ("0", "false")
+        if enforce_risk:
+            self.check_risk(ticker, side, qty, limit_price=limit_price, stop_loss_pct=stop_loss_pct)
 
         data = {
             "symbol": ticker, "qty": str(qty), "side": side,
@@ -163,6 +173,52 @@ class AlpacaPaperTrading:
             status=order["status"],
             filled_price=float(order.get("filled_avg_price") or 0)
         )
+
+    def check_risk(self, ticker: str, side: str, qty: float,
+                   limit_price: Optional[float] = None,
+                   stop_loss_pct: Optional[float] = None,
+                   max_loss_per_unit: Optional[float] = None):
+        """Run pre-trade risk guards; raises ``RiskGuardError`` when blocked."""
+        from ..execution.risk_guards import RiskGuardError, check_order_risk
+
+        from ..execution.risk_guards import MAX_RISK_PCT, MAX_SLIPPAGE_PCT, RiskCheck
+
+        if not qty or qty <= 0:
+            raise RiskGuardError(RiskCheck(False, "invalid qty or price", None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
+        quote = self.get_last_quote(ticker)
+        bid, ask = float(quote.get("bid") or 0), float(quote.get("ask") or 0)
+        two_sided = bid > 0 and ask > 0
+        side_l = side.lower()
+        if not two_sided and not limit_price:
+            raise RiskGuardError(RiskCheck(False, f"no two-sided quote for {ticker}; market order slippage unbounded",
+                                           None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
+        mid = (bid + ask) / 2 if two_sided else (float(self.get_last_trade(ticker).get("price") or 0) or None)
+        expected = limit_price or (ask if side_l == "buy" else bid)
+        if not expected or expected <= 0:
+            raise RuntimeError(f"Could not determine entry price for {ticker}")
+        held = next((p.shares for p in self.get_positions() if p.ticker.upper() == ticker.upper()), 0)
+        closing = min(qty, held) if side_l == "sell" and held > 0 else (min(qty, -held) if side_l == "buy" and held < 0 else 0)
+        qty = qty - closing  # only new exposure counts toward the 1% risk cap
+        if qty <= 0:
+            from ..execution.risk_guards import estimate_slippage_pct
+
+            slip = estimate_slippage_pct(side_l, mid, expected) if mid else 0.0
+            check = RiskCheck(slip <= MAX_SLIPPAGE_PCT, "ok (closing order)" if slip <= MAX_SLIPPAGE_PCT else
+                              f"slippage {slip:.2%} exceeds cap {MAX_SLIPPAGE_PCT:.2%}",
+                              slip, 0.0, 0.0, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, None)
+            if not check.allow:
+                raise RiskGuardError(check)
+            return check
+        stop_price = None
+        if stop_loss_pct:
+            stop_price = expected * (1 - stop_loss_pct) if side_l == "buy" else expected * (1 + stop_loss_pct)
+        check = check_order_risk(
+            side_l, qty, expected, self.get_account().equity,
+            reference_price=mid, stop_price=stop_price, max_loss_per_unit=max_loss_per_unit,
+        )
+        if not check.allow:
+            raise RiskGuardError(check)
+        return check
 
     def cancel_order(self, order_id: str) -> bool:
         if not self.enabled:

@@ -186,6 +186,28 @@ Production note:
 - Supported providers: `vault`, `aws`, `gcp`, `azure`.
 - See `docs/MCP_SECRET_MANAGER_PATTERN.md` for ref formats and examples.
 
+## Election-aware agents & resilience backtesting
+
+Built for the 2026 midterm cycle (election day 2026-11-03); everything degrades to the deterministic rule engine when news/odds sources fail.
+
+- **Data**: `election_events`, `sentiment_snapshots`, `agent_state_snapshots`, `allocation_proposals` tables (SQLite, mirrored to Supabase via `supabase/migrations/` when `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` are set). Reads are point-in-time (`created_at <= as_of`).
+- **Ingestion** (`quantflow/election/ingest.py`): free Google News / CNBC / MarketWatch / Politico / NPR RSS plus Polymarket Senate/House odds.
+- **Agents** (`quantflow/agents/`): LangGraph fan-out of technical, seasonal (presidential-cycle) and sentiment agents into a rule-based synthesizer. Agents override the rule baseline only when volatility is elevated **and** the confidence gap is >= 0.25. Optional DeepSeek reviewer (`DEEPSEEK_API_KEY`, live only, bounded to +/-0.10).
+- **Options** (`quantflow/options/verticals.py`): debit verticals preferred when an election is inside the window and IV is rich; historical VIX crush after midterms/presidential elections.
+- **Risk** (`quantflow/execution/risk_guards.py`): Alpaca paper orders blocked above 2% slippage or 1% of equity at risk (no stop = full notional at risk). Override with `QUANTFLOW_ENFORCE_RISK_GUARDS=false`.
+- **Signed proposals** (`quantflow/execution/proposals.py`): Ed25519 over canonical JSON; key from `QUANTFLOW_ED25519_PRIVATE_KEY` (base64 raw) or `~/.quantflow/ed25519.key`.
+- **Backtests** (`quantflow/backtest/agentic_backtest.py`): bar-by-bar agents, next-open fills, ATR stops, 1% risk sizing, walk-forward tuning, election/stress windows, cost sensitivity, bootstrap drawdown.
+
+```bash
+python -m quantflow.cli election-ingest
+python -m quantflow.cli agents --tickers SPY,XLV
+python -m quantflow.cli resilience --ticker SPY --start 2016-01-01
+python -m quantflow.cli election-scenario --horizon 3m
+python scripts/election_automation.py --tickers SPY,XLV,HCA --publish
+```
+
+API: `/election/calendar`, `/election/ingest`, `/election/sentiment`, `/election/scenario`, `/agents/analyze`, `/agents/states`, `/backtest/resilience`, `/options/vertical`, `/proposals`, `/proposals/verify`, `/risk/check`. Expo: **War Room** tab.
+
 ## Expo Frontend Starter
 - Path: `frontend-expo/`
 - Start backend first: `make api`
