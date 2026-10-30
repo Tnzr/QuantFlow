@@ -41,6 +41,27 @@ CANDIDATES: dict[str, tuple[str, str]] = {
     "XLI": ("SPY", "industrials"), "CAT": ("XLI", "industrials"), "DE": ("XLI", "industrials"),
     "XLU": ("SPY", "utilities"), "XLK": ("SPY", "tech"),
 }
+# Affordable universe for small accounts: liquid optionable names around $5-$60 (Oct 2026), across 15
+# groups, each against its sector ETF (VNQ/VOX used where XLRE/XLC are too young for 2006+ history).
+AFFORDABLE: dict[str, tuple[str, str]] = {
+    **{s: ("XLF", "financials") for s in ("KEY", "RF", "HBAN", "FNB", "VLY", "ALLY", "BAC")},
+    **{s: ("XLV", "healthcare") for s in ("PFE", "VTRS", "TEVA", "ELAN", "HIMS")},
+    **{s: ("XLE", "energy") for s in ("DVN", "APA", "HAL", "SLB", "KMI", "AR", "RIG", "EQT")},
+    **{s: ("ICLN", "clean_energy") for s in ("RUN", "SEDG", "ENPH", "FCEL", "CSIQ")},
+    **{s: ("ITA", "defense_space") for s in ("KTOS", "RKLB", "ACHR", "JOBY")},
+    **{s: ("XLK", "tech_hardware") for s in ("HPQ", "SMCI", "NOK", "ERIC", "SNAP")},
+    **{s: ("XLY", "consumer") for s in ("F", "RIVN", "CCL", "NCLH", "AAL", "M", "KSS", "NKE")},
+    **{s: ("XLU", "utilities") for s in ("AES", "PCG", "EXC", "NI", "PPL", "FE", "CNP")},
+    **{s: ("VNQ", "real_estate") for s in ("VICI", "HST", "KIM", "AGNC", "O")},
+    **{s: ("VOX", "communications") for s in ("T", "VZ", "CMCSA", "SIRI", "LUMN")},
+    **{s: ("XLB", "materials") for s in ("CLF", "AA", "MP", "DOW", "MOS")},
+    **{s: ("XLP", "staples") for s in ("KHC", "KDP", "CAG", "KVUE")},
+    **{s: ("SPY", "prisons") for s in ("GEO", "CXW")},
+    **{s: ("XLI", "industrials") for s in ("CSX", "WU", "JBLU")},
+    "XLF": ("SPY", "financials"), "KRE": ("SPY", "financials"), "XLE": ("SPY", "energy"),
+    "XLU": ("SPY", "utilities"), "XLP": ("SPY", "staples"),
+}
+UNIVERSES = {"core": CANDIDATES, "affordable": AFFORDABLE}
 WINDOWS = {"5d": 5, "21d": 21}
 VOL_LOOKBACK = 126
 MIN_ELECTIONS = 4
@@ -176,6 +197,43 @@ def top_n(rows: list[ImpactRow], n: int = 5, max_per_group: int = 1, min_swing_r
         if len(picked) == n:
             break
     return picked
+
+
+def top_n_affordable(
+    rows: list[ImpactRow],
+    n: int = 5,
+    budget: float = 100.0,
+    fit_fn=None,
+    max_per_group: int = 1,
+    min_swing_ratio: float = 1.0,
+) -> list[tuple[ImpactRow, dict]]:
+    """Like ``top_n`` but only keeps symbols where a long call/put (or debit vertical) in the
+    projected direction fits ``budget``. ``fit_fn(symbol, side, budget) -> structure dict``."""
+    if fit_fn is None:
+        fit_fn = _live_fit
+    picked, seen = [], {}
+    for r in rows:
+        if seen.get(r.group, 0) >= max_per_group or (np.isfinite(r.swing_ratio) and r.swing_ratio < min_swing_ratio):
+            continue
+        st = fit_fn(r.symbol, "long" if r.projected_z > 0 else "short", budget)
+        if not st.get("structure"):
+            continue
+        picked.append((r, st))
+        seen[r.group] = seen.get(r.group, 0) + 1
+        if len(picked) == n:
+            break
+    return picked
+
+
+def _live_fit(symbol: str, side: str, budget: float) -> dict:
+    from ..features.indicators import fetch_ohlcv
+    from .options import choose_contract, load_swing_chain
+
+    try:
+        spot = float(fetch_ohlcv(symbol, period="1mo")["close"].dropna().iloc[-1])
+        return choose_contract(load_swing_chain(symbol), spot, side, budget)
+    except Exception as exc:  # noqa: BLE001 - missing chains just make a symbol ineligible
+        return {"structure": None, "reason": str(exc)[:120]}
 
 
 def required_tickers(candidates: dict[str, tuple[str, str]] = CANDIDATES) -> list[str]:

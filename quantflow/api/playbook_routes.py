@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_write_auth
@@ -14,26 +14,28 @@ _CACHE: dict = {}
 TTL = 900
 
 
-def _watchlist(n: int) -> dict:
+def _watchlist(n: int, universe: str = "affordable") -> dict:
     from ..playbook.tracker import build_watchlist, resolve_outcome, senate_odds
 
-    hit = _CACHE.get(n)
+    hit = _CACHE.get((n, universe))
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
     p = senate_odds()
-    rows = build_watchlist(p if p is not None else 0.5, n)
+    rows = build_watchlist(p if p is not None else 0.5, n, universe=universe)
     data = {"p_dem_senate": p, "outcome": resolve_outcome(p), "top": [r.to_dict() for r in rows]}
-    _CACHE[n] = (time.time(), data)
+    _CACHE[(n, universe)] = (time.time(), data)
     return data
 
 
 @router.get("/playbook/midterm")
-def playbook_midterm(n: int = 5, live: bool = True):
-    from ..playbook.impact import CANDIDATES, live_state
+def playbook_midterm(n: int = 5, live: bool = True, universe: str = "affordable"):
+    from ..playbook.impact import UNIVERSES, live_state
 
-    data = _watchlist(n)
+    if universe not in UNIVERSES:
+        raise HTTPException(400, f"universe must be one of {sorted(UNIVERSES)}")
+    data = _watchlist(n, universe)
     if live:
-        data = {**data, "top": [{**r, "live": live_state(r["symbol"], CANDIDATES[r["symbol"]][0])} for r in data["top"]]}
+        data = {**data, "top": [{**r, "live": live_state(r["symbol"], UNIVERSES[universe][r["symbol"]][0])} for r in data["top"]]}
     return _clean(data)
 
 
@@ -55,6 +57,7 @@ def playbook_alerts(limit: int = 100):
 
 class CycleRequest(BaseModel):
     n: int = 5
+    universe: str = "affordable"
     outcome: str | None = None  # "D" | "R" override; default resolves from Polymarket
     execute: bool = False  # place Alpaca *paper* option orders on confirmed entries
     equity: float = 10_000.0
@@ -62,9 +65,12 @@ class CycleRequest(BaseModel):
 
 @router.post("/playbook/cycle")
 def playbook_cycle(req: CycleRequest, _auth: dict = Depends(require_write_auth)):  # noqa: B008
+    from ..playbook.impact import UNIVERSES
     from ..playbook.tracker import resolve_outcome, run_cycle
 
-    data = _watchlist(req.n)
+    if req.universe not in UNIVERSES:
+        raise HTTPException(400, f"universe must be one of {sorted(UNIVERSES)}")
+    data = _watchlist(req.n, req.universe)
     outcome = resolve_outcome(data["p_dem_senate"], req.outcome)
     broker = None
     if req.execute:

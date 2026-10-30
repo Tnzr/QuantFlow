@@ -750,22 +750,23 @@ def cmd_research_ladder(args):
     print(text)
 
 
-def _playbook_watch(n: int):
+def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0):
     from .playbook.tracker import build_watchlist, senate_odds
 
     p = senate_odds()
-    return p, [r.to_dict() for r in build_watchlist(p if p is not None else 0.5, n)]
+    rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget or None)
+    return p, [r.to_dict() for r in rows]
 
 
 def cmd_playbook_screen(args):
     import json as _json
 
-    from .playbook.impact import CANDIDATES, live_state
+    from .playbook.impact import UNIVERSES, live_state
 
-    p, rows = _playbook_watch(args.n)
+    p, rows = _playbook_watch(args.n, args.universe, args.budget)
     print(f"P(Dem Senate)={p}")
     for r in rows:
-        s = live_state(r["symbol"], CANDIDATES[r["symbol"]][0]) if args.live else {}
+        s = live_state(r["symbol"], UNIVERSES[args.universe][r["symbol"]][0]) if args.live else {}
         im = s.get("implied_move")
         print(f"{r['symbol']:5} vs {r['benchmark']:4} {r['projected_direction']:4} z={r['projected_z']:+.2f} "
               f"(D {r['z_dem']:+.2f}/{r['agree_dem']:.0%}, R {r['z_rep']:+.2f}/{r['agree_rep']:.0%}) "
@@ -785,7 +786,7 @@ def cmd_playbook_cycle(args):
 
         broker = AlpacaPaperTrading()
     while True:
-        p, rows = _playbook_watch(args.n)
+        p, rows = _playbook_watch(args.n, args.universe, args.equity * 0.01)
         outcome = resolve_outcome(p, args.outcome)
         res = run_cycle(rows, outcome, db_path=args.db, equity=args.equity, execute=args.execute, broker=broker)
         print(f"outcome={outcome} p_dem={p}")
@@ -806,14 +807,15 @@ def cmd_playbook_backtest(args):
     import yfinance as yf
 
     from .playbook.backtest import replay, summarize
-    from .playbook.impact import CANDIDATES, load_closes, required_tickers
+    from .playbook.impact import UNIVERSES, load_closes, required_tickers
 
-    syms = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] or list(CANDIDATES)
-    closes = load_closes()
-    raw = yf.download(required_tickers(), start="2001-06-01", auto_adjust=True, progress=False, threads=True)
+    cands = UNIVERSES[args.universe]
+    syms = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] or list(cands)
+    closes = load_closes(candidates=cands)
+    raw = yf.download(required_tickers(cands), start="2001-06-01", auto_adjust=True, progress=False, threads=True)
     rows = []
     for sym in syms:
-        bench, grp = CANDIDATES[sym]
+        bench, grp = cands[sym]
         bars = pd.DataFrame({k.lower(): raw[k][sym] for k in ["Open", "High", "Low", "Close", "Volume"]}).dropna(subset=["close"])
         rows += replay(bars, closes, sym, bench, grp)
     print(_json.dumps(summarize(rows), indent=1))
@@ -1038,6 +1040,8 @@ def main():
     pb1 = sub.add_parser("playbook-screen", help="Midterm impact top-N with per-symbol benchmarks")
     pb1.add_argument("--n", type=int, default=5)
     pb1.add_argument("--live", action="store_true", help="add live indicators and implied move")
+    pb1.add_argument("--universe", default="affordable", choices=["affordable", "core"])
+    pb1.add_argument("--budget", type=float, default=100.0, help="max option risk per idea; 0 disables the fit filter")
     pb1.add_argument("--out", default="")
     pb1.set_defaults(func=cmd_playbook_screen)
 
@@ -1046,12 +1050,14 @@ def main():
     pb2.add_argument("--outcome", default="", help="D or R to override the Polymarket-resolved Senate outcome")
     pb2.add_argument("--execute", action="store_true", help="place Alpaca paper option orders on confirmed entries")
     pb2.add_argument("--equity", type=float, default=10_000.0)
+    pb2.add_argument("--universe", default="affordable", choices=["affordable", "core"])
     pb2.add_argument("--db", default="sqlite:///quantflow.db")
     pb2.add_argument("--loop-minutes", type=float, default=0.0)
     pb2.set_defaults(func=cmd_playbook_cycle)
 
     pb3 = sub.add_parser("playbook-backtest", help="Replay the rules tree after past midterms")
     pb3.add_argument("--tickers", default="")
+    pb3.add_argument("--universe", default="affordable", choices=["affordable", "core"])
     pb3.add_argument("--out", default="")
     pb3.set_defaults(func=cmd_playbook_backtest)
 

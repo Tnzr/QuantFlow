@@ -239,3 +239,17 @@ def test_backtest_priors_use_only_earlier_midterms(monkeypatch):
     backtest.replay(bars(n=400, start="2015-01-02"), pd.DataFrame({"AAA": [1.0]}), "AAA", "", "x")
     years = [e.day.year for e in backtest.elections(kind="midterm", resolved_only=True)]
     assert seen and all(all(y < years[i] for y in prior) for i, prior in enumerate(seen))
+
+
+def test_top_n_affordable_skips_unaffordable_and_keeps_sectors_diverse():
+    mk = lambda sym, grp, score: impact.ImpactRow(sym, "SPY", grp, 6, 1.0, 1.0, 0.0, 3, 3, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                                                  score, "up", 1.0, score, swing_ratio=1.2)
+    rows = [mk("A", "fin", 3.0), mk("B", "fin", 2.9), mk("C", "energy", 2.0), mk("D", "tech", 1.5), mk("E", "util", 1.0)]
+    fit = lambda sym, side, budget: {"structure": None} if sym == "C" else {"structure": "long_call", "qty": 1}
+    picked = impact.top_n_affordable(rows, n=3, budget=100, fit_fn=fit)
+    assert [r.symbol for r, _ in picked] == ["A", "D", "E"]
+
+
+def test_affordable_universe_has_benchmarks_and_many_sectors():
+    groups = {g for _, g in impact.AFFORDABLE.values()}
+    assert len(groups) >= 12 and all(b for b, _ in impact.AFFORDABLE.values())

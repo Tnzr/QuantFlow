@@ -15,7 +15,7 @@ from ..data.persistence import (
     save_playbook_state,
 )
 from ..execution.risk_guards import MAX_RISK_PCT
-from .impact import CANDIDATES, ImpactRow, load_closes, screen, top_n
+from .impact import UNIVERSES, ImpactRow, load_closes, screen, top_n, top_n_affordable
 from .options import choose_contract, load_swing_chain
 from .rules import RuleConfig, SignalState, State, indicators, step
 
@@ -45,9 +45,16 @@ def senate_odds() -> float | None:
     return next((o["probability"] for o in fetch_polymarket_odds() if o["ticker_or_topic"] == "senate_control"), None)
 
 
-def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None) -> list[ImpactRow]:
-    closes = closes if closes is not None else load_closes()
-    return top_n(screen(closes, p_dem), n)
+def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None, universe: str = "affordable",
+                    budget: float | None = DEFAULT_EQUITY * MAX_RISK_PCT, fit_fn=None) -> list[ImpactRow]:
+    """Top-``n`` sector-diverse symbols. With ``budget`` set, only symbols where a long call/put
+    (or debit vertical) in the projected direction costs <= budget are kept."""
+    cands = UNIVERSES[universe]
+    closes = closes if closes is not None else load_closes(candidates=cands)
+    rows = screen(closes, p_dem, cands)
+    if budget:
+        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn)]
+    return top_n(rows, n)
 
 
 def _bars(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame | None:
@@ -106,7 +113,8 @@ def _run_cycle(watch, outcome, db_path, cfg, equity, risk_pct, execute, broker, 
     out = {"outcome": outcome, "signals": {}, "alerts": []}
     for imp in watch:
         sym = imp["symbol"]
-        bench = CANDIDATES.get(sym, ("", ""))[0]
+        bench = imp.get("benchmark", "")
+        bench = "" if bench in ("", "none") else bench
         bars = bars_fn(sym)
         if bars is None or len(bars) < 60:
             out["signals"][sym] = {"symbol": sym, "error": "insufficient bars"}
