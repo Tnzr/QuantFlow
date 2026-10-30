@@ -15,17 +15,17 @@ TTL = 900
 
 
 def _watchlist(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False,
-               manual_outcome: str | None = None) -> dict:
+               manual_outcome: str | None = None, direction_mode: str = "event") -> dict:
     from ..playbook.tracker import build_watchlist, resolve_outcome, senate_odds
 
-    key = (n, universe, round(budget, 2), executable_only, (manual_outcome or "").upper())
+    key = (n, universe, round(budget, 2), executable_only, (manual_outcome or "").upper(), direction_mode)
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
     p = senate_odds()
     outcome = resolve_outcome(p, manual_outcome)
     rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget,
-                           executable_only=executable_only, outcome=outcome)
+                           executable_only=executable_only, outcome=outcome, direction_mode=direction_mode)
     data = {"p_dem_senate": p, "outcome": outcome, "top": [r.to_dict() for r in rows]}
     _CACHE[key] = (time.time(), data)
     return data
@@ -62,6 +62,7 @@ def playbook_alerts(limit: int = 100):
 class CycleRequest(BaseModel):
     n: int = 5
     universe: str = "affordable"
+    direction_mode: str = "event"  # "event" | "either", see RuleConfig.direction_mode
     outcome: str | None = None  # "D" | "R" override; default resolves from Polymarket
     execute: bool = False  # place Alpaca *paper* option orders on confirmed entries
     equity: float = 10_000.0
@@ -71,6 +72,7 @@ class CycleRequest(BaseModel):
 def playbook_cycle(req: CycleRequest, _auth: dict = Depends(require_write_auth)):  # noqa: B008
     from ..execution.risk_guards import MAX_RISK_PCT
     from ..playbook.impact import UNIVERSES
+    from ..playbook.rules import RuleConfig
     from ..playbook.tracker import execution_budget, run_cycle
 
     if req.universe not in UNIVERSES:
@@ -82,6 +84,10 @@ def playbook_cycle(req: CycleRequest, _auth: dict = Depends(require_write_auth))
 
         broker = AlpacaPaperTrading()
         budget = execution_budget(broker)
-    data = _watchlist(req.n, req.universe, budget, executable_only=req.execute, manual_outcome=req.outcome)
+    if req.direction_mode not in ("event", "either"):
+        raise HTTPException(400, "direction_mode must be 'event' or 'either'")
+    data = _watchlist(req.n, req.universe, budget, executable_only=req.execute, manual_outcome=req.outcome,
+                      direction_mode=req.direction_mode)
     outcome = data["outcome"]
-    return _clean(run_cycle(data["top"], outcome, db_path=DB, equity=req.equity, execute=req.execute, broker=broker))
+    cfg = RuleConfig(direction_mode=req.direction_mode)
+    return _clean(run_cycle(data["top"], outcome, db_path=DB, cfg=cfg, equity=req.equity, execute=req.execute, broker=broker))

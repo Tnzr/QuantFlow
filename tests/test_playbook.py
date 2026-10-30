@@ -280,3 +280,29 @@ def test_open_positions_are_managed_after_leaving_watchlist(tmp_path):
     assert first["signals"]["AAA"]["state"] == "in_trade"
     later = run_cycle([], "D", **kw)
     assert "AAA" in later["signals"]
+
+
+def test_either_mode_keeps_opposite_side_after_result_and_tree_trades_it():
+    r = impact.ImpactRow("AAA", "SPY", "fin", 6, 1.0, 1.0, -1.0, 3, 3, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.4, "up", 2.0, 0.4,
+                         swing_ratio=1.2)
+    fit = lambda sym, side, budget: {"structure": "long_call", "qty": 1} if side == "long" else {"structure": None}
+    assert impact.top_n_affordable([r], 1, 100, fit, executable_only=True, outcome="R") == []
+    kept = impact.top_n_affordable([r], 1, 100, fit, executable_only=True, outcome="R", direction_mode="either")
+    assert kept[0][1]["side"] == "long"
+    st, _ = step(SignalState("AAA"), indicators(bars(last_jump=0.03, last_vol=3.0)), r.to_dict(), "R",
+                 RuleConfig(direction_mode="either"))
+    assert st.side == "long" and st.state in (State.ARMED, State.IN_TRADE)  # opposite of the GOP-branch prior
+
+
+def test_legacy_open_state_without_impact_still_gets_exits(tmp_path):
+    from quantflow.data.persistence import create_schema, save_playbook_state
+
+    db = f"sqlite:///{tmp_path}/legacy.db"
+    create_schema(db)
+    b = bars()
+    px = float(b["close"].iloc[-1])
+    legacy = SignalState("AAA", state=State.IN_TRADE, side="long", entry=px * 1.2, stop=px * 1.1, target=px * 1.5,
+                         last_bar="2000-01-01").to_dict()
+    save_playbook_state(legacy, db)  # no "impact" key, as written by older versions
+    out = run_cycle([], "D", db_path=db, send=False, bars_fn=lambda s, *a: None if s != "AAA" else b, chain_fn=lambda s: None)
+    assert out["signals"]["AAA"]["state"] == "exited" and out["alerts"][0]["kind"] == "exit"

@@ -751,13 +751,13 @@ def cmd_research_ladder(args):
 
 
 def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False,
-                    manual_outcome: str = ""):
+                    manual_outcome: str = "", direction_mode: str = "event"):
     from .playbook.tracker import build_watchlist, resolve_outcome, senate_odds
 
     p = senate_odds()
     outcome = resolve_outcome(p, manual_outcome)
     rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget or None,
-                           executable_only=executable_only, outcome=outcome)
+                           executable_only=executable_only, outcome=outcome, direction_mode=direction_mode)
     return p, outcome, [r.to_dict() for r in rows]
 
 
@@ -782,6 +782,7 @@ def cmd_playbook_cycle(args):
     import time as _time
 
     from .execution.risk_guards import MAX_RISK_PCT
+    from .playbook.rules import RuleConfig
     from .playbook.tracker import execution_budget, run_cycle
 
     broker = None
@@ -792,8 +793,9 @@ def cmd_playbook_cycle(args):
     while True:
         budget = execution_budget(broker) if broker is not None else args.equity * MAX_RISK_PCT
         p, outcome, rows = _playbook_watch(args.n, args.universe, budget, executable_only=broker is not None,
-                                           manual_outcome=args.outcome)
-        res = run_cycle(rows, outcome, db_path=args.db, equity=args.equity, execute=args.execute, broker=broker)
+                                           manual_outcome=args.outcome, direction_mode=args.direction_mode)
+        res = run_cycle(rows, outcome, db_path=args.db, cfg=RuleConfig(direction_mode=args.direction_mode),
+                        equity=args.equity, execute=args.execute, broker=broker)
         print(f"outcome={outcome} p_dem={p}")
         for sym, st in res["signals"].items():
             print(f"  {sym:5} {st.get('state', st.get('error')):9} side={st.get('side')} "
@@ -1056,6 +1058,7 @@ def main():
     pb2.add_argument("--execute", action="store_true", help="place Alpaca paper option orders on confirmed entries")
     pb2.add_argument("--equity", type=float, default=10_000.0)
     pb2.add_argument("--universe", default="affordable", choices=["affordable", "core"])
+    pb2.add_argument("--direction-mode", default="event", choices=["event", "either"])
     pb2.add_argument("--db", default="sqlite:///quantflow.db")
     pb2.add_argument("--loop-minutes", type=float, default=0.0)
     pb2.set_defaults(func=cmd_playbook_cycle)

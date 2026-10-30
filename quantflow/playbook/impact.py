@@ -209,6 +209,7 @@ def top_n_affordable(
     min_swing_ratio: float = 1.0,
     executable_only: bool = False,
     outcome: str | None = None,
+    direction_mode: str = "event",
 ) -> list[tuple[ImpactRow, dict]]:
     """Like ``top_n`` but only keeps symbols where a long call/put (or debit vertical) in the
     projected direction fits ``budget``. ``fit_fn(symbol, side, budget) -> structure dict``.
@@ -216,7 +217,8 @@ def top_n_affordable(
 
     Direction checked: once ``outcome`` ("D"/"R") is known, the resolved-branch side that the rules
     tree will trade; before that, the projected side first and, if it does not fit, the opposite side
-    (the tree can still flip to it after the result), so no tradeable symbol is dropped early."""
+    (the tree can still flip to it after the result), so no tradeable symbol is dropped early.
+    With ``direction_mode="either"`` both sides are always checked, matching ``RuleConfig.direction_mode``."""
     if fit_fn is None:
         fit_fn = _live_fit
     picked, seen = [], {}
@@ -226,10 +228,11 @@ def top_n_affordable(
         def ok(st: dict) -> bool:
             return bool(st.get("structure")) and (not executable_only or st["structure"] in EXECUTABLE)
 
-        if outcome in ("D", "R"):
+        if outcome in ("D", "R") and direction_mode != "either":
             sides = ["long" if (r.z_dem if outcome == "D" else r.z_rep) > 0 else "short"]
         else:
-            first = "long" if r.projected_z > 0 else "short"
+            branch_z = r.projected_z if outcome not in ("D", "R") else (r.z_dem if outcome == "D" else r.z_rep)
+            first = "long" if branch_z > 0 else "short"
             sides = [first, "short" if first == "long" else "long"]
         st = {}
         for side in sides:

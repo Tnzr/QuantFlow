@@ -47,7 +47,8 @@ def senate_odds() -> float | None:
 
 def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None, universe: str = "affordable",
                     budget: float | None = DEFAULT_EQUITY * MAX_RISK_PCT, fit_fn=None,
-                    executable_only: bool = False, outcome: str | None = None) -> list[ImpactRow]:
+                    executable_only: bool = False, outcome: str | None = None,
+                    direction_mode: str = "event") -> list[ImpactRow]:
     """Top-``n`` sector-diverse symbols. With ``budget`` set, only symbols where a long call/put
     (or debit vertical, unless ``executable_only``) in the projected direction costs <= budget are kept.
     For execute mode pass the same broker-derived budget that ``run_cycle`` will size with."""
@@ -55,7 +56,8 @@ def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None
     closes = closes if closes is not None else load_closes(candidates=cands)
     rows = screen(closes, p_dem, cands)
     if budget:
-        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn, executable_only=executable_only, outcome=outcome)]
+        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn, executable_only=executable_only, outcome=outcome,
+                                                     direction_mode=direction_mode)]
     return top_n(rows, n)
 
 
@@ -68,6 +70,12 @@ def _bars(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame
         log.warning("bars %s %s: %s", symbol, interval, exc)
         return None
     return df.dropna(subset=["close"]) if df is not None and not df.empty else None
+
+
+def _fallback_impact(symbol: str, state: dict) -> dict:
+    """Neutral prior for open positions saved before impact rows were persisted: exits (stop,
+    target, time, opposite confidence) still evaluate; the event prior contributes 0.5 both ways."""
+    return {"symbol": symbol, "benchmark": "", "z_dem": 0.0, "z_rep": 0.0, "projected_z": 0.0}
 
 
 def execution_budget(broker, risk_pct: float = MAX_RISK_PCT) -> float:
@@ -120,7 +128,8 @@ def _run_cycle(watch, outcome, db_path, cfg, equity, risk_pct, execute, broker, 
     out = {"outcome": outcome, "signals": {}, "alerts": []}
     # Open positions are always managed, even if the symbol fell off today's entry watchlist.
     listed = {w["symbol"] for w in watch}
-    held = [p["impact"] for s, p in prev_all.items() if p.get("state") == "in_trade" and s not in listed and p.get("impact")]
+    held = [p.get("impact") or _fallback_impact(s, p) for s, p in prev_all.items()
+            if p.get("state") == "in_trade" and s not in listed]
     for imp in list(watch) + held:
         sym = imp["symbol"]
         bench = imp.get("benchmark", "")
