@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 import pandas as pd
 import requests
@@ -16,11 +17,12 @@ from ..data.persistence import (
 from ..execution.risk_guards import MAX_RISK_PCT
 from .impact import CANDIDATES, ImpactRow, load_closes, screen, top_n
 from .options import choose_contract, load_swing_chain
-from .rules import RuleConfig, SignalState, indicators, step
+from .rules import RuleConfig, SignalState, State, indicators, step
 
 log = logging.getLogger(__name__)
 DEFAULT_EQUITY = 10_000.0
 RESOLVED_P = 0.97
+_CYCLE_LOCK = threading.Lock()  # one cycle at a time per process; broker dedupes via client_order_id
 
 
 def resolve_outcome(p_dem: float | None, manual: str | None = None) -> str | None:
@@ -84,8 +86,21 @@ def run_cycle(
     bars_fn=_bars,
     chain_fn=load_swing_chain,
 ) -> dict:
-    """One pass over the watchlist. ``watch`` items are ImpactRow dicts."""
-    cfg = cfg or RuleConfig()
+    """One pass over the watchlist. ``watch`` items are ImpactRow dicts.
+
+    In execute mode, sizing uses the broker's account equity (not the caller's ``equity``)
+    and a confirmed entry only becomes ``IN_TRADE`` once the broker accepts the order;
+    otherwise the symbol drops back to ``ARMED`` so it can re-trigger.
+    """
+    with _CYCLE_LOCK:
+        return _run_cycle(watch, outcome, db_path, cfg or RuleConfig(), equity, risk_pct, execute, broker, send,
+                          bars_fn, chain_fn)
+
+
+def _run_cycle(watch, outcome, db_path, cfg, equity, risk_pct, execute, broker, send, bars_fn, chain_fn) -> dict:
+    execute = bool(execute and broker is not None)
+    if execute:
+        equity = float(broker.get_account().equity)
     create_schema(db_path)
     prev_all = load_playbook_states(db_path)
     out = {"outcome": outcome, "signals": {}, "alerts": []}
@@ -111,12 +126,21 @@ def run_cycle(
                 s = ad["structure"]
                 if s.get("structure"):
                     ad["message"] += f" | {s['structure']} {s.get('contract') or s.get('legs_occ')} x{s['qty']}"
-                if execute and broker is not None and s.get("structure") in ("long_call", "long_put") and s["qty"] > 0:
-                    try:
-                        order = broker.place_option_order(s["contract"], s["qty"], s["limit_price"])
-                        ad["order"] = getattr(order, "__dict__", order)
-                    except Exception as exc:  # noqa: BLE001 - risk-guard rejections are reported, not raised
-                        ad["order"] = {"error": str(exc)}
+                if execute:
+                    if s.get("structure") in ("long_call", "long_put") and s["qty"] > 0:
+                        coid = f"qf-pb-{sym}-{ind['as_of']}-{st.side}"
+                        try:
+                            order = broker.place_option_order(s["contract"], s["qty"], s["limit_price"], client_order_id=coid)
+                            ad["order"] = getattr(order, "__dict__", order)
+                        except Exception as exc:  # noqa: BLE001 - risk-guard rejections are reported, not raised
+                            ad["order"] = {"error": str(exc)}
+                    else:
+                        ad["order"] = {"error": "no single-leg structure to execute"}
+                    if "error" in ad["order"]:
+                        st.state = State.ARMED
+                        st.entry = st.stop = st.target = st.entered_on = None
+                        ad["kind"] = "entry_not_executed"
+                        ad["message"] += f" | NOT EXECUTED: {ad['order']['error']}"
             out["alerts"].append(ad)
             if send:
                 notify(ad)

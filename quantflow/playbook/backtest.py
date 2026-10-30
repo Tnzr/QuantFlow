@@ -1,6 +1,7 @@
-"""Replay the rules tree after each resolved midterm (leave-one-election-out impact priors).
+"""Replay the rules tree after each resolved midterm with point-in-time impact priors.
 
-For election e, the impact screen is recomputed *without* e, the tree runs on daily bars
+For election e, the impact screen uses only midterms *before* e (elections with fewer
+than ``MIN_ELECTIONS`` prior events, or no event in one Senate branch, are skipped), the tree runs on daily bars
 from the first post-election session for ``window`` bars with the true Senate outcome,
 and each confirmed trade is closed by the tree's own exits (or at the window end).
 Compared with a naive entry at the first post-election close in the same direction,
@@ -34,7 +35,7 @@ def replay(bars: pd.DataFrame, closes: pd.DataFrame, symbol: str, benchmark: str
     bench = closes[benchmark] if benchmark else None
     rows = []
     for ev in evs:
-        others = [e for e in evs if e.day != ev.day]
+        others = [e for e in evs if e.day < ev.day]
         imp = score_symbol(event_moves(closes, symbol, benchmark, others), symbol, benchmark, group, 0.5)
         if imp is None:
             continue

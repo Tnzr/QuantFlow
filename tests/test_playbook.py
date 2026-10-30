@@ -130,16 +130,20 @@ def test_run_cycle_persists_alerts_and_paper_orders(tmp_path):
         def __init__(self):
             self.orders = []
 
-        def place_option_order(self, contract, qty, limit):
-            self.orders.append((contract, qty, limit))
+        def get_account(self):
+            return type("A", (), {"equity": 100_000.0})()
+
+        def place_option_order(self, contract, qty, limit, client_order_id=None):
+            self.orders.append((contract, qty, limit, client_order_id))
             return {"id": "paper-1", "status": "accepted"}
 
     br = FakeBroker()
-    out = run_cycle([dict(IMP_UP)], "D", db_path=db, equity=100_000, execute=True, broker=br, send=False,
+    out = run_cycle([dict(IMP_UP)], "D", db_path=db, equity=1.0, execute=True, broker=br, send=False,
                     bars_fn=lambda s, *a: None if s != "AAA" else b, chain_fn=lambda s: _chain(float(b["close"].iloc[-1])))
     alert = out["alerts"][0]
     assert alert["kind"] == "entry_confirmed" and alert["structure"]["structure"] == "long_call"
     assert br.orders and alert["order"]["id"] == "paper-1"
+    assert br.orders[0][3].startswith("qf-pb-AAA-")  # idempotent client order id; equity came from broker
     from quantflow.data.persistence import list_playbook_alerts, load_playbook_states
     assert load_playbook_states(db)["AAA"]["state"] == "in_trade"
     assert list_playbook_alerts(10, db)[0]["kind"] == "entry_confirmed"
@@ -172,7 +176,11 @@ def test_playbook_api_signals_alerts_and_auth(tmp_path, monkeypatch):
 
     from quantflow.api import playbook_routes
     from quantflow.api.server import app
-    from quantflow.data.persistence import create_schema, save_playbook_alerts, save_playbook_state
+    from quantflow.data.persistence import (
+        create_schema,
+        save_playbook_alerts,
+        save_playbook_state,
+    )
 
     db = f"sqlite:///{tmp_path}/api.db"
     monkeypatch.setattr(playbook_routes, "DB", db)
@@ -186,3 +194,48 @@ def test_playbook_api_signals_alerts_and_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("QF_API_AUTH_ENABLED", "true")
     monkeypatch.setenv("QF_API_TOKEN", "secret-token")
     assert c.post("/playbook/cycle", json={}).status_code in (401, 403)
+
+
+def test_rejected_order_does_not_open_position(tmp_path):
+    db = f"sqlite:///{tmp_path}/pb2.db"
+    b = bars(last_jump=0.03, last_vol=3.0)
+
+    class RejectingBroker:
+        def get_account(self):
+            return type("A", (), {"equity": 100_000.0})()
+
+        def place_option_order(self, *a, **k):
+            raise RuntimeError("risk guard: blocked")
+
+    out = run_cycle([dict(IMP_UP)], "D", db_path=db, execute=True, broker=RejectingBroker(), send=False,
+                    bars_fn=lambda s, *a: None if s != "AAA" else b, chain_fn=lambda s: _chain(float(b["close"].iloc[-1])))
+    assert out["alerts"][0]["kind"] == "entry_not_executed"
+    assert out["signals"]["AAA"]["state"] == "armed" and out["signals"]["AAA"]["entry"] is None
+
+
+def test_option_sell_to_open_is_blocked(monkeypatch):
+    from quantflow.broker.alpaca_paper import AlpacaPaperTrading
+    from quantflow.execution.risk_guards import RiskGuardError
+
+    br = AlpacaPaperTrading.__new__(AlpacaPaperTrading)
+    monkeypatch.delenv("QUANTFLOW_DEMO_MODE", raising=False)
+    monkeypatch.setattr(br, "_require_keys", lambda: None, raising=False)
+    monkeypatch.setattr(br, "get_positions", lambda: [type("P", (), {"ticker": "AAA261218C00100000", "shares": 1})()],
+                        raising=False)
+    sent = []
+    monkeypatch.setattr(br, "_post", lambda path, data: sent.append(data) or {"id": "1", "symbol": data["symbol"],
+                        "side": "sell", "qty": data["qty"], "type": "limit", "status": "accepted"}, raising=False)
+    with pytest.raises(RiskGuardError):
+        br.place_option_order("AAA261218C00100000", 2, 1.0, side="sell")
+    br.place_option_order("AAA261218C00100000", 1, 1.0, side="sell")
+    assert len(sent) == 1 and sent[0]["side"] == "sell"
+
+
+def test_backtest_priors_use_only_earlier_midterms(monkeypatch):
+    from quantflow.playbook import backtest
+
+    seen = []
+    monkeypatch.setattr(backtest, "event_moves", lambda c, s, b, evs: seen.append([e.day.year for e in evs]) or pd.DataFrame())
+    backtest.replay(bars(n=400, start="2015-01-02"), pd.DataFrame({"AAA": [1.0]}), "AAA", "", "x")
+    years = [e.day.year for e in backtest.elections(kind="midterm", resolved_only=True)]
+    assert seen and all(all(y < years[i] for y in prior) for i, prior in enumerate(seen))
