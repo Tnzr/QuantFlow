@@ -188,3 +188,15 @@ def test_alpaca_check_risk_quote_and_closing():
     with pytest.raises(RiskGuardError):  # 20 x $100 unstopped = 2% risk
         _FakeAlpaca({"bid": 99.99, "ask": 100.01}).check_risk("ABC", "sell", 20)
     assert _FakeAlpaca({"bid": 99.99, "ask": 100.01}, shares=20).check_risk("ABC", "sell", 20).allow
+    with pytest.raises(RiskGuardError):
+        _FakeAlpaca({"bid": 99.99, "ask": 100.01}, shares=20).check_risk("ABC", "sell", 0)
+
+
+def test_signing_key_race_reuses_existing(tmp_path):
+    from quantflow.execution import proposals
+
+    a = proposals.load_signing_key(tmp_path / "k")
+    b = proposals.load_signing_key(tmp_path / "k")
+    assert proposals.public_key_b64(a) == proposals.public_key_b64(b)
+    assert oct((tmp_path / "k").stat().st_mode & 0o777) == "0o600"
+    assert [p.name for p in tmp_path.iterdir()] == ["k"]

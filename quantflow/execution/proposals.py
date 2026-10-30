@@ -41,9 +41,16 @@ def load_signing_key(key_file: Optional[Path] = None, create: bool = True) -> Ed
     key = Ed25519PrivateKey.generate()
     path.parent.mkdir(parents=True, exist_ok=True)
     raw_bytes = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(_b64(raw_bytes))
+    try:
+        os.link(tmp, path)  # atomic publish of a complete file; fails if another worker won
+    except FileExistsError:
+        return Ed25519PrivateKey.from_private_bytes(base64.b64decode(path.read_text().strip()))
+    finally:
+        tmp.unlink(missing_ok=True)
     return key
 
 

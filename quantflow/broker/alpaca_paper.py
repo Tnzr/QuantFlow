@@ -183,6 +183,8 @@ class AlpacaPaperTrading:
 
         from ..execution.risk_guards import MAX_RISK_PCT, MAX_SLIPPAGE_PCT, RiskCheck
 
+        if not qty or qty <= 0:
+            raise RiskGuardError(RiskCheck(False, "invalid qty or price", None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
         quote = self.get_last_quote(ticker)
         bid, ask = float(quote.get("bid") or 0), float(quote.get("ask") or 0)
         two_sided = bid > 0 and ask > 0
