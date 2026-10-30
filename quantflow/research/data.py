@@ -15,6 +15,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +26,23 @@ log = logging.getLogger(__name__)
 
 FIELDS = ("open", "high", "low", "close", "volume")
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-^=]{0,14}$")
+_FRED_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+
+
+def _safe(value: str, pattern: re.Pattern, kind: str) -> str:
+    if not pattern.fullmatch(value):
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return value
+
+
+def _date_key(value: str | None) -> str:
+    return pd.Timestamp(value).strftime("%Y-%m-%d") if value else "latest"
+
+
+def _stale(path: Path, open_ended: bool) -> bool:
+    """Open-ended caches are refetched once per calendar day; dated ones are immutable."""
+    return open_ended and date.fromtimestamp(path.stat().st_mtime) < date.today()
 
 
 def cache_dir() -> Path:
@@ -79,9 +98,10 @@ def _yfinance_daily(ticker: str, start: str, end: str | None) -> pd.DataFrame:
 
 def load_daily(ticker: str, start: str = "2005-01-01", end: str | None = None, source: str = "auto", refresh: bool = False) -> tuple[pd.DataFrame, str]:
     """Return (bars, source_used). ``source`` is "alpaca", "yfinance" or "auto"."""
-    ticker = ticker.upper().strip()
-    path = cache_dir() / f"{ticker}_{source}_{start}_{end or 'latest'}.parquet"
-    if path.exists() and not refresh:
+    ticker = _safe(ticker.upper().strip(), _TICKER_RE, "ticker")
+    source = _safe(source, re.compile(r"^(auto|alpaca|yfinance)$"), "source")
+    path = cache_dir() / f"{ticker}_{source}_{_date_key(start)}_{_date_key(end)}.parquet"
+    if path.exists() and not refresh and not _stale(path, end is None):
         df = pd.read_parquet(path)
         return df, str(df.attrs.get("source", source))
     df, used = pd.DataFrame(), source
@@ -120,8 +140,9 @@ def load_panel(tickers: list[str], start: str = "2005-01-01", end: str | None = 
 
 def load_fred(series_id: str, publication_lag_days: int = 1, refresh: bool = False) -> pd.Series:
     """FRED series from the keyless CSV endpoint, shifted by publication lag."""
+    series_id = _safe(series_id, _FRED_RE, "FRED series id")
     path = cache_dir() / f"fred_{series_id}.parquet"
-    if path.exists() and not refresh:
+    if path.exists() and not refresh and not _stale(path, True):
         s = pd.read_parquet(path).iloc[:, 0]
     else:
         resp = requests.get(FRED_CSV, params={"id": series_id}, timeout=30)

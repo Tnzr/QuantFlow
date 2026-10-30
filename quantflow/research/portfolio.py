@@ -50,26 +50,35 @@ def backtest_scores(
     """Rebalance at every date in ``scores`` and hold until the next one.
 
     ``fwd_returns`` must be the return from each rebalance date to the next.
+    Dates with no observed holding return (e.g. the final, incomplete period)
+    are skipped. A held name with a missing return (data gap or delisting) is
+    marked flat and counted in ``missing_frac`` rather than silently dropped.
     Returns per-period gross, cost and net returns plus turnover.
     """
     cost = cost or CostModel()
     s = smooth_scores(scores.dropna(), halflife)
     prev = pd.Series(dtype=float)
     rows = []
+    ret_dates = set(fwd_returns.index.get_level_values(0))
     for d, g in s.groupby(level=0):
         g = g.droplevel(0)
+        observed = fwd_returns.xs(d, level=0).reindex(g.index) if d in ret_dates else None
+        if observed is None or observed.isna().all():
+            continue
         target = apply_no_trade_band(quantile_weights(g, q, long_only), prev, no_trade_band)
         trades = target.subtract(prev.reindex(target.index.union(prev.index)).fillna(0.0), fill_value=0.0)
-        rr = fwd_returns.xs(d, level=0).reindex(target.index).fillna(0.0)
+        missing = observed.reindex(target.index).isna() & (target != 0)
+        rr = observed.reindex(target.index).fillna(0.0)
         adv = adv_dollars.loc[d] if adv_dollars is not None and d in adv_dollars.index else None
         c = cost.trading_cost(trades, capital, adv) + cost.borrow_cost(target)
         gross = float((target * rr).sum())
-        rows.append((d, gross, c, gross - c, float(trades.abs().sum())))
+        miss = float(target[missing].abs().sum() / target.abs().sum()) if target.abs().sum() else 0.0
+        rows.append((d, gross, c, gross - c, float(trades.abs().sum()), miss))
         # drift weights with realised returns before the next rebalance
         drifted = target * (1 + rr)
         denom = 1 + gross
         prev = drifted / denom if denom > 0 else drifted
-    return pd.DataFrame(rows, columns=["date", "gross", "cost", "net", "turnover"]).set_index("date")
+    return pd.DataFrame(rows, columns=["date", "gross", "cost", "net", "turnover", "missing_frac"]).set_index("date")
 
 
 def trend_long_flat(close: pd.Series, window: int = 200, step: int = 5, allow_short: bool = False, cost: CostModel | None = None) -> pd.DataFrame:

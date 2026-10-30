@@ -158,3 +158,54 @@ def test_run_ladder_end_to_end(tmp_path, monkeypatch):
     assert res["model:ridge"]["ic_mean"] > res["control:shuffled_ridge"]["ic_mean"]
     assert 0 <= res["model:ridge"]["dsr"] <= 1
     assert n_trials("baseline_ladder") >= 5
+
+
+def test_rsi_bounds_for_monotonic_and_flat_prices():
+    from quantflow.research.features import rsi
+
+    up = rsi(pd.DataFrame({"a": [1.0, 2, 3, 4, 5], "b": [2.0] * 5}), 2)
+    assert (up["a"].iloc[1:] == 100).all()
+    assert (up["b"].iloc[1:] == 50).all()
+
+
+def test_cache_paths_reject_traversal(tmp_path, monkeypatch):
+    from quantflow.research import data
+
+    monkeypatch.setenv("QUANTFLOW_RESEARCH_CACHE", str(tmp_path))
+    for bad in ("../x", "A/B", "..\\x"):
+        with pytest.raises(ValueError):
+            data.load_daily(bad, source="yfinance")
+    with pytest.raises(ValueError):
+        data.load_fred("../DGS10")
+
+
+def test_open_ended_cache_refreshes_daily(tmp_path):
+    import os
+    import time
+
+    from quantflow.research.data import _stale
+
+    f = tmp_path / "x.parquet"
+    f.write_text("x")
+    assert not _stale(f, True)
+    old = time.time() - 3 * 86400
+    os.utime(f, (old, old))
+    assert _stale(f, True) and not _stale(f, False)
+
+
+def test_incomplete_final_period_is_skipped():
+    dates = pd.bdate_range("2020-01-03", periods=3, freq="W-FRI")
+    idx = pd.MultiIndex.from_product([dates, list("abcde")])
+    scores = pd.Series(np.tile(np.arange(5.0), 3), idx)
+    rets = pd.Series(0.01, idx)
+    rets.loc[dates[-1]] = np.nan
+    pnl = backtest_scores(scores, rets, CostModel(), q=0.2)
+    assert list(pnl.index) == list(dates[:2])
+
+
+def test_market_impact_charged_for_thin_liquidity():
+    trades = pd.Series({"thin": 1.0, "deep": 0.0})
+    cm = CostModel(0, 0, 0, 0, impact_coef=10.0)
+    thin = cm.trading_cost(trades, 10_000, pd.Series({"thin": 1e4, "deep": 1e9}))
+    deep = cm.trading_cost(trades.rename({"thin": "deep", "deep": "thin"}), 10_000, pd.Series({"thin": 1e4, "deep": 1e9}))
+    assert thin > deep > 0

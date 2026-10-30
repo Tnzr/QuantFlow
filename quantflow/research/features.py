@@ -17,7 +17,9 @@ def rsi(close: pd.DataFrame, n: int) -> pd.DataFrame:
     d = close.diff()
     up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
     dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
-    return 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    out = 100 - 100 / (1 + up / dn.replace(0, np.nan))
+    out = out.mask((dn == 0) & (up > 0), 100.0)
+    return out.mask((dn == 0) & (up == 0), 50.0).where(close.notna())
 
 
 def multiscale_features(panel: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:

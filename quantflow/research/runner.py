@@ -106,12 +106,19 @@ def walk_forward_predict(
     return s[s.index.get_level_values(0) >= pd.Timestamp(oos_start)] if oos_start else s
 
 
-def evaluate_scores(scores: pd.Series, X: pd.DataFrame, cfg: LadderConfig, cost: CostModel) -> tuple[dict, pd.DataFrame]:
+def trailing_adv_dollars(panel: dict[str, pd.DataFrame], window: int = 20) -> pd.DataFrame:
+    """Causal average daily dollar volume (close x volume) over ``window`` bars."""
+    return (panel["close"] * panel["volume"]).rolling(window, min_periods=max(1, window // 2)).mean()
+
+
+def evaluate_scores(
+    scores: pd.Series, X: pd.DataFrame, cfg: LadderConfig, cost: CostModel, adv_dollars: pd.DataFrame | None = None
+) -> tuple[dict, pd.DataFrame]:
     ppy = max(1, round(252 / cfg.step))
     ic = M.rank_ic(scores, X.loc[scores.index, "fwd_ret"])
     pnl = backtest_scores(
         scores, X["hold_ret"], cost, q=cfg.quantile, halflife=cfg.halflife,
-        no_trade_band=cfg.no_trade_band, capital=cfg.capital,
+        no_trade_band=cfg.no_trade_band, capital=cfg.capital, adv_dollars=adv_dollars,
     )
     out = {
         **M.ic_summary(ic, max(1, cfg.horizon // cfg.step), ppy),
@@ -128,6 +135,7 @@ def run_ladder(panel: dict[str, pd.DataFrame], cfg: LadderConfig | None = None, 
     cfg = cfg or LadderConfig()
     cost = CostModel(**{**cfg.cost, "periods_per_year": max(1, round(252 / cfg.step))})
     calendar = panel["close"].index
+    adv = trailing_adv_dollars(panel)
     X = build_dataset(panel, cfg.horizon, cfg.step, cfg.start)
     splitter = PurgedWalkForward(cfg.horizon, freq="Y", min_train_bars=756)
     oos = X[X.index.get_level_values(0) >= pd.Timestamp(cfg.oos_start)]
@@ -135,13 +143,13 @@ def run_ladder(panel: dict[str, pd.DataFrame], cfg: LadderConfig | None = None, 
     pnls: dict[str, pd.Series] = {}
 
     for name, (feat, sign) in FACTOR_BASELINES.items():
-        results[f"factor:{name}"], p = evaluate_scores(sign * oos[feat], X, cfg, cost)
+        results[f"factor:{name}"], p = evaluate_scores(sign * oos[feat], X, cfg, cost, adv)
         pnls[f"factor:{name}"] = p["net"]
     for model in cfg.models:
         s = walk_forward_predict(X, model, splitter, calendar, oos_start=cfg.oos_start, seed=cfg.seed)
         if s.empty:
             continue
-        results[f"model:{model}"], p = evaluate_scores(s, X, cfg, cost)
+        results[f"model:{model}"], p = evaluate_scores(s, X, cfg, cost, adv)
         pnls[f"model:{model}"] = p["net"]
     if cfg.shuffle_control and cfg.models:
         ctrl = cfg.models[-1]
@@ -150,7 +158,7 @@ def run_ladder(panel: dict[str, pd.DataFrame], cfg: LadderConfig | None = None, 
             s = walk_forward_predict(X, ctrl, splitter, calendar, oos_start=cfg.oos_start, shuffle_labels=True, seed=cfg.seed + k)
             if s.empty:
                 continue
-            r, _ = evaluate_scores(s, X, cfg, cost)
+            r, _ = evaluate_scores(s, X, cfg, cost, adv)
             null_ic.append(r["ic_mean"])
             null_sr.append(r["gross"]["sharpe"])
         if null_ic:
