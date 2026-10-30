@@ -535,3 +535,52 @@ def save_allocation_proposal(
             )
         )
         s.commit()
+
+
+class PlaybookSignal(Base):
+    __tablename__ = "playbook_signals"
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16))
+    side: Mapped[str] = mapped_column(String(8), nullable=True)
+    bull: Mapped[float] = mapped_column(Float, nullable=True)
+    bear: Mapped[float] = mapped_column(Float, nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PlaybookAlert(Base):
+    __tablename__ = "playbook_alerts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    message: Mapped[str] = mapped_column(Text)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+def load_playbook_states(db_path: str = "sqlite:///quantflow.db") -> dict[str, dict]:
+    with Session(get_engine(db_path)) as s:
+        return {r.symbol: json.loads(r.payload) for r in s.query(PlaybookSignal).all()}
+
+
+def save_playbook_state(state: dict, db_path: str = "sqlite:///quantflow.db") -> None:
+    with Session(get_engine(db_path)) as s:
+        s.merge(PlaybookSignal(symbol=state["symbol"], state=state["state"], side=state.get("side"),
+                               bull=state.get("bull"), bear=state.get("bear"),
+                               payload=json.dumps(state, default=str), updated_at=datetime.utcnow()))
+        s.commit()
+
+
+def save_playbook_alerts(alerts: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> int:
+    rows = [PlaybookAlert(symbol=a["symbol"], kind=a["kind"], message=a["message"], payload=json.dumps(a, default=str))
+            for a in alerts]
+    with Session(get_engine(db_path)) as s:
+        s.add_all(rows)
+        s.commit()
+    return len(rows)
+
+
+def list_playbook_alerts(limit: int = 100, db_path: str = "sqlite:///quantflow.db") -> list[dict]:
+    with Session(get_engine(db_path)) as s:
+        q = s.query(PlaybookAlert).order_by(PlaybookAlert.id.desc()).limit(limit)
+        return [{**json.loads(r.payload), "id": r.id, "created_at": r.created_at.isoformat()} for r in q]

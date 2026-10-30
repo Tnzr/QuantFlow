@@ -1,0 +1,127 @@
+"""Run the playbook: resolve the election branch, step every symbol, alert, optionally paper-trade."""
+from __future__ import annotations
+
+import logging
+import os
+
+import pandas as pd
+import requests
+
+from ..data.persistence import (
+    create_schema,
+    load_playbook_states,
+    save_playbook_alerts,
+    save_playbook_state,
+)
+from ..execution.risk_guards import MAX_RISK_PCT
+from .impact import CANDIDATES, ImpactRow, load_closes, screen, top_n
+from .options import choose_contract, load_swing_chain
+from .rules import RuleConfig, SignalState, indicators, step
+
+log = logging.getLogger(__name__)
+DEFAULT_EQUITY = 10_000.0
+RESOLVED_P = 0.97
+
+
+def resolve_outcome(p_dem: float | None, manual: str | None = None) -> str | None:
+    """'D'/'R' once the Senate result is known; prediction markets ≥97% count as resolved."""
+    manual = (manual or os.getenv("QUANTFLOW_SENATE_OUTCOME") or "").strip().upper()
+    if manual in ("D", "R"):
+        return manual
+    if p_dem is None:
+        return None
+    if p_dem >= RESOLVED_P:
+        return "D"
+    if p_dem <= 1 - RESOLVED_P:
+        return "R"
+    return None
+
+
+def senate_odds() -> float | None:
+    from ..election.ingest import fetch_polymarket_odds
+
+    return next((o["probability"] for o in fetch_polymarket_odds() if o["ticker_or_topic"] == "senate_control"), None)
+
+
+def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None) -> list[ImpactRow]:
+    closes = closes if closes is not None else load_closes()
+    return top_n(screen(closes, p_dem), n)
+
+
+def _bars(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame | None:
+    from ..features.indicators import fetch_ohlcv
+
+    try:
+        df = fetch_ohlcv(symbol, period=period, interval=interval)
+    except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the cycle
+        log.warning("bars %s %s: %s", symbol, interval, exc)
+        return None
+    return df.dropna(subset=["close"]) if df is not None and not df.empty else None
+
+
+def notify(alert: dict) -> None:
+    """Log and, if ``QUANTFLOW_ALERT_WEBHOOK`` is set, POST ``{"text": ...}`` (Slack/Discord compatible)."""
+    log.warning("[playbook] %s", alert["message"])
+    url = os.getenv("QUANTFLOW_ALERT_WEBHOOK")
+    if url:
+        try:
+            requests.post(url, json={"text": alert["message"], "content": alert["message"]}, timeout=5)
+        except requests.RequestException as exc:
+            log.warning("alert webhook failed: %s", exc)
+
+
+def run_cycle(
+    watch: list[dict],
+    outcome: str | None,
+    *,
+    db_path: str = "sqlite:///quantflow.db",
+    cfg: RuleConfig | None = None,
+    equity: float = DEFAULT_EQUITY,
+    risk_pct: float = MAX_RISK_PCT,
+    execute: bool = False,
+    broker=None,
+    send: bool = True,
+    bars_fn=_bars,
+    chain_fn=load_swing_chain,
+) -> dict:
+    """One pass over the watchlist. ``watch`` items are ImpactRow dicts."""
+    cfg = cfg or RuleConfig()
+    create_schema(db_path)
+    prev_all = load_playbook_states(db_path)
+    out = {"outcome": outcome, "signals": {}, "alerts": []}
+    for imp in watch:
+        sym = imp["symbol"]
+        bench = CANDIDATES.get(sym, ("", ""))[0]
+        bars = bars_fn(sym)
+        if bars is None or len(bars) < 60:
+            out["signals"][sym] = {"symbol": sym, "error": "insufficient bars"}
+            continue
+        bench_bars = bars_fn(bench) if bench else None
+        intraday = bars_fn(sym, "1mo", "1h")
+        ind = indicators(bars, bench_bars["close"] if bench_bars is not None else None, intraday, cfg)
+        prev = SignalState.from_dict(prev_all[sym]) if sym in prev_all else SignalState(sym)
+        st, alerts = step(prev, ind, imp, outcome, cfg)
+        for a in alerts:
+            ad = a.to_dict()
+            if a.kind == "entry_confirmed":
+                try:
+                    ad["structure"] = choose_contract(chain_fn(sym), ind["close"], st.side, equity * risk_pct)
+                except Exception as exc:  # noqa: BLE001
+                    ad["structure"] = {"structure": None, "reason": f"chain error: {exc}"}
+                s = ad["structure"]
+                if s.get("structure"):
+                    ad["message"] += f" | {s['structure']} {s.get('contract') or s.get('legs_occ')} x{s['qty']}"
+                if execute and broker is not None and s.get("structure") in ("long_call", "long_put") and s["qty"] > 0:
+                    try:
+                        order = broker.place_option_order(s["contract"], s["qty"], s["limit_price"])
+                        ad["order"] = getattr(order, "__dict__", order)
+                    except Exception as exc:  # noqa: BLE001 - risk-guard rejections are reported, not raised
+                        ad["order"] = {"error": str(exc)}
+            out["alerts"].append(ad)
+            if send:
+                notify(ad)
+        save_playbook_state(st.to_dict(), db_path)
+        out["signals"][sym] = st.to_dict()
+    if out["alerts"]:
+        save_playbook_alerts(out["alerts"], db_path)
+    return out

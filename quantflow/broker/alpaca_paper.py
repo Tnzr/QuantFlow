@@ -220,6 +220,29 @@ class AlpacaPaperTrading:
             raise RiskGuardError(check)
         return check
 
+    def place_option_order(self, contract: str, qty: int, limit_price: float, side: str = "buy") -> OrderResult:
+        """Limit order for one option contract (OCC symbol), day TIF, paper account only.
+
+        Buying an option risks the premium, so the 1% cap is checked with
+        ``max_loss_per_unit = limit_price * 100``.
+        """
+        from ..execution.risk_guards import RiskGuardError, check_order_risk
+
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
+            return OrderResult(id="demo-opt", ticker=contract, side=side, qty=qty, type="limit",
+                               status="demo_filled", filled_price=limit_price)
+        self._require_keys()
+        if side == "buy":
+            check = check_order_risk("buy", qty, limit_price, self.get_account().equity,
+                                     max_loss_per_unit=limit_price * 100)
+            if not check.allow:
+                raise RiskGuardError(check)
+        order = self._post("orders", {"symbol": contract, "qty": str(int(qty)), "side": side, "type": "limit",
+                                      "limit_price": str(round(limit_price, 2)), "time_in_force": "day"})
+        return OrderResult(id=order["id"], ticker=order["symbol"], side=order["side"], qty=float(order["qty"]),
+                           type=order["type"], status=order["status"],
+                           filled_price=float(order.get("filled_avg_price") or 0))
+
     def cancel_order(self, order_id: str) -> bool:
         if not self.enabled:
             raise RuntimeError("Alpaca credentials missing")
