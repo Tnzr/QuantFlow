@@ -220,6 +220,50 @@ class AlpacaPaperTrading:
             raise RiskGuardError(check)
         return check
 
+    def place_option_order(self, contract: str, qty: int, limit_price: float, side: str = "buy",
+                           client_order_id: Optional[str] = None) -> OrderResult:
+        """Limit order for one option contract (OCC symbol), day TIF, paper account only.
+
+        Buys are buy-to-open and pass the 1% cap with ``max_loss_per_unit = limit_price * 100``.
+        Sells are only allowed to close an existing long position: held contracts minus the remaining
+        quantity of open sell orders for the same contract must cover ``qty``; opening short options
+        (undefined risk) is rejected. ``client_order_id`` makes retries
+        idempotent at the broker.
+        """
+        from ..execution.risk_guards import MAX_RISK_PCT, MAX_SLIPPAGE_PCT, RiskCheck, RiskGuardError, check_order_risk
+
+        side = side.lower()
+        if side not in ("buy", "sell"):
+            raise ValueError(f"invalid side {side!r}")
+        if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
+            return OrderResult(id="demo-opt", ticker=contract, side=side, qty=qty, type="limit",
+                               status="demo_filled", filled_price=limit_price)
+        self._require_keys()
+        if side == "buy":
+            check = check_order_risk("buy", qty, limit_price, self.get_account().equity,
+                                     max_loss_per_unit=limit_price * 100)
+            if not check.allow:
+                raise RiskGuardError(check)
+        else:
+            held = next((p.shares for p in self.get_positions() if p.ticker.upper() == contract.upper()), 0)
+            pending = sum(float(o.get("qty") or 0) - float(o.get("filled_qty") or 0)
+                          for o in self.get_orders(status="open", limit=500)
+                          if str(o.get("symbol", "")).upper() == contract.upper() and o.get("side") == "sell")
+            available = held - pending
+            if available < qty:
+                raise RiskGuardError(RiskCheck(
+                    False, f"sell {qty} {contract} would open a short option (long held {held}, "
+                    f"{pending:g} already in open sell orders); only closing sells allowed",
+                    None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
+        data = {"symbol": contract, "qty": str(int(qty)), "side": side, "type": "limit",
+                "limit_price": str(round(limit_price, 2)), "time_in_force": "day"}
+        if client_order_id:
+            data["client_order_id"] = client_order_id
+        order = self._post("orders", data)
+        return OrderResult(id=order["id"], ticker=order["symbol"], side=order["side"], qty=float(order["qty"]),
+                           type=order["type"], status=order["status"],
+                           filled_price=float(order.get("filled_avg_price") or 0))
+
     def cancel_order(self, order_id: str) -> bool:
         if not self.enabled:
             raise RuntimeError("Alpaca credentials missing")

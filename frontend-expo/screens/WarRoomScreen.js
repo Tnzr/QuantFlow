@@ -31,6 +31,8 @@ export default function WarRoomScreen({ token }) {
   const [resilience, setResilience] = useState(null);
   const [odds, setOdds] = useState(null);
   const [proposal, setProposal] = useState(null);
+  const [playbook, setPlaybook] = useState(null);
+  const [signals, setSignals] = useState(null);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
 
@@ -57,6 +59,17 @@ export default function WarRoomScreen({ token }) {
     });
   const propose = (bias) =>
     guard("proposal", async () => setProposal(await apiPost("/proposals", { ticker, bias, equity: 100000 }, token)));
+
+  const loadPlaybook = () =>
+    guard("playbook", async () => {
+      setPlaybook(await apiGet("/playbook/midterm?n=5", token));
+      setSignals(await apiGet("/playbook/signals", token));
+    });
+  const runCycle = () =>
+    guard("cycle", async () => {
+      await apiPost("/playbook/cycle", { n: 5 }, token);
+      setSignals(await apiGet("/playbook/signals", token));
+    });
 
   const gate = agents?.gate;
 
@@ -155,6 +168,41 @@ export default function WarRoomScreen({ token }) {
             </View>
           ))}
           <Text style={styles.muted}>Educational research, not financial advice. Small historical samples.</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.row}>
+        <Pressable style={styles.btn} onPress={loadPlaybook}>
+          <Text style={styles.btnText}>{busy === "playbook" ? "Loading..." : "Midterm top 5"}</Text>
+        </Pressable>
+        <Pressable style={styles.btnAlt} onPress={runCycle}>
+          <Text style={styles.btnText}>{busy === "cycle" ? "Running..." : "Run rules cycle"}</Text>
+        </Pressable>
+      </View>
+      {playbook ? (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Midterm playbook (P(Dem Senate) {pct(playbook.p_dem_senate)}, outcome {playbook.outcome || "pending"})</Text>
+          {(playbook.top || []).map((r) => {
+            const sig = (signals || []).find((s) => s.symbol === r.symbol);
+            return (
+              <View key={r.symbol} style={styles.basket}>
+                <Text style={[styles.basketName, { color: r.projected_direction === "up" ? THEME.profit : THEME.loss }]}>
+                  {r.symbol} vs {r.benchmark}: {r.projected_direction.toUpperCase()} (z {num(r.projected_z)}) | swing x{num(r.swing_ratio)}
+                </Text>
+                <Text style={styles.muted}>
+                  If Dem Senate z {num(r.z_dem)} ({pct(r.agree_dem)} agree, n={r.n_dem}) | if GOP z {num(r.z_rep)} ({pct(r.agree_rep)}, n={r.n_rep})
+                  {r.live?.implied_move ? ` | implied ±${pct(r.live.implied_move)} to ${r.live.implied_expiry}` : ""}
+                </Text>
+                {sig ? (
+                  <Text style={styles.mono}>
+                    {sig.state.toUpperCase()} {sig.side || ""} | bull {num(sig.bull)} bear {num(sig.bear)}
+                    {sig.stop ? ` | stop ${num(sig.stop)} target ${num(sig.target)}` : ""}
+                  </Text>
+                ) : null}
+              </View>
+            );
+          })}
+          <Text style={styles.muted}>Paper trading only. Entries need the election result plus trend and volume-confirmed breakout.</Text>
         </View>
       ) : null}
     </ScrollView>

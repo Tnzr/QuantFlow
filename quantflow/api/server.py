@@ -75,6 +75,10 @@ from .election_routes import router as election_router  # noqa: E402
 
 app.include_router(election_router)
 
+from .playbook_routes import router as playbook_router  # noqa: E402
+
+app.include_router(playbook_router)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Persistent Error Log
