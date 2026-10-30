@@ -148,7 +148,7 @@ def quantile_bars(quantiles, keys, path):
         ax.set_title(label(k), fontsize=8)
         ax.set_xlabel("score quintile")
     np.atleast_1d(axes)[0].set_ylabel("mean forward return %")
-    fig.suptitle("Monotonicity: forward return by score quintile (1 = lowest)", fontweight="bold", fontsize=10)
+    fig.suptitle("Monotonicity: forward return by score quintile (1 = lowest)", fontweight="bold", fontsize=10, y=1.06)
     return _save(fig, path)
 
 
@@ -261,7 +261,7 @@ def tuning_choices(results, path):
     np.atleast_1d(axes)[0].set_yticks(range(len(specs)), [
         f"{s['model']} {s.get('max_depth', s.get('alpha'))} {s['label'].replace('_rank', '')}" for s in specs
     ], fontsize=7)
-    fig.suptitle("Nested tuning: spec picked each year on inner validation", fontweight="bold", fontsize=10)
+    fig.suptitle("Nested tuning: spec picked each year on inner validation", fontweight="bold", fontsize=10, y=1.06)
     return _save(fig, path)
 
 
