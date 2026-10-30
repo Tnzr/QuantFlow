@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 from dataclasses import asdict, dataclass, field
 from typing import Optional
@@ -31,6 +32,8 @@ STRESS_PERIODS = {
     "bear_2022": ("2022-01-01", "2022-10-31"),
     "tariff_2025": ("2025-03-15", "2025-05-31"),
 }
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -147,13 +150,21 @@ def simulate(df: pd.DataFrame, signals: pd.DataFrame, p: SimParams, start_equity
                 if qty > 0:
                     pos, side, entry_i, entry_override = qty, want, i, bool(overrides[i - 1])
                     stop = entry_px - want * risk_per_share
+        if pos and i == n - 1:
+            fill = closes[i] * ((1 - cost) if side > 0 else (1 + cost))
+            pnl = side * pos * (fill - entry_px)
+            cash += pnl
+            trades.append({"entry": str(px.index[entry_i].date()), "exit": str(px.index[i].date()), "side": side,
+                           "entry_px": entry_px, "exit_px": fill, "pnl": pnl, "ret": side * (fill / entry_px - 1),
+                           "reason": "end_of_data", "override": entry_override})
+            pos, side = 0.0, 0
         mark = side * pos * (closes[i] - entry_px) if pos else 0.0
         equity[i] = cash + mark
     eq = pd.Series(equity, index=px.index)
     rets = eq.pct_change().dropna()
     years = max((px.index[-1] - px.index[0]).days / 365.25, 1e-9)
     total = float(eq.iloc[-1] / start_equity - 1)
-    tr = pd.DataFrame(trades)
+    tr = pd.DataFrame(trades, columns=["entry", "exit", "side", "entry_px", "exit_px", "pnl", "ret", "reason", "override"])
     wins = tr[tr["pnl"] > 0]["pnl"].sum() if len(tr) else 0.0
     losses = -tr[tr["pnl"] < 0]["pnl"].sum() if len(tr) else 0.0
     exposure_bars = sum(max(1, (pd.Timestamp(t["exit"]) - pd.Timestamp(t["entry"])).days) for t in trades)
@@ -279,6 +290,8 @@ def resilience_report(
 
     if df is None:
         df = compute_indicators(fetch_ohlcv(ticker, period="max")).dropna(subset=["adj close"])
+        if len(df) and df.index[0] > pd.Timestamp(start) + pd.Timedelta(days=30):
+            log.warning("%s history starts %s, after requested start %s", ticker, df.index[0].date(), start)
     if signals is None:
         signals = compute_signal_frame(ticker, df, start=start, sentiment_fn=sentiment_fn)
     params = params or SimParams()
@@ -291,6 +304,7 @@ def resilience_report(
     return {
         "ticker": ticker.upper(),
         "period": f"{signals.index[0].date()}..{signals.index[-1].date()}",
+        "requested_start": start,
         "params": asdict(params),
         "agentic": gated.summary(),
         "baseline_rules_only": baseline.summary(),

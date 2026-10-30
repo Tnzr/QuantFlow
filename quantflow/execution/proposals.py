@@ -41,8 +41,9 @@ def load_signing_key(key_file: Optional[Path] = None, create: bool = True) -> Ed
     key = Ed25519PrivateKey.generate()
     path.parent.mkdir(parents=True, exist_ok=True)
     raw_bytes = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
-    path.write_text(_b64(raw_bytes))
-    path.chmod(0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(_b64(raw_bytes))
     return key
 
 
@@ -98,14 +99,25 @@ def sign_proposal(proposal: dict, key: Optional[Ed25519PrivateKey] = None) -> di
     return signed
 
 
-def verify_proposal(proposal: dict, public_key: Optional[str] = None) -> bool:
-    pk = public_key or proposal.get("public_key")
-    if not pk or not proposal.get("signature"):
-        return False
+def trusted_public_keys() -> list[str]:
+    """Keys from ``QUANTFLOW_TRUSTED_ED25519_PUBKEYS`` (comma-separated base64) plus this host's key."""
+    keys = [k.strip() for k in os.getenv("QUANTFLOW_TRUSTED_ED25519_PUBKEYS", "").split(",") if k.strip()]
     try:
-        Ed25519PublicKey.from_public_bytes(base64.b64decode(pk)).verify(
-            base64.b64decode(proposal["signature"]), canonical_bytes(proposal)
-        )
-        return True
-    except (InvalidSignature, ValueError):
+        keys.append(public_key_b64(load_signing_key(create=False)))
+    except (FileNotFoundError, ValueError):
+        pass
+    return keys
+
+
+def verify_proposal(proposal: dict, public_key: Optional[str] = None) -> bool:
+    """Verify against ``public_key`` or the trusted keys; the embedded ``public_key`` is ignored."""
+    if not proposal.get("signature"):
         return False
+    msg = canonical_bytes(proposal)
+    for pk in [public_key] if public_key else trusted_public_keys():
+        try:
+            Ed25519PublicKey.from_public_bytes(base64.b64decode(pk)).verify(base64.b64decode(proposal["signature"]), msg)
+            return True
+        except (InvalidSignature, ValueError):
+            continue
+    return False

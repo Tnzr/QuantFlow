@@ -106,9 +106,13 @@ def test_ed25519_sign_verify(tmp_path, monkeypatch):
 
     key = proposals.load_signing_key(tmp_path / "k")
     p = sign_proposal(build_proposal("XLV", "bull_call_vertical", [{"action": "buy"}], max_loss=920), key)
+    pub = proposals.public_key_b64(key)
+    assert verify_proposal(p, pub)
+    assert not verify_proposal(dict(p, max_risk_pct=0.05), pub)
+    monkeypatch.setenv("QUANTFLOW_TRUSTED_ED25519_PUBKEYS", pub)
     assert verify_proposal(p)
-    tampered = dict(p, max_risk_pct=0.05)
-    assert not verify_proposal(tampered)
+    forged = sign_proposal(build_proposal("XLV", "bull_call_vertical", []), proposals.Ed25519PrivateKey.generate())
+    assert not verify_proposal(forged)  # embedded self-signed key is not trusted
     with pytest.raises(ValueError):
         build_proposal("XLV", "x", [], max_risk_pct=0.02)
 
@@ -149,3 +153,38 @@ def test_seasonality_cycle_and_event_study():
     assert not study.empty and study["excess"].abs().max() < 1e-9
     ranked = rank_baskets(study, {"baskets": {"b": {"side": "long", "tickers": ["AAA"], "thesis": "t"}}}, "1m")
     assert ranked[0].analog_n == 1
+
+
+def test_simulate_flat_and_open_at_end():
+    df = synthetic_ohlcv(n=300)
+    flat = pd.DataFrame({"final": 0.5, "base": 0.5, "override": False}, index=df.index)
+    r = simulate(df, flat, SimParams())
+    assert r.trades == 0 and r.total_return == 0
+    always = pd.DataFrame({"final": 0.9, "base": 0.9, "override": False}, index=df.index)
+    r2 = simulate(df, always, SimParams(max_hold_bars=10_000, stop_atr=1e6))
+    assert r2.trades == 1 and r2.trade_log[-1]["reason"] == "end_of_data"
+    assert r2.total_return == pytest.approx(sum(t["pnl"] for t in r2.trade_log) / 100_000, rel=1e-6)
+
+
+class _FakeAlpaca:
+    from quantflow.broker.alpaca_paper import AlpacaPaperTrading as _A
+    check_risk = _A.check_risk
+
+    def __init__(self, quote, shares=0):
+        from types import SimpleNamespace as NS
+        self.quote, self.pos, self.acct = quote, [NS(ticker="ABC", shares=shares)], NS(equity=100_000.0)
+
+    def get_last_quote(self, t): return self.quote
+    def get_last_trade(self, t): return {"price": 100.0}
+    def get_positions(self): return self.pos
+    def get_account(self): return self.acct
+
+
+def test_alpaca_check_risk_quote_and_closing():
+    from quantflow.execution.risk_guards import RiskGuardError
+
+    with pytest.raises(RiskGuardError):
+        _FakeAlpaca({"bid": 0, "ask": 0}).check_risk("ABC", "buy", 1)
+    with pytest.raises(RiskGuardError):  # 20 x $100 unstopped = 2% risk
+        _FakeAlpaca({"bid": 99.99, "ask": 100.01}).check_risk("ABC", "sell", 20)
+    assert _FakeAlpaca({"bid": 99.99, "ask": 100.01}, shares=20).check_risk("ABC", "sell", 20).allow

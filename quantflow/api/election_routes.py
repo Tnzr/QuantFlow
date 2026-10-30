@@ -130,8 +130,13 @@ def create_proposal(req: ProposalRequest, _auth: dict = Depends(require_write_au
     from ..options.verticals import recommend_structure
 
     ticker = req.ticker.upper()
+    bias = req.bias.lower()
+    if bias not in ("long", "short"):
+        raise HTTPException(400, "bias must be 'long' or 'short'")
     agents = run_agents(ticker, db_path=DB)
-    structure = recommend_structure(ticker, req.bias, req.equity)
+    if agents["bias"] != bias:
+        raise HTTPException(409, f"agents bias is {agents['bias']} ({agents['gate']['reason']}); refusing to sign a {bias} proposal")
+    structure = recommend_structure(ticker, bias, req.equity)
     spread = structure.get("spread")
     if not spread or not spread.get("contracts"):
         raise HTTPException(422, structure.get("error") or "spread max loss exceeds 1% risk budget")
@@ -160,14 +165,14 @@ def list_proposals(limit: int = 50):
 
 class VerifyRequest(BaseModel):
     proposal: dict
-    public_key: Optional[str] = None
 
 
 @router.post("/proposals/verify")
 def verify(req: VerifyRequest):
     from ..execution.proposals import verify_proposal
 
-    return {"valid": verify_proposal(req.proposal, req.public_key)}
+    # Only server-trusted keys count; the proposal's embedded public_key is never trusted.
+    return {"valid": verify_proposal(req.proposal)}
 
 
 class RiskCheckRequest(BaseModel):

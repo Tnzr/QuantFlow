@@ -181,16 +181,32 @@ class AlpacaPaperTrading:
         """Run pre-trade risk guards; raises ``RiskGuardError`` when blocked."""
         from ..execution.risk_guards import RiskGuardError, check_order_risk
 
+        from ..execution.risk_guards import MAX_RISK_PCT, MAX_SLIPPAGE_PCT, RiskCheck
+
         quote = self.get_last_quote(ticker)
         bid, ask = float(quote.get("bid") or 0), float(quote.get("ask") or 0)
-        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else None
-        if mid is None:
-            trade = self.get_last_trade(ticker)
-            mid = float(trade.get("price") or 0) or None
+        two_sided = bid > 0 and ask > 0
         side_l = side.lower()
-        expected = limit_price or ((ask if side_l == "buy" else bid) if bid > 0 and ask > 0 else mid)
+        if not two_sided and not limit_price:
+            raise RiskGuardError(RiskCheck(False, f"no two-sided quote for {ticker}; market order slippage unbounded",
+                                           None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
+        mid = (bid + ask) / 2 if two_sided else (float(self.get_last_trade(ticker).get("price") or 0) or None)
+        expected = limit_price or (ask if side_l == "buy" else bid)
         if not expected or expected <= 0:
             raise RuntimeError(f"Could not determine entry price for {ticker}")
+        held = next((p.shares for p in self.get_positions() if p.ticker.upper() == ticker.upper()), 0)
+        closing = min(qty, held) if side_l == "sell" and held > 0 else (min(qty, -held) if side_l == "buy" and held < 0 else 0)
+        qty = qty - closing  # only new exposure counts toward the 1% risk cap
+        if qty <= 0:
+            from ..execution.risk_guards import estimate_slippage_pct
+
+            slip = estimate_slippage_pct(side_l, mid, expected) if mid else 0.0
+            check = RiskCheck(slip <= MAX_SLIPPAGE_PCT, "ok (closing order)" if slip <= MAX_SLIPPAGE_PCT else
+                              f"slippage {slip:.2%} exceeds cap {MAX_SLIPPAGE_PCT:.2%}",
+                              slip, 0.0, 0.0, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, None)
+            if not check.allow:
+                raise RiskGuardError(check)
+            return check
         stop_price = None
         if stop_loss_pct:
             stop_price = expected * (1 - stop_loss_pct) if side_l == "buy" else expected * (1 + stop_loss_pct)

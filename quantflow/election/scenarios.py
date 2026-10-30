@@ -112,11 +112,11 @@ def rank_baskets(
         sign = 1.0 if b["side"] == "long" else -1.0
         analog = sub[sub["pres_party_lost_senate"] == True].groupby("election")["excess"].mean()  # noqa: E712
         divided = sub[sub["divided_after"] == True].groupby("election")["excess"].mean()  # noqa: E712
-        a_mean = float(analog.mean()) if len(analog) else 0.0
+        a_mean = float(analog.mean()) if len(analog) else float("nan")
         d_mean = float(divided.mean()) if len(divided) else 0.0
         votes = pd.concat([analog, divided[~divided.index.isin(analog.index)]])
         hit = float((np.sign(votes) == sign).mean()) if len(votes) else 0.0
-        score = sign * (0.5 * a_mean + 0.5 * d_mean)
+        score = sign * (0.5 * (a_mean if len(analog) else 0.0) + 0.5 * d_mean)
         out.append(
             BasketEvidence(
                 basket=name,
@@ -131,7 +131,7 @@ def rank_baskets(
                 divided_n=int(len(divided)),
                 all_midterm_excess=float(per_el.mean()),
                 hit_rate=hit,
-                consistent=score > 0 and hit >= 0.5,
+                consistent=len(analog) > 0 and score > 0 and hit >= 0.5,
                 score=float(score),
                 per_election={k: round(float(v), 4) for k, v in per_el.items()},
             )

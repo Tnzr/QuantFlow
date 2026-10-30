@@ -137,7 +137,7 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 
 @app.get("/errors/recent")
-def errors_recent(limit: int = 50, workspace_id: Optional[str] = None):
+def errors_recent(limit: int = 50, workspace_id: Optional[str] = None, _auth: dict = Depends(require_write_auth)):
     """Return recent API errors (for debugging). Optionally filtered by workspace."""
     with _error_log_lock:
         items = list(_error_log)
@@ -147,7 +147,7 @@ def errors_recent(limit: int = 50, workspace_id: Optional[str] = None):
 
 
 @app.post("/errors/clear")
-def errors_clear():
+def errors_clear(_auth: dict = Depends(require_write_auth)):
     """Clear the in-memory error log."""
     with _error_log_lock:
         _error_log.clear()

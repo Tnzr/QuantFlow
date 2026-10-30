@@ -199,8 +199,15 @@ class AgentGraph:
 def run_agents(ticker: str, use_llm: bool = False, db_path: str = "sqlite:///quantflow.db", persist: bool = True) -> dict[str, Any]:
     from ..features.indicators import compute_indicators, fetch_ohlcv
 
-    df = compute_indicators(fetch_ohlcv(ticker, period="20y"))
-    result = AgentGraph(sentiment_fn=db_sentiment(db_path)).run(ticker, df, use_llm=use_llm)
+    df = compute_indicators(fetch_ohlcv(ticker, period="20y")).dropna(subset=["adj close"])
+    pit = db_sentiment(db_path)
+    decided_at = pd.Timestamp.now(tz="UTC").tz_localize(None)
+
+    def live_sentiment(t: str, _bar_as_of: pd.Timestamp) -> dict:
+        # Live decisions see news/odds ingested after the latest daily bar's midnight stamp.
+        return pit(t, decided_at)
+
+    result = AgentGraph(sentiment_fn=live_sentiment).run(ticker, df, use_llm=use_llm)
     if persist:
         from ..data.persistence import save_agent_states
 
