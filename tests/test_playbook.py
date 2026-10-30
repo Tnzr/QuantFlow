@@ -258,3 +258,25 @@ def test_top_n_affordable_skips_unaffordable_and_keeps_sectors_diverse():
 def test_affordable_universe_has_benchmarks_and_many_sectors():
     groups = {g for _, g in impact.AFFORDABLE.values()}
     assert len(groups) >= 12 and all(b for b, _ in impact.AFFORDABLE.values())
+
+
+def test_affordability_checked_on_side_the_tree_will_trade():
+    r = impact.ImpactRow("A", "SPY", "fin", 6, 1.0, -1.0, 1.0, 3, 3, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.4, "up", -2.0, 0.4,
+                         swing_ratio=1.2)
+    r.z_dem, r.z_rep, r.projected_z = 1.0, -1.0, 0.4
+    fit = lambda sym, side, budget: {"structure": "long_put", "qty": 1} if side == "short" else {"structure": "vertical_debit"}
+    assert impact.top_n_affordable([r], 1, 100, fit, executable_only=True, outcome="R")[0][1]["side"] == "short"
+    assert impact.top_n_affordable([r], 1, 100, fit, executable_only=True, outcome="D") == []
+    pre = impact.top_n_affordable([r], 1, 100, fit, executable_only=True)
+    assert pre and pre[0][1]["side"] == "short"  # opposite side kept before the result
+
+
+def test_open_positions_are_managed_after_leaving_watchlist(tmp_path):
+    db = f"sqlite:///{tmp_path}/pb3.db"
+    b = bars(last_jump=0.03, last_vol=3.0)
+    kw = {"db_path": db, "send": False, "bars_fn": lambda s, *a: None if s != "AAA" else b,
+              "chain_fn": lambda s: _chain(float(b["close"].iloc[-1]))}
+    first = run_cycle([dict(IMP_UP)], "D", **kw)
+    assert first["signals"]["AAA"]["state"] == "in_trade"
+    later = run_cycle([], "D", **kw)
+    assert "AAA" in later["signals"]

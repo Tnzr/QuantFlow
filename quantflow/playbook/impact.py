@@ -208,18 +208,36 @@ def top_n_affordable(
     max_per_group: int = 1,
     min_swing_ratio: float = 1.0,
     executable_only: bool = False,
+    outcome: str | None = None,
 ) -> list[tuple[ImpactRow, dict]]:
     """Like ``top_n`` but only keeps symbols where a long call/put (or debit vertical) in the
     projected direction fits ``budget``. ``fit_fn(symbol, side, budget) -> structure dict``.
-    ``executable_only`` drops vertical-only symbols (paper execution is single-leg only)."""
+    ``executable_only`` drops vertical-only symbols (paper execution is single-leg only).
+
+    Direction checked: once ``outcome`` ("D"/"R") is known, the resolved-branch side that the rules
+    tree will trade; before that, the projected side first and, if it does not fit, the opposite side
+    (the tree can still flip to it after the result), so no tradeable symbol is dropped early."""
     if fit_fn is None:
         fit_fn = _live_fit
     picked, seen = [], {}
     for r in rows:
         if seen.get(r.group, 0) >= max_per_group or (np.isfinite(r.swing_ratio) and r.swing_ratio < min_swing_ratio):
             continue
-        st = fit_fn(r.symbol, "long" if r.projected_z > 0 else "short", budget)
-        if not st.get("structure") or (executable_only and st["structure"] not in EXECUTABLE):
+        def ok(st: dict) -> bool:
+            return bool(st.get("structure")) and (not executable_only or st["structure"] in EXECUTABLE)
+
+        if outcome in ("D", "R"):
+            sides = ["long" if (r.z_dem if outcome == "D" else r.z_rep) > 0 else "short"]
+        else:
+            first = "long" if r.projected_z > 0 else "short"
+            sides = [first, "short" if first == "long" else "long"]
+        st = {}
+        for side in sides:
+            st = fit_fn(r.symbol, side, budget)
+            if ok(st):
+                st = {**st, "side": side}
+                break
+        if not ok(st):
             continue
         picked.append((r, st))
         seen[r.group] = seen.get(r.group, 0) + 1

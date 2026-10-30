@@ -14,17 +14,19 @@ _CACHE: dict = {}
 TTL = 900
 
 
-def _watchlist(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False) -> dict:
+def _watchlist(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False,
+               manual_outcome: str | None = None) -> dict:
     from ..playbook.tracker import build_watchlist, resolve_outcome, senate_odds
 
-    key = (n, universe, round(budget, 2), executable_only)
+    key = (n, universe, round(budget, 2), executable_only, (manual_outcome or "").upper())
     hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < TTL:
         return hit[1]
     p = senate_odds()
+    outcome = resolve_outcome(p, manual_outcome)
     rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget,
-                           executable_only=executable_only)
-    data = {"p_dem_senate": p, "outcome": resolve_outcome(p), "top": [r.to_dict() for r in rows]}
+                           executable_only=executable_only, outcome=outcome)
+    data = {"p_dem_senate": p, "outcome": outcome, "top": [r.to_dict() for r in rows]}
     _CACHE[key] = (time.time(), data)
     return data
 
@@ -69,7 +71,7 @@ class CycleRequest(BaseModel):
 def playbook_cycle(req: CycleRequest, _auth: dict = Depends(require_write_auth)):  # noqa: B008
     from ..execution.risk_guards import MAX_RISK_PCT
     from ..playbook.impact import UNIVERSES
-    from ..playbook.tracker import execution_budget, resolve_outcome, run_cycle
+    from ..playbook.tracker import execution_budget, run_cycle
 
     if req.universe not in UNIVERSES:
         raise HTTPException(400, f"universe must be one of {sorted(UNIVERSES)}")
@@ -80,6 +82,6 @@ def playbook_cycle(req: CycleRequest, _auth: dict = Depends(require_write_auth))
 
         broker = AlpacaPaperTrading()
         budget = execution_budget(broker)
-    data = _watchlist(req.n, req.universe, budget, executable_only=req.execute)
-    outcome = resolve_outcome(data["p_dem_senate"], req.outcome)
+    data = _watchlist(req.n, req.universe, budget, executable_only=req.execute, manual_outcome=req.outcome)
+    outcome = data["outcome"]
     return _clean(run_cycle(data["top"], outcome, db_path=DB, equity=req.equity, execute=req.execute, broker=broker))

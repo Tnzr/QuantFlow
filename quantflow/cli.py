@@ -750,13 +750,15 @@ def cmd_research_ladder(args):
     print(text)
 
 
-def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False):
-    from .playbook.tracker import build_watchlist, senate_odds
+def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False,
+                    manual_outcome: str = ""):
+    from .playbook.tracker import build_watchlist, resolve_outcome, senate_odds
 
     p = senate_odds()
+    outcome = resolve_outcome(p, manual_outcome)
     rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget or None,
-                           executable_only=executable_only)
-    return p, [r.to_dict() for r in rows]
+                           executable_only=executable_only, outcome=outcome)
+    return p, outcome, [r.to_dict() for r in rows]
 
 
 def cmd_playbook_screen(args):
@@ -764,7 +766,7 @@ def cmd_playbook_screen(args):
 
     from .playbook.impact import UNIVERSES, live_state
 
-    p, rows = _playbook_watch(args.n, args.universe, args.budget)
+    p, _, rows = _playbook_watch(args.n, args.universe, args.budget)
     print(f"P(Dem Senate)={p}")
     for r in rows:
         s = live_state(r["symbol"], UNIVERSES[args.universe][r["symbol"]][0]) if args.live else {}
@@ -780,7 +782,7 @@ def cmd_playbook_cycle(args):
     import time as _time
 
     from .execution.risk_guards import MAX_RISK_PCT
-    from .playbook.tracker import execution_budget, resolve_outcome, run_cycle
+    from .playbook.tracker import execution_budget, run_cycle
 
     broker = None
     if args.execute:
@@ -789,8 +791,8 @@ def cmd_playbook_cycle(args):
         broker = AlpacaPaperTrading()
     while True:
         budget = execution_budget(broker) if broker is not None else args.equity * MAX_RISK_PCT
-        p, rows = _playbook_watch(args.n, args.universe, budget, executable_only=broker is not None)
-        outcome = resolve_outcome(p, args.outcome)
+        p, outcome, rows = _playbook_watch(args.n, args.universe, budget, executable_only=broker is not None,
+                                           manual_outcome=args.outcome)
         res = run_cycle(rows, outcome, db_path=args.db, equity=args.equity, execute=args.execute, broker=broker)
         print(f"outcome={outcome} p_dem={p}")
         for sym, st in res["signals"].items():

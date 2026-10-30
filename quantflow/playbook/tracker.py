@@ -47,7 +47,7 @@ def senate_odds() -> float | None:
 
 def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None, universe: str = "affordable",
                     budget: float | None = DEFAULT_EQUITY * MAX_RISK_PCT, fit_fn=None,
-                    executable_only: bool = False) -> list[ImpactRow]:
+                    executable_only: bool = False, outcome: str | None = None) -> list[ImpactRow]:
     """Top-``n`` sector-diverse symbols. With ``budget`` set, only symbols where a long call/put
     (or debit vertical, unless ``executable_only``) in the projected direction costs <= budget are kept.
     For execute mode pass the same broker-derived budget that ``run_cycle`` will size with."""
@@ -55,7 +55,7 @@ def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None
     closes = closes if closes is not None else load_closes(candidates=cands)
     rows = screen(closes, p_dem, cands)
     if budget:
-        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn, executable_only=executable_only)]
+        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn, executable_only=executable_only, outcome=outcome)]
     return top_n(rows, n)
 
 
@@ -118,7 +118,10 @@ def _run_cycle(watch, outcome, db_path, cfg, equity, risk_pct, execute, broker, 
     create_schema(db_path)
     prev_all = load_playbook_states(db_path)
     out = {"outcome": outcome, "signals": {}, "alerts": []}
-    for imp in watch:
+    # Open positions are always managed, even if the symbol fell off today's entry watchlist.
+    listed = {w["symbol"] for w in watch}
+    held = [p["impact"] for s, p in prev_all.items() if p.get("state") == "in_trade" and s not in listed and p.get("impact")]
+    for imp in list(watch) + held:
         sym = imp["symbol"]
         bench = imp.get("benchmark", "")
         bench = "" if bench in ("", "none") else bench
@@ -159,7 +162,7 @@ def _run_cycle(watch, outcome, db_path, cfg, equity, risk_pct, execute, broker, 
             out["alerts"].append(ad)
             if send:
                 notify(ad)
-        save_playbook_state(st.to_dict(), db_path)
+        save_playbook_state({**st.to_dict(), "impact": imp}, db_path)
         out["signals"][sym] = st.to_dict()
     if out["alerts"]:
         save_playbook_alerts(out["alerts"], db_path)
