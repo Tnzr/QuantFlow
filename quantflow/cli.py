@@ -729,6 +729,27 @@ def cmd_election_scenario(args):
               f"divided={b['divided_excess']:+.2%} (n={b['divided_n']}) consistent={b['consistent']}")
 
 
+def cmd_research_ladder(args):
+    import json as _json
+
+    from quantflow.research.data import load_panel
+    from quantflow.research.runner import DEFAULT_UNIVERSE, LadderConfig, run_ladder
+
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] or DEFAULT_UNIVERSE
+    panel, sources = load_panel(tickers, start=args.data_start, source=args.source, refresh=args.refresh)
+    cfg = LadderConfig(
+        horizon=args.horizon, step=args.step, start=args.start, oos_start=args.oos_start,
+        halflife=args.halflife, no_trade_band=args.no_trade_band, capital=args.capital,
+        models=[m for m in args.models.split(",") if m],
+    )
+    note = f"sources={sorted(set(sources.values()))}; universe=current tickers (survivorship-biased)"
+    res = run_ladder(panel, cfg, family=args.family, log_runs=not args.no_log, universe_note=note)
+    text = _json.dumps(res, indent=1, default=lambda x: round(float(x), 4))
+    if args.out:
+        Path(args.out).write_text(text)
+    print(text)
+
+
 def main():
     p = argparse.ArgumentParser(prog="quantflow")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -806,6 +827,24 @@ def main():
     p10.add_argument("--api-base", default="http://127.0.0.1:8100")
     p10.add_argument("--report-out", default="docs/LOCAL_SYSTEM_REPORT.md")
     p10.set_defaults(func=cmd_ops_report)
+
+    pr = sub.add_parser("research-ladder", help="Purged walk-forward baseline ladder, net of costs")
+    pr.add_argument("--tickers", default="")
+    pr.add_argument("--source", default="auto", choices=["auto", "alpaca", "yfinance"])
+    pr.add_argument("--data-start", default="2005-01-01")
+    pr.add_argument("--start", default="2007-01-01")
+    pr.add_argument("--oos-start", default="2012-01-01")
+    pr.add_argument("--horizon", type=int, default=5)
+    pr.add_argument("--step", type=int, default=5)
+    pr.add_argument("--halflife", type=float, default=0.0)
+    pr.add_argument("--no-trade-band", type=float, default=0.0)
+    pr.add_argument("--capital", type=float, default=10_000.0)
+    pr.add_argument("--models", default="ridge,gbm")
+    pr.add_argument("--family", default="baseline_ladder")
+    pr.add_argument("--no-log", action="store_true")
+    pr.add_argument("--refresh", action="store_true")
+    pr.add_argument("--out", default="")
+    pr.set_defaults(func=cmd_research_ladder)
 
     p11 = sub.add_parser("train-features")
     p11.add_argument("--tickers", default="")
