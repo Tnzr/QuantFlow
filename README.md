@@ -89,6 +89,21 @@ Finviz fallback notes:
 - Generate textbook-style system report: python -m quantflow.cli ops-report --include-api --api-base http://127.0.0.1:8100
   - Includes runtime scraping transport snapshot from `/scanner/scraping/status` when `--include-api` is enabled.
 
+## Research harness (validate before you trade)
+`quantflow/research/` is the gate every strategy or model change must pass before paper trading:
+- `splits.py`: `PurgedWalkForward` (yearly expanding refits) and `CombinatorialPurgedKFold`; training labels that overlap a test window are purged and the bars after it embargoed.
+- `features.py`: strictly causal multi-scale OHLCV features (momentum 1d–12m, RSI 2/14/50, SMA distance, volume z-score/trend, close-location, gaps, range/ATR, realized-vol ratio, OBV slope, 52-week position, skew). Labels: forward, vol-scaled and cross-sectional rank.
+- `costs.py`: spread, slippage, commission, borrow and square-root impact; option-spread fill costs.
+- `metrics.py`: rank IC / ICIR / t-stat, net Sharpe, drawdown, probabilistic and deflated Sharpe, Diebold-Mariano.
+- `registry.py`: append-only `data/experiments.jsonl` with config hash and git revision, so the trial count used to deflate Sharpe is known.
+- `runner.py`: baseline ladder of pre-registered factors (12-1 momentum, 1-week reversal), ridge, gradient boosting, a shuffled-label null control, SPY 200-day trend sleeves and SPY buy-and-hold.
+
+```bash
+python -m quantflow.cli research-ladder                      # 50-name default universe, weekly, OOS 2012+
+python -m quantflow.cli research-ladder --horizon 21 --step 21 --halflife 2
+```
+Data: Alpaca daily bars (`adjustment=all`, `ALPACA_DATA_FEED`, default `iex`) with yfinance fallback, and keyless FRED CSV series via `load_fred`. The default universe is today's tickers, so results are survivorship-biased; each registry record says so. Default capital for sizing and impact is a $10k paper account.
+
 ## Makefile
 - make env-create; make kernel
 - make db-init
