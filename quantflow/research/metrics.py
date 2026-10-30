@@ -104,3 +104,61 @@ def by_era(returns: pd.Series, eras: dict[str, tuple[int, int]], periods_per_yea
     r = pd.Series(returns).dropna()
     yrs = pd.DatetimeIndex(r.index).year
     return {k: sharpe(r[(yrs >= a) & (yrs <= b)], periods_per_year) for k, (a, b) in eras.items()}
+
+
+def sharpe_se(sr_annual: float, n: int, periods_per_year: int = 52) -> float:
+    """Asymptotic standard error of an annualised Sharpe (Lo, 2002, iid)."""
+    if n < 2 or not np.isfinite(sr_annual):
+        return float("nan")
+    sr = sr_annual / np.sqrt(periods_per_year)
+    return float(np.sqrt((1 + 0.5 * sr**2) / n) * np.sqrt(periods_per_year))
+
+
+def block_bootstrap(
+    values: pd.Series, stat, n_boot: int = 2000, block: int = 8, seed: int = 0
+) -> np.ndarray:
+    """Stationary-block bootstrap distribution of ``stat(sample)``.
+
+    Blocks of mean length ``block`` keep serial correlation (overlapping
+    labels, volatility clustering) that an iid bootstrap would destroy.
+    """
+    x = pd.Series(values).dropna().to_numpy()
+    n = len(x)
+    if n < 3:
+        return np.full(n_boot, np.nan)
+    rng = np.random.default_rng(seed)
+    t = np.arange(n)
+    restart = rng.random((n_boot, n)) < 1.0 / max(1, block)
+    restart[:, 0] = True
+    last = np.maximum.accumulate(np.where(restart, t, 0), axis=1)
+    starts = rng.integers(n, size=(n_boot, n))
+    idx = (np.take_along_axis(starts, last, axis=1) + t - last) % n
+    return np.array([stat(row) for row in x[idx]])
+
+
+def bootstrap_sharpe(returns: pd.Series, periods_per_year: int = 52, **kw) -> np.ndarray:
+    def _sr(a):
+        sd = a.std(ddof=1)
+        return a.mean() / sd * np.sqrt(periods_per_year) if sd > 0 else np.nan
+
+    return block_bootstrap(returns, _sr, **kw)
+
+
+def rolling_sharpe(returns: pd.Series, window: int = 52, periods_per_year: int = 52) -> pd.Series:
+    r = pd.Series(returns)
+    return r.rolling(window).mean() / r.rolling(window).std() * np.sqrt(periods_per_year)
+
+
+def annual_sharpe(returns: pd.Series, periods_per_year: int = 52) -> pd.Series:
+    r = pd.Series(returns).dropna()
+    return r.groupby(pd.DatetimeIndex(r.index).year).apply(lambda x: sharpe(x, periods_per_year))
+
+
+def quantile_returns(scores: pd.Series, outcomes: pd.Series, n_q: int = 5) -> pd.DataFrame:
+    """Per-date mean outcome by score quantile (1 = lowest); rows are dates."""
+    df = pd.concat({"s": scores, "y": outcomes}, axis=1).dropna()
+    q = df.groupby(level=0)["s"].transform(
+        lambda s: pd.qcut(s.rank(method="first"), n_q, labels=False) + 1 if len(s) >= n_q else np.nan
+    )
+    df["q"] = q
+    return df.dropna().groupby([df.index.get_level_values(0), "q"])["y"].mean().unstack()

@@ -34,6 +34,8 @@ DEFAULT_UNIVERSE = [
 # Pre-registered single-factor baselines: (feature, sign) fixed from the literature, never fitted.
 FACTOR_BASELINES = {"momentum_12_1": ("mom_252_21", 1), "reversal_1w": ("mom_5", -1)}
 
+LABEL_COLS = ("y_rank", "y_vs_rank", "fwd_ret", "fwd_vs", "hold_ret")
+
 ERAS = {"early": (2012, 2016), "mid": (2017, 2021), "late": (2022, 2030)}
 
 
@@ -86,7 +88,7 @@ def walk_forward_predict(
     shuffle_labels: bool = False,
     seed: int = 7,
 ) -> pd.Series:
-    feats = X.attrs.get("features") or [c for c in X.columns if c not in ("y_rank", "fwd_ret", "fwd_vs", "hold_ret")]
+    feats = X.attrs.get("features") or [c for c in X.columns if c not in LABEL_COLS]
     rng = np.random.default_rng(seed)
     y = X[label]
     preds = []

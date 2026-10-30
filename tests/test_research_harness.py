@@ -4,7 +4,11 @@ import pytest
 
 from quantflow.research import metrics as M
 from quantflow.research.costs import CostModel
-from quantflow.research.features import build_dataset, multiscale_features
+from quantflow.research.features import (
+    FEATURE_GROUPS,
+    build_dataset,
+    multiscale_features,
+)
 from quantflow.research.portfolio import (
     backtest_scores,
     quantile_weights,
@@ -240,3 +244,93 @@ def test_cost_model_positional_order_is_stable():
     cm = CostModel(2, 3, 0, 52, 10, 1)
     assert cm.periods_per_year == 1 and cm.fallback_adv_dollars == 1e6
     assert cm.borrow_cost(pd.Series({"a": -1.0})) == pytest.approx(52 / 1e4)
+
+
+def _with_market(panel):
+    return {k: v.rename(columns={"T0": "SPY"}) for k, v in panel.items()}
+
+
+def test_swing_features_are_causal_under_truncation():
+    from quantflow.research.features import swing_features
+
+    panel = _with_market(synth_panel(700, 6))
+    full = swing_features(panel)
+    trunc = swing_features({k: v.iloc[:500] for k, v in panel.items()})
+    assert {"resid_mom_126", "trend_agree", "band_84", "macd_10_42"} <= set(full)
+    for k in full:
+        pd.testing.assert_frame_equal(full[k].iloc[:500], trunc[k], check_freq=False, obj=k)
+
+
+def test_swing_dataset_excludes_labels_and_tracks_base_features():
+    panel = _with_market(synth_panel(900, 12))
+    base = build_dataset(panel, 21, 5, feature_set="base")
+    swing = build_dataset(panel, 21, 5, feature_set="swing")
+    labels = {"y_rank", "y_vs_rank", "fwd_ret", "fwd_vs", "hold_ret"}
+    assert not labels & set(swing.attrs["features"])
+    assert set(base.attrs["features"]) == set(swing.attrs["base_features"])
+    assert len(swing.attrs["features"]) > len(base.attrs["features"]) + 20
+    vs = swing["y_vs_rank"].dropna()
+    assert len(vs) > 0.8 * len(swing) and vs.between(swing["y_rank"].min(), swing["y_rank"].max()).all()
+    no_mkt = build_dataset(synth_panel(900, 12), 21, 5, feature_set="swing")
+    assert "resid_mom_126" not in no_mkt.attrs["features"]
+    with pytest.raises(ValueError):
+        build_dataset(panel, 21, 5, feature_set="nope")
+
+
+def test_staggered_tranches_cut_turnover_and_average_books():
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2020-01-03", periods=60, freq="W-FRI")
+    idx = pd.MultiIndex.from_product([dates, [f"T{i}" for i in range(20)]])
+    scores = pd.Series(rng.normal(size=len(idx)), index=idx)
+    rets = pd.Series(rng.normal(0, 0.01, size=len(idx)), index=idx)
+    one = backtest_scores(scores, rets, CostModel(), tranches=1)
+    four = backtest_scores(scores, rets, CostModel(), tranches=4)
+    pd.testing.assert_frame_equal(one, backtest_scores(scores, rets, CostModel()))
+    assert four["turnover"].iloc[5:].mean() < 0.5 * one["turnover"].iloc[5:].mean()
+
+
+def test_block_bootstrap_centres_on_sample_statistic():
+    r = pd.Series(np.random.default_rng(0).normal(0.002, 0.02, 400))
+    boot = M.block_bootstrap(r, np.mean, n_boot=500, block=8)
+    assert boot.shape == (500,)
+    assert abs(np.mean(boot) - r.mean()) < 0.5 * r.std() / np.sqrt(len(r))
+    assert np.percentile(boot, 2.5) < r.mean() < np.percentile(boot, 97.5)
+    q = M.quantile_returns(pd.Series(np.arange(100.0), index=pd.MultiIndex.from_product([[0, 1], range(50)])),
+                           pd.Series(np.arange(100.0), index=pd.MultiIndex.from_product([[0, 1], range(50)])))
+    assert list(q.columns) == [1, 2, 3, 4, 5] and q.mean().is_monotonic_increasing
+
+
+def test_inner_validation_split_is_purged():
+    from quantflow.research.swing import inner_split
+
+    panel = synth_panel(1600, 12)
+    X = build_dataset(panel, 21, 5)
+    cal = panel["close"].index
+    tr = np.arange(len(X))
+    inner, val = inner_split(X, tr, cal, 21, 2)
+    d = X.index.get_level_values(0)
+    assert len(inner) and len(val) and not set(inner) & set(val)
+    assert cal.searchsorted(d[inner].max()) + 21 < cal.searchsorted(d[val].min())
+
+
+def test_swing_study_end_to_end_with_figures(tmp_path, monkeypatch):
+    from quantflow.research import swing
+    from quantflow.research.plots import make_all
+    from quantflow.research.swing import DEFAULT_GRID, SwingConfig, run_swing_study
+
+    monkeypatch.setenv("QUANTFLOW_EXPERIMENT_REGISTRY", str(tmp_path / "exp.jsonl"))
+    small_gbm = {**swing.FIXED_GBM, "max_iter": 25, "min_samples_leaf": 50}
+    monkeypatch.setattr(swing, "FIXED_GBM", small_gbm)
+    panel = _with_market(synth_panel(1300, 12, signal=1.0, seed=4))
+    cfg = SwingConfig(horizons=(10,), start="2010-06-01", oos_start="2013-01-01", n_shuffles=2,
+                      ablation_horizon=10, inner_years=1, grid=[DEFAULT_GRID[0], small_gbm])
+    res = run_swing_study(panel, cfg, out_dir=tmp_path / "art")
+    h = res["horizons"][10]
+    assert h["tranches"] == 2 and h["tuning"]
+    tuned = h["model:gbm_swing_tuned"]
+    assert tuned["ic_mean"] > max(res["nulls"][10]["ic"])
+    assert tuned["net"]["turnover"] < tuned["net_untranched"]["turnover"]
+    assert set(h["ablation"]) == set(FEATURE_GROUPS)
+    assert 0 <= tuned["dsr"] <= 1 and n_trials("swing_study") >= 8
+    figs = make_all(tmp_path / "art", tmp_path / "figs")
+    assert len(figs) >= 10 and all(p.stat().st_size > 5000 for p in figs.values())
