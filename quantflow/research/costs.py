@@ -14,8 +14,9 @@ class CostModel:
 
     ``impact_coef`` scales a square-root market-impact term by participation
     (traded notional / average daily dollar volume). Names with unknown ADV
-    are charged as the least liquid known name, capped at ``fallback_adv_dollars``. ``borrow_bps_annual`` is
-    charged on short notional per period held.
+    are charged as the least liquid known name, capped at
+    ``fallback_adv_dollars``. ``borrow_bps_annual`` is charged on short
+    notional per period held.
     """
 
     half_spread_bps: float = 2.0
@@ -23,8 +24,8 @@ class CostModel:
     commission_bps: float = 0.0
     borrow_bps_annual: float = 50.0
     impact_coef: float = 10.0
-    fallback_adv_dollars: float = 1e6
     periods_per_year: int = 52
+    fallback_adv_dollars: float = 1e6
 
     @property
     def linear_bps(self) -> float:

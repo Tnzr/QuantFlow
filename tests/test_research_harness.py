@@ -234,3 +234,9 @@ def test_stale_cache_served_when_refresh_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(data, "_yfinance_daily", lambda *a: pd.DataFrame())
     df, used = data.load_daily("SPY", source="yfinance")
     assert len(df) == 2 and used == "yfinance"
+
+
+def test_cost_model_positional_order_is_stable():
+    cm = CostModel(2, 3, 0, 52, 10, 1)
+    assert cm.periods_per_year == 1 and cm.fallback_adv_dollars == 1e6
+    assert cm.borrow_cost(pd.Series({"a": -1.0})) == pytest.approx(52 / 1e4)
