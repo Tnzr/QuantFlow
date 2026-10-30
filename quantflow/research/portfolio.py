@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 import pandas as pd
 
@@ -46,6 +48,7 @@ def backtest_scores(
     no_trade_band: float = 0.0,
     capital: float = DEFAULT_CAPITAL,
     adv_dollars: pd.DataFrame | None = None,
+    tranches: int = 1,
 ) -> pd.DataFrame:
     """Rebalance at every date in ``scores`` and hold until the next one.
 
@@ -53,6 +56,10 @@ def backtest_scores(
     Dates with no observed holding return (e.g. the final, incomplete period)
     are skipped. A held name with a missing return (data gap or delisting) is
     marked flat and counted in ``missing_frac`` rather than silently dropped.
+    ``tranches`` > 1 runs K staggered overlapping books (Jegadeesh-Titman):
+    the target is the average of the last K quantile portfolios, so a
+    horizon-H signal sampled every ``step`` bars uses K = H / step and only
+    1/K of the book turns over each period.
     Returns per-period gross, cost and net returns plus turnover.
     """
     cost = cost or CostModel()
@@ -60,12 +67,15 @@ def backtest_scores(
     prev = pd.Series(dtype=float)
     rows = []
     ret_dates = set(fwd_returns.index.get_level_values(0))
+    books: deque[pd.Series] = deque(maxlen=max(1, int(tranches)))
     for d, g in s.groupby(level=0):
         g = g.droplevel(0)
-        observed = fwd_returns.xs(d, level=0).reindex(g.index) if d in ret_dates else None
-        if observed is None or observed.isna().all():
+        observed = fwd_returns.xs(d, level=0) if d in ret_dates else None
+        if observed is None or observed.reindex(g.index).isna().all():
             continue
-        target = apply_no_trade_band(quantile_weights(g, q, long_only), prev, no_trade_band)
+        books.append(quantile_weights(g, q, long_only))
+        target = pd.concat(list(books), axis=1).fillna(0.0).sum(axis=1) / books.maxlen
+        target = apply_no_trade_band(target, prev, no_trade_band)
         trades = target.subtract(prev.reindex(target.index.union(prev.index)).fillna(0.0), fill_value=0.0)
         missing = observed.reindex(target.index).isna() & (target != 0)
         rr = observed.reindex(target.index).fillna(0.0)

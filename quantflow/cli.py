@@ -714,6 +714,35 @@ def cmd_research_ladder(args):
     print(text)
 
 
+def cmd_research_swing(args):
+    import json as _json
+
+    from quantflow.research.data import load_panel
+    from quantflow.research.runner import DEFAULT_UNIVERSE
+    from quantflow.research.swing import SwingConfig, run_swing_study
+
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] or DEFAULT_UNIVERSE
+    panel, sources = load_panel(tickers, start=args.data_start, source=args.source, refresh=args.refresh)
+    cfg = SwingConfig(
+        horizons=tuple(int(h) for h in args.horizons.split(",") if h), step=args.step, start=args.start,
+        oos_start=args.oos_start, n_shuffles=args.shuffles, capital=args.capital,
+    )
+    note = f"sources={sorted(set(sources.values()))}; universe=current tickers (survivorship-biased)"
+    out = Path(args.out_dir)
+    res = run_swing_study(panel, cfg, out_dir=out, family=args.family, log_runs=not args.no_log, universe_note=note)
+    if args.figures:
+        from quantflow.research.plots import make_all
+
+        figs = make_all(out, out / "figures")
+        print(f"wrote {len(figs)} figures to {out / 'figures'}")
+    summary = {
+        h: {k: {"ic": v["ic_mean"], "net_sharpe": v["net"]["sharpe"], "turnover": v["net"]["turnover"], "dsr": v.get("dsr")}
+            for k, v in hr.items() if isinstance(v, dict) and "net" in v}
+        for h, hr in res["horizons"].items()
+    }
+    print(_json.dumps({"horizons": summary, "benchmarks": res.get("benchmarks")}, indent=1, default=lambda x: round(float(x), 4)))
+
+
 def main():
     p = argparse.ArgumentParser(prog="quantflow")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -809,6 +838,23 @@ def main():
     pr.add_argument("--refresh", action="store_true")
     pr.add_argument("--out", default="")
     pr.set_defaults(func=cmd_research_ladder)
+
+    ps = sub.add_parser("research-swing", help="2-week to 2-month swing study with nested tuning, nulls and figures")
+    ps.add_argument("--tickers", default="")
+    ps.add_argument("--source", default="auto", choices=["auto", "alpaca", "yfinance"])
+    ps.add_argument("--data-start", default="2005-01-01")
+    ps.add_argument("--start", default="2007-01-01")
+    ps.add_argument("--oos-start", default="2012-01-01")
+    ps.add_argument("--horizons", default="10,21,42")
+    ps.add_argument("--step", type=int, default=5)
+    ps.add_argument("--shuffles", type=int, default=5)
+    ps.add_argument("--capital", type=float, default=10_000.0)
+    ps.add_argument("--family", default="swing_study")
+    ps.add_argument("--out-dir", default="data/research_swing")
+    ps.add_argument("--figures", action="store_true")
+    ps.add_argument("--no-log", action="store_true")
+    ps.add_argument("--refresh", action="store_true")
+    ps.set_defaults(func=cmd_research_swing)
 
     p11 = sub.add_parser("train-features")
     p11.add_argument("--tickers", default="")

@@ -50,6 +50,76 @@ def multiscale_features(panel: dict[str, pd.DataFrame]) -> dict[str, pd.DataFram
     return f
 
 
+SWING_SCALES = (10, 21, 42, 63)
+BAND_SCALES = (5, 10, 21, 42, 84)
+
+
+def _efficiency_ratio(c: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Kaufman efficiency: net move / path length over ``n`` bars (1 = clean trend)."""
+    return (c - c.shift(n)).abs() / c.diff().abs().rolling(n).sum().replace(0, np.nan)
+
+
+def swing_features(panel: dict[str, pd.DataFrame], market: str = "SPY") -> dict[str, pd.DataFrame]:
+    """Multi-scale pattern features aimed at 2-week to 2-month holds.
+
+    * ``band_n``: Haar-style multi-resolution detail, (MA_n - MA_2n) / close,
+      i.e. the price path decomposed into octave bands from 1 week to 4 months.
+    * ``tmom_n``: volatility-normalised momentum (a t-stat of the n-day move).
+    * ``er_n``: trend efficiency; ``dd_hi_n`` / ``up_lo_n``: position vs n-day
+      high and low; ``macd_*``: EMA spreads at three scales.
+    * ``trend_agree``: how many of the 10/21/42/63-day trends point the same way.
+    * Interactions: pullback inside an uptrend, volatility squeeze, and a
+      volume-confirmed 21-day breakout.
+    * ``resid_mom_n``: momentum net of rolling beta to ``market`` (if present).
+    """
+    c, h, lo, v = (panel[k] for k in ("close", "high", "low", "volume"))
+    r = c.pct_change(fill_method=None)
+    rv63 = r.rolling(63).std()
+    f: dict[str, pd.DataFrame] = {}
+    for n in BAND_SCALES:
+        f[f"band_{n}"] = (c.rolling(n).mean() - c.rolling(2 * n).mean()) / c
+    for n in SWING_SCALES:
+        f[f"tmom_{n}"] = c.pct_change(n, fill_method=None) / (rv63 * np.sqrt(n)).replace(0, np.nan)
+        f[f"er_{n}"] = _efficiency_ratio(c, n)
+    for n in (10, 21, 63):
+        f[f"dd_hi_{n}"] = c / h.rolling(n).max() - 1
+        f[f"up_lo_{n}"] = c / lo.rolling(n).min() - 1
+    for fast, slow in ((5, 21), (10, 42), (21, 126)):
+        f[f"macd_{fast}_{slow}"] = (c.ewm(span=fast, adjust=False).mean() - c.ewm(span=slow, adjust=False).mean()) / c
+    signs = [np.sign(c.pct_change(n, fill_method=None)) for n in SWING_SCALES]
+    f["trend_agree"] = sum(signs) / len(signs)
+    up = (c > c.rolling(50).mean()).astype(float).where(c.notna())
+    f["pullback_uptrend"] = up * -c.pct_change(5, fill_method=None) / rv63.replace(0, np.nan)
+    f["squeeze"] = r.rolling(10).std() / rv63
+    prior_hi = h.shift(1).rolling(21).max()
+    f["breakout_vol"] = (c / prior_hi - 1) * (v.rolling(5).mean() / v.rolling(63).mean())
+    if market in c.columns:
+        m = r[market]
+        var = m.rolling(126).var()
+        beta = r.rolling(126).cov(m).div(var, axis=0)
+        resid = r - beta.mul(m, axis=0)
+        for n in (63, 126):
+            f[f"resid_mom_{n}"] = resid.rolling(n).sum() / (resid.rolling(n).std() * np.sqrt(n)).replace(0, np.nan)
+    return f
+
+
+FEATURE_GROUPS = {
+    "short (<=10d)": ["mom_1", "mom_5", "rsi_2", "clv", "clv_5", "gap", "range_atr", "rv_ratio",
+                      "band_5", "band_10", "tmom_10", "er_10", "dd_hi_10", "up_lo_10", "macd_5_21", "squeeze"],
+    "swing (21-63d)": ["mom_21", "mom_63", "rsi_14", "dist_sma20", "dist_sma50", "band_21", "band_42",
+                       "tmom_21", "tmom_42", "tmom_63", "er_21", "er_42", "er_63", "dd_hi_21", "up_lo_21",
+                       "dd_hi_63", "up_lo_63", "macd_10_42", "resid_mom_63", "skew_63", "rv_63"],
+    "long (>=126d)": ["mom_126", "mom_252", "mom_252_21", "rsi_50", "dist_sma200", "pos_52w", "band_84",
+                      "macd_21_126", "resid_mom_126"],
+    "volume": ["vol_z20", "vol_trend", "obv_slope", "breakout_vol"],
+    "cross-scale": ["trend_agree", "pullback_uptrend"],
+}
+
+
+def feature_group(name: str) -> str:
+    return next((g for g, cols in FEATURE_GROUPS.items() if name in cols), "other")
+
+
 def forward_returns(close: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return close.shift(-horizon) / close - 1
 
@@ -70,15 +140,22 @@ def build_dataset(
     step: int = 5,
     start: str | None = None,
     min_names: int = 10,
+    feature_set: str = "base",
 ) -> pd.DataFrame:
     """Long (date, ticker) frame of rank-normalised features and labels.
 
     Columns: features..., ``y_rank`` (cross-sectional label rank),
     ``fwd_ret`` (raw forward return), ``fwd_vs`` (vol-scaled forward return),
     ``hold_ret`` (return to the next sample date, used for portfolio P&L).
-    Samples every ``step`` bars to limit label overlap.
+    Samples every ``step`` bars to limit label overlap. ``feature_set`` is
+    ``"base"`` (24 features) or ``"swing"`` (base + :func:`swing_features`).
     """
     feats = multiscale_features(panel)
+    base_cols = list(feats)
+    if feature_set == "swing":
+        feats.update(swing_features(panel))
+    elif feature_set != "base":
+        raise ValueError(f"unknown feature_set {feature_set!r}")
     close = panel["close"]
     dates = close.index if start is None else close.index[close.index >= pd.Timestamp(start)]
     dates = dates[::step]
@@ -88,6 +165,7 @@ def build_dataset(
     cols["hold_ret"] = forward_returns(close, step).reindex(dates).stack()
     cols["fwd_vs"] = vol_scaled_forward(close, horizon).reindex(dates).stack()
     cols["y_rank"] = xs_rank(fwd).stack()
+    cols["y_vs_rank"] = xs_rank(vol_scaled_forward(close, horizon).reindex(dates)).stack()
     X = pd.concat(cols, axis=1)
     X.index.names = ["date", "ticker"]
     X = X.dropna(subset=["fwd_ret"])
@@ -96,4 +174,5 @@ def build_dataset(
     feat_cols = list(feats)
     X[feat_cols] = X[feat_cols].fillna(0.5)
     X.attrs["features"] = feat_cols
+    X.attrs["base_features"] = base_cols
     return X
