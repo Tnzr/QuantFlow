@@ -250,3 +250,60 @@ def policy_for_intent(intent_id: int, db_path: str = "sqlite:///quantflow.db") -
         )
         rows = s.execute(q).all()
         return pd.DataFrame(rows, columns=[c.key for c in q.selected_columns])
+
+
+def _pit_frame(model, as_of=None, topics=None, limit: int = 500, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    """Point-in-time read: only rows with ``created_at <= as_of`` are visible."""
+    from .persistence import Base
+
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[model.__table__])
+    with Session(engine) as s:
+        q = select(model)
+        if as_of is not None:
+            q = q.where(model.created_at <= pd.Timestamp(as_of).to_pydatetime().replace(tzinfo=None))
+        if topics:
+            q = q.where(model.ticker_or_topic.in_([str(t) for t in topics]))
+        q = q.order_by(desc(model.created_at)).limit(limit)
+        rows = s.execute(q).scalars().all()
+        cols = [c.key for c in model.__table__.columns]
+        return pd.DataFrame([{c: getattr(r, c) for c in cols} for r in rows], columns=cols)
+
+
+def election_events_as_of(as_of=None, topics=None, limit: int = 500, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    from .persistence import ElectionEvent
+
+    return _pit_frame(ElectionEvent, as_of, topics, limit, db_path)
+
+
+def sentiment_snapshots_as_of(as_of=None, topics=None, limit: int = 500, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    from .persistence import SentimentSnapshot
+
+    return _pit_frame(SentimentSnapshot, as_of, topics, limit, db_path)
+
+
+def recent_agent_states(ticker: str | None = None, run_id: str | None = None, limit: int = 200, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    from .persistence import AgentStateSnapshot, Base
+
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[AgentStateSnapshot.__table__])
+    with Session(engine) as s:
+        q = select(AgentStateSnapshot)
+        if ticker:
+            q = q.where(AgentStateSnapshot.ticker == ticker.upper())
+        if run_id:
+            q = q.where(AgentStateSnapshot.run_id == run_id)
+        rows = s.execute(q.order_by(desc(AgentStateSnapshot.created_at)).limit(limit)).scalars().all()
+        cols = [c.key for c in AgentStateSnapshot.__table__.columns]
+        return pd.DataFrame([{c: getattr(r, c) for c in cols} for r in rows], columns=cols)
+
+
+def recent_allocation_proposals(limit: int = 50, db_path: str = "sqlite:///quantflow.db") -> pd.DataFrame:
+    from .persistence import AllocationProposalRecord, Base
+
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[AllocationProposalRecord.__table__])
+    with Session(engine) as s:
+        rows = s.execute(select(AllocationProposalRecord).order_by(desc(AllocationProposalRecord.created_at)).limit(limit)).scalars().all()
+        cols = [c.key for c in AllocationProposalRecord.__table__.columns]
+        return pd.DataFrame([{c: getattr(r, c) for c in cols} for r in rows], columns=cols)

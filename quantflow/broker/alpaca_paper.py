@@ -117,13 +117,23 @@ class AlpacaPaperTrading:
                     order_type: str = "market",
                     limit_price: Optional[float] = None,
                     stop_loss_pct: Optional[float] = None,
-                    take_profit_pct: Optional[float] = None) -> OrderResult:
-        """Place a paper trade order."""
+                    take_profit_pct: Optional[float] = None,
+                    enforce_risk: Optional[bool] = None) -> OrderResult:
+        """Place a paper trade order.
+
+        Unless disabled (``enforce_risk=False`` or QUANTFLOW_ENFORCE_RISK_GUARDS=false),
+        the order is rejected with ``RiskGuardError`` when expected slippage vs the quote
+        mid exceeds 2% or worst-case loss exceeds 1% of account equity.
+        """
         if os.environ.get("QUANTFLOW_DEMO_MODE", "").lower() in ("1", "true"):
             return OrderResult(id="demo-001", ticker=ticker, side=side,
                              qty=qty, type=order_type, status="demo_filled",
                              filled_price=100.0)
         self._require_keys()
+        if enforce_risk is None:
+            enforce_risk = os.environ.get("QUANTFLOW_ENFORCE_RISK_GUARDS", "true").lower() not in ("0", "false")
+        if enforce_risk:
+            self.check_risk(ticker, side, qty, limit_price=limit_price, stop_loss_pct=stop_loss_pct)
 
         data = {
             "symbol": ticker, "qty": str(qty), "side": side,
@@ -163,6 +173,34 @@ class AlpacaPaperTrading:
             status=order["status"],
             filled_price=float(order.get("filled_avg_price") or 0)
         )
+
+    def check_risk(self, ticker: str, side: str, qty: float,
+                   limit_price: Optional[float] = None,
+                   stop_loss_pct: Optional[float] = None,
+                   max_loss_per_unit: Optional[float] = None):
+        """Run pre-trade risk guards; raises ``RiskGuardError`` when blocked."""
+        from ..execution.risk_guards import RiskGuardError, check_order_risk
+
+        quote = self.get_last_quote(ticker)
+        bid, ask = float(quote.get("bid") or 0), float(quote.get("ask") or 0)
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else None
+        if mid is None:
+            trade = self.get_last_trade(ticker)
+            mid = float(trade.get("price") or 0) or None
+        side_l = side.lower()
+        expected = limit_price or ((ask if side_l == "buy" else bid) if bid > 0 and ask > 0 else mid)
+        if not expected or expected <= 0:
+            raise RuntimeError(f"Could not determine entry price for {ticker}")
+        stop_price = None
+        if stop_loss_pct:
+            stop_price = expected * (1 - stop_loss_pct) if side_l == "buy" else expected * (1 + stop_loss_pct)
+        check = check_order_risk(
+            side_l, qty, expected, self.get_account().equity,
+            reference_price=mid, stop_price=stop_price, max_loss_per_unit=max_loss_per_unit,
+        )
+        if not check.allow:
+            raise RiskGuardError(check)
+        return check
 
     def cancel_order(self, order_id: str) -> bool:
         if not self.enabled:

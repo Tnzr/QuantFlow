@@ -366,3 +366,172 @@ def _parse_percent(x):
         return float(s) / 100.0
     except Exception:
         return None
+
+
+class ElectionEvent(Base):
+    __tablename__ = "election_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    ticker_or_topic: Mapped[str] = mapped_column(String(64), index=True)
+    polarity_score: Mapped[float] = mapped_column(Float)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+
+class SentimentSnapshot(Base):
+    __tablename__ = "sentiment_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    ticker_or_topic: Mapped[str] = mapped_column(String(64), index=True)
+    polarity_score: Mapped[float] = mapped_column(Float)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    n_items: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AgentStateSnapshot(Base):
+    """Point-in-time agent state, keyed by the bar timestamp it was computed for."""
+
+    __tablename__ = "agent_state_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime, index=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    horizon: Mapped[str] = mapped_column(String(8))
+    base_confidence: Mapped[float] = mapped_column(Float)
+    agent_confidence: Mapped[float] = mapped_column(Float)
+    final_confidence: Mapped[float] = mapped_column(Float)
+    override_applied: Mapped[int] = mapped_column(Integer, default=0)
+    volatility_triggered: Mapped[int] = mapped_column(Integer, default=0)
+    sentiment_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    state_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class AllocationProposalRecord(Base):
+    __tablename__ = "allocation_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    proposal_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    structure: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(Text)
+    public_key: Mapped[str] = mapped_column(Text)
+    published: Mapped[int] = mapped_column(Integer, default=0)
+    publish_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+def _event_kwargs(item: dict) -> dict:
+    created_at = item.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            created_at = None
+    elif isinstance(created_at, datetime) and created_at.tzinfo is not None:
+        created_at = created_at.replace(tzinfo=None)
+    return {
+        "created_at": created_at or datetime.utcnow(),
+        "source": str(item.get("source", "unknown"))[:64],
+        "ticker_or_topic": str(item.get("ticker_or_topic", "macro"))[:64],
+        "polarity_score": float(item.get("polarity_score") or 0.0),
+        "rationale": item.get("rationale"),
+    }
+
+
+def save_election_events(events: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> int:
+    """Persist election/macro news events; rows with a known ``dedupe_key`` are skipped."""
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[ElectionEvent.__table__])
+    saved = 0
+    with Session(engine) as s:
+        seen = {k for (k,) in s.query(ElectionEvent.dedupe_key).filter(ElectionEvent.dedupe_key.isnot(None))}
+        for item in events:
+            key = item.get("dedupe_key")
+            if key and key in seen:
+                continue
+            s.add(ElectionEvent(**_event_kwargs(item), title=item.get("title"), url=item.get("url"), dedupe_key=key))
+            if key:
+                seen.add(key)
+            saved += 1
+        s.commit()
+    return saved
+
+
+def save_sentiment_snapshots(snapshots: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> int:
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[SentimentSnapshot.__table__])
+    saved = 0
+    with Session(engine) as s:
+        for item in snapshots:
+            s.add(
+                SentimentSnapshot(
+                    **_event_kwargs(item),
+                    probability=_safe_float(item.get("probability")),
+                    n_items=int(item.get("n_items") or 0),
+                )
+            )
+            saved += 1
+        s.commit()
+    return saved
+
+
+def save_agent_states(states: Iterable[dict], db_path: str = "sqlite:///quantflow.db") -> int:
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[AgentStateSnapshot.__table__])
+    saved = 0
+    with Session(engine) as s:
+        for st in states:
+            s.add(
+                AgentStateSnapshot(
+                    as_of=st["as_of"],
+                    run_id=str(st.get("run_id", "live")),
+                    ticker=str(st["ticker"]).upper(),
+                    horizon=str(st.get("horizon", "1w")),
+                    base_confidence=float(st["base_confidence"]),
+                    agent_confidence=float(st["agent_confidence"]),
+                    final_confidence=float(st["final_confidence"]),
+                    override_applied=int(bool(st.get("override_applied"))),
+                    volatility_triggered=int(bool(st.get("volatility_triggered"))),
+                    sentiment_multiplier=float(st.get("sentiment_multiplier", 1.0)),
+                    state_json=json.dumps(st.get("state") or {}, default=str),
+                )
+            )
+            saved += 1
+        s.commit()
+    return saved
+
+
+def save_allocation_proposal(
+    proposal: dict,
+    db_path: str = "sqlite:///quantflow.db",
+    *,
+    published: bool = False,
+    publish_error: Optional[str] = None,
+) -> None:
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine, tables=[AllocationProposalRecord.__table__])
+    payload = {k: v for k, v in proposal.items() if k not in ("signature", "public_key")}
+    with Session(engine) as s:
+        s.add(
+            AllocationProposalRecord(
+                proposal_id=str(proposal["proposal_id"]),
+                ticker=str(proposal["ticker"]).upper(),
+                structure=str(proposal["structure"]),
+                payload_json=json.dumps(payload, default=str, sort_keys=True),
+                signature=str(proposal["signature"]),
+                public_key=str(proposal.get("public_key", "")),
+                published=int(published),
+                publish_error=publish_error,
+            )
+        )
+        s.commit()

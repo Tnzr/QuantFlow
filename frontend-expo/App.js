@@ -21,6 +21,7 @@ import TradeScreen from "./screens/TradeScreen";
 import MarketScreen from "./screens/MarketScreen";
 import BacktestScreen from "./screens/BacktestScreen";
 import SettingsScreen from "./screens/SettingsScreen";
+import WarRoomScreen from "./screens/WarRoomScreen";
 import ChatSidebar from "./components/chatbot/ChatSidebar";
 
 const TABS = [
@@ -28,6 +29,7 @@ const TABS = [
   { key: "trade", label: "Trade", icon: "T" },
   { key: "market", label: "Market", icon: "M" },
   { key: "backtest", label: "Backtest", icon: "B" },
+  { key: "warroom", label: "War Room", icon: "W" },
   { key: "settings", label: "Settings", icon: "S" },
 ];
 
@@ -195,6 +197,9 @@ export default function App() {
           </View>
           <View style={[styles.screenPanel, activeTab === "backtest" ? styles.screenShow : styles.screenHide]}>
             <BacktestScreen token={token} />
+          </View>
+          <View style={[styles.screenPanel, activeTab === "warroom" ? styles.screenShow : styles.screenHide]}>
+            <WarRoomScreen token={token} />
           </View>
           <View style={[styles.screenPanel, activeTab === "settings" ? styles.screenShow : styles.screenHide]}>
             <SettingsScreen token={token} />

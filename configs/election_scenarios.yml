@@ -1,0 +1,42 @@
+# Policy hypotheses for the 2026 midterm "president's party (R) loses the Senate" scenario.
+# These are *hypotheses*; quantflow.election.scenarios ranks them against historical
+# post-midterm event studies and live price/IV data before anything is proposed.
+scenario: pres_party_loses_senate
+election_day: "2026-11-03"
+benchmark: SPY
+baskets:
+  managed_care_hospitals:
+    side: long
+    topic: healthcare
+    tickers: [XLV, IHF, HCA, UHS, CNC, MOH]
+    thesis: Democratic Senate blocks Medicaid cuts and pushes ACA subsidy extensions, supporting hospital volumes and exchange enrollment.
+  clean_energy:
+    side: long
+    topic: energy
+    tickers: [TAN, ICLN, FSLR, ENPH]
+    thesis: Remaining IRA credits become harder to repeal; gridlock removes further legislative downside.
+  broad_beta_post_midterm:
+    side: long
+    topic: fiscal
+    tickers: [SPY, QQQ, IWM]
+    thesis: Midterm-to-pre-election-year seasonality; gridlock lowers fiscal-policy tail risk once the result is known.
+  private_prisons_enforcement:
+    side: short
+    topic: immigration
+    tickers: [GEO, CXW]
+    thesis: Senate appropriations and oversight constrain detention funding growth.
+  defense_primes:
+    side: short
+    topic: defense
+    tickers: [ITA, LMT, NOC, GD]
+    thesis: Continuing resolutions and budget fights cap topline growth versus a unified-government reconciliation path.
+  oil_gas_producers:
+    side: short
+    topic: energy
+    tickers: [XOP, XLE]
+    thesis: Legislative support for leasing/permitting expansion stalls; executive actions remain but are less durable.
+  regional_banks_dereg:
+    side: short
+    topic: financials
+    tickers: [KRE, XLF]
+    thesis: Deregulatory legislation stalls; oversight of bank capital rules increases.

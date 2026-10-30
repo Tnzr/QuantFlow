@@ -59,3 +59,18 @@ leaps_quality:
   EPS growthqtr over qtr: Positive (>0%)
   Sales growthqtr over qtr: Positive (>0%)
   200-Day Simple Moving Average: Price above SMA200
+election_energy:
+  Sector: Energy
+  Average Volume: Over 500K
+  Option/Short: Optionable
+  Price: Over $5
+election_healthcare:
+  Sector: Healthcare
+  Average Volume: Over 500K
+  Option/Short: Optionable
+  Market Cap.: +Mid (over $2bln)
+election_defense:
+  Industry: Aerospace & Defense
+  Average Volume: Over 300K
+  Option/Short: Optionable
+  Price: Over $5

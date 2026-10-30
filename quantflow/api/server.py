@@ -26,7 +26,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from urllib import request as urlrequest, error as urlerror, parse as urlparse
 from fastapi.responses import HTMLResponse
 from urllib import request as urlrequest, error as urlerror, parse as urlparse
@@ -43,6 +43,7 @@ from ..portfolio.evaluator import evaluate_positions
 from ..execution.policy import ExecutionPolicy, evaluate_order_intent
 from ..execution.audit import audit_intent, audit_event, audit_policy
 from .auth import require_write_auth, require_firebase_user
+from ..execution.risk_guards import RiskGuardError
 from .user_settings import load_user_settings, save_user_settings, UserSettingsStoreError
 from ..data.finviz_client import PRESETS, run_screener, run_screeners_parallel, get_scraping_runtime_config
 from ..data.persistence import save_finviz_snapshot, save_recommendations, save_analytics_leaderboard
@@ -69,6 +70,10 @@ from ..mcp import get_mcp_manager, _demo_portfolio, _demo_quote, is_demo_mode as
 
 
 app = FastAPI(title="QuantFlow API", version="0.1.0")
+
+from .election_routes import router as election_router  # noqa: E402
+
+app.include_router(election_router)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1991,6 +1996,8 @@ def trade_paper(req: PaperTradeRequest, _auth: dict = Depends(require_write_auth
             take_profit_pct=req.take_profit if req.take_profit is not None else 0,
         )
         return {"ok": True, "order": result.__dict__ if hasattr(result, "__dict__") else result}
+    except RiskGuardError as e:
+        raise HTTPException(status_code=422, detail={"blocked": True, **e.check.to_dict()})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
