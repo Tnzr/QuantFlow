@@ -104,6 +104,7 @@ def load_daily(ticker: str, start: str = "2005-01-01", end: str | None = None, s
     if path.exists() and not refresh and not _stale(path, end is None):
         df = pd.read_parquet(path)
         return df, str(df.attrs.get("source", source))
+    fallback = path if path.exists() and not refresh else None
     df, used = pd.DataFrame(), source
     if source in ("auto", "alpaca"):
         try:
@@ -118,6 +119,10 @@ def load_daily(ticker: str, start: str = "2005-01-01", end: str | None = None, s
             df = df[df.index < pd.Timestamp.now().normalize()]
         df.attrs["source"] = used
         df.to_parquet(path)
+    elif fallback is not None:
+        log.warning("refresh failed for %s; using stale cache %s", ticker, fallback.name)
+        df = pd.read_parquet(fallback)
+        used = str(df.attrs.get("source", source))
     return df, used
 
 
@@ -145,8 +150,16 @@ def load_fred(series_id: str, publication_lag_days: int = 1, refresh: bool = Fal
     if path.exists() and not refresh and not _stale(path, True):
         s = pd.read_parquet(path).iloc[:, 0]
     else:
-        resp = requests.get(FRED_CSV, params={"id": series_id}, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp = requests.get(FRED_CSV, params={"id": series_id}, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException:
+            if not path.exists() or refresh:
+                raise
+            log.warning("FRED refresh failed for %s; using stale cache", series_id)
+            s = pd.read_parquet(path).iloc[:, 0]
+            s.index = pd.DatetimeIndex(s.index) + pd.Timedelta(days=publication_lag_days)
+            return s
         df = pd.read_csv(io.StringIO(resp.text))
         date_col = "observation_date" if "observation_date" in df.columns else df.columns[0]
         s = pd.to_numeric(df[series_id], errors="coerce")

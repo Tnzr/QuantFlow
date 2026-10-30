@@ -13,7 +13,8 @@ class CostModel:
     """Per-rebalance costs, all in basis points of traded notional.
 
     ``impact_coef`` scales a square-root market-impact term by participation
-    (traded notional / average daily dollar volume). ``borrow_bps_annual`` is
+    (traded notional / average daily dollar volume). Names with unknown ADV
+    are charged as the least liquid known name, capped at ``fallback_adv_dollars``. ``borrow_bps_annual`` is
     charged on short notional per period held.
     """
 
@@ -22,6 +23,7 @@ class CostModel:
     commission_bps: float = 0.0
     borrow_bps_annual: float = 50.0
     impact_coef: float = 10.0
+    fallback_adv_dollars: float = 1e6
     periods_per_year: int = 52
 
     @property
@@ -38,7 +40,11 @@ class CostModel:
         traded = trades.abs()
         cost = traded.sum() * self.linear_bps / 1e4
         if capital and adv_dollars is not None and self.impact_coef:
-            part = (traded * capital / adv_dollars.reindex(traded.index)).fillna(0.0).clip(lower=0)
+            # unknown liquidity: assume the thinnest name seen that date, or a conservative floor
+            adv = adv_dollars.reindex(traded.index).where(lambda a: a > 0)
+            known_min = adv.min()
+            floor = min(known_min, self.fallback_adv_dollars) if pd.notna(known_min) else self.fallback_adv_dollars
+            part = (traded * capital / adv.fillna(floor)).clip(lower=0)
             cost += float((traded * self.impact_coef / 1e4 * np.sqrt(part)).sum())
         return float(cost)
 

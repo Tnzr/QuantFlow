@@ -209,3 +209,28 @@ def test_market_impact_charged_for_thin_liquidity():
     thin = cm.trading_cost(trades, 10_000, pd.Series({"thin": 1e4, "deep": 1e9}))
     deep = cm.trading_cost(trades.rename({"thin": "deep", "deep": "thin"}), 10_000, pd.Series({"thin": 1e4, "deep": 1e9}))
     assert thin > deep > 0
+
+
+def test_unknown_adv_is_charged_conservatively():
+    cm = CostModel(0, 0, 0, 0, impact_coef=10.0)
+    trades = pd.Series({"new": 1.0, "old": 0.0})
+    assert cm.trading_cost(trades, 10_000, pd.Series({"new": np.nan, "old": 1e8})) > 0
+    assert cm.trading_cost(trades, 10_000, pd.Series({"new": np.nan, "old": np.nan})) > 0
+
+
+def test_stale_cache_served_when_refresh_fails(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from quantflow.research import data
+
+    monkeypatch.setenv("QUANTFLOW_RESEARCH_CACHE", str(tmp_path))
+    bars = pd.DataFrame({f: [1.0, 2.0] for f in data.FIELDS}, index=pd.bdate_range("2024-01-01", periods=2))
+    bars.attrs["source"] = "yfinance"
+    path = tmp_path / "SPY_yfinance_2005-01-01_latest.parquet"
+    bars.to_parquet(path)
+    old = time.time() - 3 * 86400
+    os.utime(path, (old, old))
+    monkeypatch.setattr(data, "_yfinance_daily", lambda *a: pd.DataFrame())
+    df, used = data.load_daily("SPY", source="yfinance")
+    assert len(df) == 2 and used == "yfinance"
