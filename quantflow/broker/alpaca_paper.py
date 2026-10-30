@@ -225,8 +225,9 @@ class AlpacaPaperTrading:
         """Limit order for one option contract (OCC symbol), day TIF, paper account only.
 
         Buys are buy-to-open and pass the 1% cap with ``max_loss_per_unit = limit_price * 100``.
-        Sells are only allowed to close an existing long position of at least ``qty`` contracts;
-        opening short options (undefined risk) is rejected. ``client_order_id`` makes retries
+        Sells are only allowed to close an existing long position: held contracts minus the remaining
+        quantity of open sell orders for the same contract must cover ``qty``; opening short options
+        (undefined risk) is rejected. ``client_order_id`` makes retries
         idempotent at the broker.
         """
         from ..execution.risk_guards import MAX_RISK_PCT, MAX_SLIPPAGE_PCT, RiskCheck, RiskGuardError, check_order_risk
@@ -245,9 +246,14 @@ class AlpacaPaperTrading:
                 raise RiskGuardError(check)
         else:
             held = next((p.shares for p in self.get_positions() if p.ticker.upper() == contract.upper()), 0)
-            if held < qty:
+            pending = sum(float(o.get("qty") or 0) - float(o.get("filled_qty") or 0)
+                          for o in self.get_orders(status="open", limit=500)
+                          if str(o.get("symbol", "")).upper() == contract.upper() and o.get("side") == "sell")
+            available = held - pending
+            if available < qty:
                 raise RiskGuardError(RiskCheck(
-                    False, f"sell {qty} {contract} would open a short option (long held: {held}); only closing sells allowed",
+                    False, f"sell {qty} {contract} would open a short option (long held {held}, "
+                    f"{pending:g} already in open sell orders); only closing sells allowed",
                     None, 0.0, None, MAX_SLIPPAGE_PCT, MAX_RISK_PCT, 0.0))
         data = {"symbol": contract, "qty": str(int(qty)), "side": side, "type": "limit",
                 "limit_price": str(round(limit_price, 2)), "time_in_force": "day"}

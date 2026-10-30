@@ -220,8 +220,10 @@ def test_option_sell_to_open_is_blocked(monkeypatch):
     br = AlpacaPaperTrading.__new__(AlpacaPaperTrading)
     monkeypatch.delenv("QUANTFLOW_DEMO_MODE", raising=False)
     monkeypatch.setattr(br, "_require_keys", lambda: None, raising=False)
-    monkeypatch.setattr(br, "get_positions", lambda: [type("P", (), {"ticker": "AAA261218C00100000", "shares": 1})()],
+    monkeypatch.setattr(br, "get_positions", lambda: [type("P", (), {"ticker": "AAA261218C00100000", "shares": 2})()],
                         raising=False)
+    monkeypatch.setattr(br, "get_orders", lambda status="all", limit=50: [
+        {"symbol": "AAA261218C00100000", "side": "sell", "qty": "1", "filled_qty": "0"}], raising=False)
     sent = []
     monkeypatch.setattr(br, "_post", lambda path, data: sent.append(data) or {"id": "1", "symbol": data["symbol"],
                         "side": "sell", "qty": data["qty"], "type": "limit", "status": "accepted"}, raising=False)
@@ -248,6 +250,9 @@ def test_top_n_affordable_skips_unaffordable_and_keeps_sectors_diverse():
     fit = lambda sym, side, budget: {"structure": None} if sym == "C" else {"structure": "long_call", "qty": 1}
     picked = impact.top_n_affordable(rows, n=3, budget=100, fit_fn=fit)
     assert [r.symbol for r, _ in picked] == ["A", "D", "E"]
+    fit2 = lambda sym, side, budget: {"structure": "vertical_debit" if sym == "A" else "long_call", "qty": 1}
+    assert impact.top_n_affordable(rows, n=2, budget=100, fit_fn=fit2)[0][0].symbol == "A"
+    assert [r.symbol for r, _ in impact.top_n_affordable(rows, n=2, budget=100, fit_fn=fit2, executable_only=True)] == ["B", "C"]
 
 
 def test_affordable_universe_has_benchmarks_and_many_sectors():

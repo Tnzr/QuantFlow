@@ -62,6 +62,7 @@ AFFORDABLE: dict[str, tuple[str, str]] = {
     "XLU": ("SPY", "utilities"), "XLP": ("SPY", "staples"),
 }
 UNIVERSES = {"core": CANDIDATES, "affordable": AFFORDABLE}
+EXECUTABLE = ("long_call", "long_put")
 WINDOWS = {"5d": 5, "21d": 21}
 VOL_LOOKBACK = 126
 MIN_ELECTIONS = 4
@@ -206,9 +207,11 @@ def top_n_affordable(
     fit_fn=None,
     max_per_group: int = 1,
     min_swing_ratio: float = 1.0,
+    executable_only: bool = False,
 ) -> list[tuple[ImpactRow, dict]]:
     """Like ``top_n`` but only keeps symbols where a long call/put (or debit vertical) in the
-    projected direction fits ``budget``. ``fit_fn(symbol, side, budget) -> structure dict``."""
+    projected direction fits ``budget``. ``fit_fn(symbol, side, budget) -> structure dict``.
+    ``executable_only`` drops vertical-only symbols (paper execution is single-leg only)."""
     if fit_fn is None:
         fit_fn = _live_fit
     picked, seen = [], {}
@@ -216,7 +219,7 @@ def top_n_affordable(
         if seen.get(r.group, 0) >= max_per_group or (np.isfinite(r.swing_ratio) and r.swing_ratio < min_swing_ratio):
             continue
         st = fit_fn(r.symbol, "long" if r.projected_z > 0 else "short", budget)
-        if not st.get("structure"):
+        if not st.get("structure") or (executable_only and st["structure"] not in EXECUTABLE):
             continue
         picked.append((r, st))
         seen[r.group] = seen.get(r.group, 0) + 1

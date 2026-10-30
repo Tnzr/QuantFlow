@@ -750,11 +750,12 @@ def cmd_research_ladder(args):
     print(text)
 
 
-def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0):
+def _playbook_watch(n: int, universe: str = "affordable", budget: float = 100.0, executable_only: bool = False):
     from .playbook.tracker import build_watchlist, senate_odds
 
     p = senate_odds()
-    rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget or None)
+    rows = build_watchlist(p if p is not None else 0.5, n, universe=universe, budget=budget or None,
+                           executable_only=executable_only)
     return p, [r.to_dict() for r in rows]
 
 
@@ -778,7 +779,8 @@ def cmd_playbook_screen(args):
 def cmd_playbook_cycle(args):
     import time as _time
 
-    from .playbook.tracker import resolve_outcome, run_cycle
+    from .execution.risk_guards import MAX_RISK_PCT
+    from .playbook.tracker import execution_budget, resolve_outcome, run_cycle
 
     broker = None
     if args.execute:
@@ -786,7 +788,8 @@ def cmd_playbook_cycle(args):
 
         broker = AlpacaPaperTrading()
     while True:
-        p, rows = _playbook_watch(args.n, args.universe, args.equity * 0.01)
+        budget = execution_budget(broker) if broker is not None else args.equity * MAX_RISK_PCT
+        p, rows = _playbook_watch(args.n, args.universe, budget, executable_only=broker is not None)
         outcome = resolve_outcome(p, args.outcome)
         res = run_cycle(rows, outcome, db_path=args.db, equity=args.equity, execute=args.execute, broker=broker)
         print(f"outcome={outcome} p_dem={p}")

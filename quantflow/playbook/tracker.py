@@ -46,14 +46,16 @@ def senate_odds() -> float | None:
 
 
 def build_watchlist(p_dem: float, n: int = 5, closes: pd.DataFrame | None = None, universe: str = "affordable",
-                    budget: float | None = DEFAULT_EQUITY * MAX_RISK_PCT, fit_fn=None) -> list[ImpactRow]:
+                    budget: float | None = DEFAULT_EQUITY * MAX_RISK_PCT, fit_fn=None,
+                    executable_only: bool = False) -> list[ImpactRow]:
     """Top-``n`` sector-diverse symbols. With ``budget`` set, only symbols where a long call/put
-    (or debit vertical) in the projected direction costs <= budget are kept."""
+    (or debit vertical, unless ``executable_only``) in the projected direction costs <= budget are kept.
+    For execute mode pass the same broker-derived budget that ``run_cycle`` will size with."""
     cands = UNIVERSES[universe]
     closes = closes if closes is not None else load_closes(candidates=cands)
     rows = screen(closes, p_dem, cands)
     if budget:
-        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn)]
+        return [r for r, _ in top_n_affordable(rows, n, budget, fit_fn, executable_only=executable_only)]
     return top_n(rows, n)
 
 
@@ -66,6 +68,11 @@ def _bars(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame
         log.warning("bars %s %s: %s", symbol, interval, exc)
         return None
     return df.dropna(subset=["close"]) if df is not None and not df.empty else None
+
+
+def execution_budget(broker, risk_pct: float = MAX_RISK_PCT) -> float:
+    """Per-trade option budget from the broker account, matching ``run_cycle``'s execute-mode sizing."""
+    return float(broker.get_account().equity) * risk_pct
 
 
 def notify(alert: dict) -> None:
