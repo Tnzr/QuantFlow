@@ -89,11 +89,11 @@ def rolling_sharpe(pnl, keys, path, window=52):
     return _save(fig, path)
 
 
-def rolling_ic(ic, key, path, window=52):
+def rolling_ic(ic, key, path, window=52, overlap=1):
     s = ic.xs(key, level=0)
     s.index = pd.DatetimeIndex(s.index)
     m = s.rolling(window).mean()
-    se = s.rolling(window).std() / np.sqrt(window)
+    se = s.rolling(window).std() / np.sqrt(window / max(1, overlap))
     fig, ax = plt.subplots(figsize=(8, 3.4))
     ax.bar(s.index, s, width=5, color=np.where(s > 0, "#93c5fd", "#fca5a5"), lw=0)
     ax.plot(m.index, m, color=PALETTE[0], lw=1.6, label=f"{window}-week mean")
@@ -112,17 +112,20 @@ def rolling_ic(ic, key, path, window=52):
     return _save(fig, path)
 
 
-def ic_term_structure(results, names, path):
+def ic_term_structure(results, ic, names, path):
+    """Mean OOS IC per horizon; CI uses non-overlapping dates (every K-th) so overlap does not shrink it."""
     hz = sorted(int(h) for h in results["horizons"])
     fig, ax = plt.subplots(figsize=(7.5, 3.6))
     w = 0.8 / len(names)
     for i, n in enumerate(names):
         mu, ci = [], []
         for h in hz:
-            r = results["horizons"][str(h)].get(n, {})
-            m, t = r.get("ic_mean", np.nan), r.get("ic_t", np.nan)
-            mu.append(m)
-            ci.append(1.96 * abs(m / t) if t else np.nan)
+            key = f"h{h}|{n}"
+            s = ic.xs(key, level=0).dropna() if key in ic.index.get_level_values(0) else pd.Series(dtype=float)
+            k = results["horizons"][str(h)]["tranches"]
+            nono = s.iloc[::k]
+            mu.append(s.mean())
+            ci.append(1.96 * nono.std() / np.sqrt(len(nono)) if len(nono) > 2 else np.nan)
         x = np.arange(len(hz)) + (i - (len(names) - 1) / 2) * w
         ax.bar(x, mu, w * 0.9, yerr=ci, capsize=3, color=PALETTE[i % 8], label=n.split(":", 1)[1].replace("_", " "))
     for j, h in enumerate(hz):
@@ -232,6 +235,7 @@ def turnover_frontier(results, path, names):
                 continue
             x0, y0 = r["net_untranched"]["turnover"], r["net_untranched"]["sharpe"]
             x1, y1 = r["net"]["turnover"], r["net"]["sharpe"]
+            ax.scatter([x0], [y0], facecolors="none", edgecolors=PALETTE[i % 8], s=18, alpha=0.6)
             ax.annotate("", (x1, y1), (x0, y0), arrowprops={"arrowstyle": "->", "color": PALETTE[i % 8], "alpha": 0.6})
             ax.scatter([x1], [y1], color=PALETTE[i % 8], s=24, label=n.split(":", 1)[1].replace("_", " ") if h == min(results["horizons"]) else None)
             ax.text(x1, y1, f" {h}d", fontsize=7)
@@ -239,7 +243,7 @@ def turnover_frontier(results, path, names):
     ax.set_xscale("log")
     ax.set_xlabel("weekly turnover (log)")
     ax.set_ylabel("net Sharpe")
-    ax.set_title("Turnover vs net Sharpe: arrows show the effect of staggered tranches")
+    ax.set_title("Turnover vs net Sharpe: hollow = weekly rebalance, filled = staggered tranches")
     ax.legend(loc="lower left", ncol=2)
     return _save(fig, path)
 
@@ -279,8 +283,9 @@ def make_all(artifact_dir: Path, fig_dir: Path) -> dict[str, Path]:
     out = {
         "equity": equity_drawdown(pnl, list(dict.fromkeys([best, *core, *bh])), fig_dir / "equity.png"),
         "rolling_sharpe": rolling_sharpe(pnl, [best, *bh[-1:]], fig_dir / "rolling_sharpe.png"),
-        "rolling_ic": rolling_ic(a["ic"], f"h{ah}|model:gbm_swing", fig_dir / "rolling_ic.png"),
-        "term_structure": ic_term_structure(res, names, fig_dir / "term_structure.png"),
+        "rolling_ic": rolling_ic(a["ic"], f"h{ah}|model:gbm_swing", fig_dir / "rolling_ic.png",
+                                overlap=res["horizons"][ah]["tranches"]),
+        "term_structure": ic_term_structure(res, a["ic"], names, fig_dir / "term_structure.png"),
         "quantiles": quantile_bars(a["quantiles"], core, fig_dir / "quantiles.png"),
         "cost": cost_sensitivity(pnl, core, fig_dir / "cost.png"),
         "bootstrap": bootstrap_vs_null(pnl, res, list(dict.fromkeys([*core, best, *bh])), fig_dir / "bootstrap.png"),
